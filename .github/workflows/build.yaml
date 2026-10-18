@@ -234,7 +234,7 @@ jobs:
           Copy-Item -Path "${{ github.workspace }}\gcdb\LICENSE"                -Destination "$licensesDir\SDL_GameControllerDB-LICENSE"
           Copy-Item -Path "${{ github.workspace }}\gcdb\gamecontrollerdb.txt"   -Destination ".\gamecontrollerdb.txt"
 
-          Invoke-WebRequest -Uri "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2607/dxc_2026_07_29.zip" -OutFile dxc.zip
+          Invoke-WebRequest -Uri "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip" -OutFile dxc.zip
           Expand-Archive -Path dxc.zip -DestinationPath .\dxc
 
           $items = @()
