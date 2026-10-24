@@ -28,8 +28,17 @@ CMRC_DECLARE(Ymir_sdl3_rc);
 #include <fmt/format.h>
 #include <lz4.h>
 #include <nghttp2/nghttp2ver.h>
+// HTTP/3 libraries are not part of the slim curl build used on some platforms (e.g. iOS)
+#if __has_include(<nghttp3/version.h>)
 #include <nghttp3/version.h>
+#else
+#define NGHTTP3_VERSION "n/a"
+#endif
+#if __has_include(<ngtcp2/version.h>)
 #include <ngtcp2/version.h>
+#else
+#define NGTCP2_VERSION "n/a"
+#endif
 #include <nlohmann/json.hpp>
 #include <openssl/opensslv.h>
 #include <rtmidi/RtMidi.h>
