@@ -39,6 +39,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (BOOL)boolForKey:(NSString *)key defaultValue:(BOOL)defaultValue NS_SWIFT_NAME(boolValue(key:default:));
 + (void)setBool:(BOOL)value forKey:(NSString *)key NS_SWIFT_NAME(setBoolValue(_:key:));
++ (NSString *)pathForKey:(NSString *)key NS_SWIFT_NAME(pathValue(key:));
++ (void)setPath:(NSString *)path forKey:(NSString *)key NS_SWIFT_NAME(setPathValue(_:key:));
 + (NSInteger)intForKey:(NSString *)key defaultValue:(NSInteger)defaultValue NS_SWIFT_NAME(intValue(key:default:));
 + (void)setInt:(NSInteger)value forKey:(NSString *)key NS_SWIFT_NAME(setIntValue(_:key:));
 + (float)floatForKey:(NSString *)key defaultValue:(float)defaultValue NS_SWIFT_NAME(floatValue(key:default:));

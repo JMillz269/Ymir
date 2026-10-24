@@ -243,6 +243,35 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
     // -- On-screen controls --
     tables->bools["touch.enabled"] = {hooks.getTouchControls, hooks.setTouchControls};
 
+    host.getPath = [cfg](const std::string &key) -> std::string {
+        if (key == "cartridge.romPath") {
+            return cfg->cartridge.rom.imagePath.string();
+        } else if (key == "cartridge.backupPath") {
+            return cfg->cartridge.backupRAM.imagePath.string();
+        } else if (key == "cdblock.romPath") {
+            return cfg->cdblock.overrideROM ? cfg->cdblock.romPath.string() : std::string{};
+        }
+        return {};
+    };
+    host.setPath = [cfg, ctx](const std::string &key, const std::string &path) {
+        const std::u8string u8path{path.begin(), path.end()};
+        if (key == "cartridge.romPath") {
+            cfg->cartridge.rom.imagePath = u8path;
+            cfg->cartridge.type = Settings::Cartridge::ROM;
+            ctx->EnqueueEvent(events::emu::InsertCartridgeFromSettings());
+        } else if (key == "cartridge.backupPath") {
+            cfg->cartridge.backupRAM.imagePath = u8path;
+            cfg->cartridge.type = Settings::Cartridge::BackupRAM;
+            ctx->EnqueueEvent(events::emu::InsertCartridgeFromSettings());
+        } else if (key == "cdblock.romPath") {
+            cfg->cdblock.overrideROM = true;
+            cfg->cdblock.romPath = u8path;
+            ctx->EnqueueEvent(events::gui::ReloadCDBlockROM());
+        } else {
+            return;
+        }
+        cfg->MakeDirty();
+    };
     host.getBool = [tables](const std::string &key, bool defaultValue) {
         auto it = tables->bools.find(key);
         return it != tables->bools.end() && it->second.get ? it->second.get() : defaultValue;

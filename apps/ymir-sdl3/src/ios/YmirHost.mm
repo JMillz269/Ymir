@@ -181,6 +181,18 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     }
 }
 
++ (NSString *)pathForKey:(NSString *)key {
+    auto &host = app::ios::GetHost();
+    return host.getPath ? ToNSString(host.getPath(key.UTF8String)) : @"";
+}
+
++ (void)setPath:(NSString *)path forKey:(NSString *)key {
+    auto &host = app::ios::GetHost();
+    if (host.setPath) {
+        host.setPath(key.UTF8String, path.UTF8String);
+    }
+}
+
 + (NSInteger)intForKey:(NSString *)key defaultValue:(NSInteger)defaultValue {
     auto &host = app::ios::GetHost();
     return host.getInt ? host.getInt(key.UTF8String, static_cast<int>(defaultValue)) : defaultValue;

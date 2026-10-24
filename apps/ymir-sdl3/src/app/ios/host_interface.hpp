@@ -48,6 +48,8 @@ struct HostInterface {
     std::function<void(const std::string &, bool)> setBool;    // key, value
     std::function<float(const std::string &, float)> getFloat; // key, default
     std::function<void(const std::string &, float)> setFloat;  // key, value
+    std::function<std::string(const std::string &)> getPath;   // key
+    std::function<void(const std::string &, const std::string &)> setPath; // key, absolute path
     std::function<int(const std::string &, int)> getInt;       // key, default (also used for enumerations)
     std::function<void(const std::string &, int)> setInt;      // key, value
 };

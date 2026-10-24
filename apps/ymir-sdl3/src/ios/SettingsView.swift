@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 
 /// Bindings to the emulator's settings. Every value is read from, and written straight to, the emulator.
 final class SettingStore: ObservableObject {
+    static let shared = SettingStore()
+
     func bool(_ key: String, default defaultValue: Bool = false) -> Binding<Bool> {
         Binding(
             get: { YmirHost.boolValue(key: key, default: defaultValue) },
@@ -80,7 +82,7 @@ private func percent(_ value: Double) -> String {
 
 /// The app's settings. Everything that was in the desktop frontend's menus and settings window lives here.
 struct SettingsView: View {
-    @StateObject private var store = SettingStore()
+    @ObservedObject private var store = SettingStore.shared
     @State private var hasBIOS = YmirHost.hasBIOS
     @State private var biosName = YmirHost.biosName
     @State private var showImporter = false
@@ -192,7 +194,6 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .environmentObject(store)
         .onAppear {
             hasBIOS = YmirHost.hasBIOS
             biosName = YmirHost.biosName
@@ -235,7 +236,7 @@ struct SettingsView: View {
 // MARK: - Display
 
 struct DisplaySettingsView: View {
-    @EnvironmentObject private var store: SettingStore
+    @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
         Form {
@@ -292,7 +293,7 @@ struct DisplaySettingsView: View {
 // MARK: - Audio
 
 struct AudioSettingsView: View {
-    @EnvironmentObject private var store: SettingStore
+    @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
         Form {
@@ -326,7 +327,7 @@ struct AudioSettingsView: View {
 // MARK: - Controls
 
 struct ControlsSettingsView: View {
-    @EnvironmentObject private var store: SettingStore
+    @ObservedObject private var store = SettingStore.shared
 
     private static let peripherals = [
         (0, "None"), (1, "Saturn Control Pad"), (2, "Saturn 3D Control Pad"), (3, "Arcade Racer"),
@@ -376,7 +377,7 @@ struct ControlsSettingsView: View {
 // MARK: - Emulation
 
 struct EmulationSettingsView: View {
-    @EnvironmentObject private var store: SettingStore
+    @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
         Form {
@@ -427,7 +428,7 @@ struct EmulationSettingsView: View {
 // MARK: - System
 
 struct SystemSettingsView: View {
-    @EnvironmentObject private var store: SettingStore
+    @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
         Form {
@@ -484,7 +485,7 @@ struct SystemSettingsView: View {
 // MARK: - Cartridge
 
 struct CartridgeSettingsView: View {
-    @EnvironmentObject private var store: SettingStore
+    @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
         Form {
@@ -510,19 +511,24 @@ struct CartridgeSettingsView: View {
                         Text("16 Mbit").tag(2)
                         Text("32 Mbit").tag(3)
                     }
+                    FileSettingRow(title: "Image", key: "cartridge.backupPath",
+                                   folder: AppPaths.documents.appendingPathComponent("backup", isDirectory: true))
                 case 2:
                     Picker("Capacity", selection: store.int("cartridge.dramCapacity")) {
                         Text("48 Mbit").tag(0)
                         Text("32 Mbit").tag(1)
                         Text("8 Mbit").tag(2)
                     }
+                case 3:
+                    FileSettingRow(title: "ROM Image", key: "cartridge.romPath",
+                                   folder: AppPaths.documents.appendingPathComponent("roms/cart", isDirectory: true))
                 default:
                     EmptyView()
                 }
             } header: {
                 Text("Inserted Cartridge")
             } footer: {
-                Text("ROM cartridge and backup RAM images are read from the Ymir folder under roms/cart and backup.")
+                Text("Chosen files are copied into the Ymir folder, under roms/cart and backup.")
             }
         }
         .navigationTitle("Cartridge")
@@ -533,7 +539,7 @@ struct CartridgeSettingsView: View {
 // MARK: - CD drive
 
 struct CDBlockSettingsView: View {
-    @EnvironmentObject private var store: SettingStore
+    @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
         Form {
@@ -546,10 +552,12 @@ struct CDBlockSettingsView: View {
 
             Section {
                 Toggle("Low Level Emulation", isOn: store.bool("cdblock.useLLE"))
+                FileSettingRow(title: "CD Block ROM", key: "cdblock.romPath",
+                               folder: AppPaths.documents.appendingPathComponent("roms/cdb", isDirectory: true))
             } header: {
                 Text("Accuracy")
             } footer: {
-                Text("Emulates the CD block's own CPU. Needs a CD block ROM image in the Ymir folder under roms/cdb, and is much slower.")
+                Text("Emulates the CD block's own CPU. Needs a CD block ROM image, and is much slower.")
             }
         }
         .navigationTitle("CD Drive")
@@ -560,7 +568,7 @@ struct CDBlockSettingsView: View {
 // MARK: - Performance
 
 struct PerformanceSettingsView: View {
-    @EnvironmentObject private var store: SettingStore
+    @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
         Form {
@@ -627,7 +635,7 @@ struct PerformanceSettingsView: View {
 // MARK: - Interface
 
 struct InterfaceSettingsView: View {
-    @EnvironmentObject private var store: SettingStore
+    @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
         Form {
@@ -653,5 +661,53 @@ struct InterfaceSettingsView: View {
         }
         .navigationTitle("Interface")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - File settings
+
+/// A setting that points to a file (a cartridge image, a ROM...). Picked files are copied into the Ymir folder.
+private struct FileSettingRow: View {
+    let title: String
+    let key: String
+    let folder: URL
+
+    @State private var showImporter = false
+    @State private var name = URL(fileURLWithPath: "").lastPathComponent
+
+    init(title: String, key: String, folder: URL) {
+        self.title = title
+        self.key = key
+        self.folder = folder
+        _name = State(initialValue: URL(fileURLWithPath: YmirHost.pathValue(key: key)).lastPathComponent)
+    }
+
+    var body: some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(name.isEmpty ? "None" : name)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        Button {
+            showImporter = true
+        } label: {
+            Label("Choose File…", systemImage: "doc.badge.plus")
+        }
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            let folder = self.folder
+            Task {
+                _ = await Task.detached(priority: .userInitiated) { () -> ImportService.Outcome in
+                    ImportService.copy([url], to: folder)
+                }.value
+                let destination = folder.appendingPathComponent(url.lastPathComponent)
+                YmirHost.setPathValue(destination.path, key: key)
+                name = destination.lastPathComponent
+                SettingStore.shared.objectWillChange.send()
+            }
+        }
     }
 }
