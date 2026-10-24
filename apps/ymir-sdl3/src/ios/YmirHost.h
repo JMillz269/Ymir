@@ -28,6 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)ejectDisc NS_SWIFT_NAME(ejectDisc());
 + (void)saveStateToSlot:(NSInteger)slot NS_SWIFT_NAME(saveState(slot:));
 + (void)loadStateFromSlot:(NSInteger)slot NS_SWIFT_NAME(loadState(slot:));
++ (void)quitGame NS_SWIFT_NAME(quitGame());
 + (void)takeScreenshot NS_SWIFT_NAME(takeScreenshot());
 
 /// Rescans the BIOS folder and loads an IPL ROM. Returns an error message, or nil on success.
@@ -36,12 +37,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// Returns an array of dictionaries with keys "index" (NSNumber), "present" (NSNumber) and "text" (NSString).
 + (NSArray<NSDictionary<NSString *, id> *> *)saveSlots NS_SWIFT_NAME(saveSlots());
 
-/// Opens one of the emulator's own settings pages (the Dear ImGui settings window).
-/// Tab names: general, gui, hotkeys, system, ipl, input, video, audio, cartridge, cdblock, tweaks.
-+ (void)openAdvancedSettings:(NSString *)tab NS_SWIFT_NAME(openAdvancedSettings(tab:));
-
 + (BOOL)boolForKey:(NSString *)key defaultValue:(BOOL)defaultValue NS_SWIFT_NAME(boolValue(key:default:));
 + (void)setBool:(BOOL)value forKey:(NSString *)key NS_SWIFT_NAME(setBoolValue(_:key:));
++ (NSInteger)intForKey:(NSString *)key defaultValue:(NSInteger)defaultValue NS_SWIFT_NAME(intValue(key:default:));
++ (void)setInt:(NSInteger)value forKey:(NSString *)key NS_SWIFT_NAME(setIntValue(_:key:));
 + (float)floatForKey:(NSString *)key defaultValue:(float)defaultValue NS_SWIFT_NAME(floatValue(key:default:));
 + (void)setFloat:(float)value forKey:(NSString *)key NS_SWIFT_NAME(setFloatValue(_:key:));
 

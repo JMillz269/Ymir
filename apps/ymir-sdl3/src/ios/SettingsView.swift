@@ -1,59 +1,88 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Values backed by the emulator's settings. Changes are written through to the emulator immediately.
-@MainActor
-final class SettingsModel: ObservableObject {
-    @Published var integerScaling = false { didSet { write(integerScaling, "video.forceIntegerScaling") } }
-    @Published var keepAspectRatio = true { didSet { write(keepAspectRatio, "video.forceAspectRatio") } }
-    @Published var threadedVDP = false { didSet { write(threadedVDP, "video.threadedVDP") } }
-    @Published var showFPS = false { didSet { write(showFPS, "gui.showFrameRateOSD") } }
-    @Published var mute = false { didSet { write(mute, "audio.mute") } }
-    @Published var volume: Double = 1 {
-        didSet {
-            guard !loading else { return }
-            YmirHost.setFloatValue(Float(volume), key: "audio.volume")
-        }
-    }
-    @Published var touchControls = true { didSet { write(touchControls, "touch.enabled") } }
-    @Published var rewind = false { didSet { write(rewind, "general.enableRewindBuffer") } }
-    @Published var biosName = ""
-    @Published var hasBIOS = false
+// MARK: - Setting bindings
 
-    private var loading = false
-
-    init() {
-        load()
+/// Bindings to the emulator's settings. Every value is read from, and written straight to, the emulator.
+final class SettingStore: ObservableObject {
+    func bool(_ key: String, default defaultValue: Bool = false) -> Binding<Bool> {
+        Binding(
+            get: { YmirHost.boolValue(key: key, default: defaultValue) },
+            set: { [weak self] value in
+                YmirHost.setBoolValue(value, key: key)
+                self?.objectWillChange.send()
+            }
+        )
     }
 
-    func load() {
-        loading = true
-        integerScaling = YmirHost.boolValue(key: "video.forceIntegerScaling", default: false)
-        keepAspectRatio = YmirHost.boolValue(key: "video.forceAspectRatio", default: true)
-        threadedVDP = YmirHost.boolValue(key: "video.threadedVDP", default: false)
-        showFPS = YmirHost.boolValue(key: "gui.showFrameRateOSD", default: false)
-        mute = YmirHost.boolValue(key: "audio.mute", default: false)
-        volume = Double(YmirHost.floatValue(key: "audio.volume", default: 1))
-        touchControls = YmirHost.boolValue(key: "touch.enabled", default: true)
-        rewind = YmirHost.boolValue(key: "general.enableRewindBuffer", default: false)
-        refreshBIOS()
-        loading = false
+    func int(_ key: String, default defaultValue: Int = 0) -> Binding<Int> {
+        Binding(
+            get: { YmirHost.intValue(key: key, default: defaultValue) },
+            set: { [weak self] value in
+                YmirHost.setIntValue(value, key: key)
+                self?.objectWillChange.send()
+            }
+        )
     }
 
-    func refreshBIOS() {
-        hasBIOS = YmirHost.hasBIOS
-        biosName = YmirHost.biosName
+    /// An integer setting edited with a slider.
+    func intSlider(_ key: String, default defaultValue: Int = 0) -> Binding<Double> {
+        Binding(
+            get: { Double(YmirHost.intValue(key: key, default: defaultValue)) },
+            set: { [weak self] value in
+                YmirHost.setIntValue(Int(value.rounded()), key: key)
+                self?.objectWillChange.send()
+            }
+        )
     }
 
-    private func write(_ value: Bool, _ key: String) {
-        guard !loading else { return }
-        YmirHost.setBoolValue(value, key: key)
+    func float(_ key: String, default defaultValue: Double = 0) -> Binding<Double> {
+        Binding(
+            get: { Double(YmirHost.floatValue(key: key, default: Float(defaultValue))) },
+            set: { [weak self] value in
+                YmirHost.setFloatValue(Float(value), key: key)
+                self?.objectWillChange.send()
+            }
+        )
     }
 }
 
-/// The app's settings. Everything that used to live in the menu bar of the desktop frontend is reachable from here.
+// MARK: - Reusable rows
+
+/// A slider with a title and the current value on top.
+private struct SettingSlider: View {
+    let title: String
+    let value: Binding<Double>
+    let range: ClosedRange<Double>
+    var step: Double = 0.01
+    var format: (Double) -> String = { String(format: "%.0f%%", $0 * 100) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(format(value.wrappedValue))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Slider(value: value, in: range, step: step)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private func percent(_ value: Double) -> String {
+    String(format: "%.0f%%", value * 100)
+}
+
+// MARK: - Settings home
+
+/// The app's settings. Everything that was in the desktop frontend's menus and settings window lives here.
 struct SettingsView: View {
-    @StateObject private var model = SettingsModel()
+    @StateObject private var store = SettingStore()
+    @State private var hasBIOS = YmirHost.hasBIOS
+    @State private var biosName = YmirHost.biosName
     @State private var showImporter = false
     @State private var isImporting = false
     @State private var biosAlert: String?
@@ -68,8 +97,8 @@ struct SettingsView: View {
                 HStack {
                     Label("BIOS", systemImage: "cpu")
                     Spacer()
-                    if model.hasBIOS {
-                        Text(model.biosName)
+                    if hasBIOS {
+                        Text(biosName)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -84,61 +113,61 @@ struct SettingsView: View {
                 Button {
                     showImporter = true
                 } label: {
-                    Label(model.hasBIOS ? "Replace BIOS…" : "Import BIOS…", systemImage: "square.and.arrow.down")
+                    Label(hasBIOS ? "Replace BIOS…" : "Import BIOS…", systemImage: "square.and.arrow.down")
                 }
-            } header: {
-                Text("System")
             } footer: {
                 Text("A Sega Saturn BIOS (IPL ROM) image is required to run games.")
             }
 
-            Section("Display") {
-                Toggle("Integer Scaling", isOn: $model.integerScaling)
-                Toggle("Keep Aspect Ratio", isOn: $model.keepAspectRatio)
-                Toggle("Multithreaded Renderer", isOn: $model.threadedVDP)
-                Toggle("Show Frame Rate", isOn: $model.showFPS)
-            }
-
-            Section("Audio") {
-                Toggle("Mute", isOn: $model.mute)
-                HStack(spacing: 12) {
-                    Image(systemName: "speaker.fill").foregroundStyle(.secondary)
-                    Slider(value: $model.volume, in: 0...1)
-                    Image(systemName: "speaker.wave.3.fill").foregroundStyle(.secondary)
+            Section {
+                NavigationLink {
+                    DisplaySettingsView()
+                } label: {
+                    Label("Display", systemImage: "tv")
                 }
-                .disabled(model.mute)
+                NavigationLink {
+                    AudioSettingsView()
+                } label: {
+                    Label("Audio", systemImage: "speaker.wave.2")
+                }
+                NavigationLink {
+                    ControlsSettingsView()
+                } label: {
+                    Label("Controls", systemImage: "gamecontroller")
+                }
+                NavigationLink {
+                    EmulationSettingsView()
+                } label: {
+                    Label("Emulation", systemImage: "forward.frame")
+                }
             }
 
             Section {
-                Toggle("On-Screen Controls", isOn: $model.touchControls)
-                AdvancedRow(title: "Controller Bindings", systemImage: "gamecontroller", tab: "input")
-                AdvancedRow(title: "Hotkeys", systemImage: "keyboard", tab: "hotkeys")
-            } header: {
-                Text("Controls")
-            } footer: {
-                Text("MFi, Xbox, PlayStation and other Bluetooth controllers work automatically. On-screen controls hide while a controller is connected.")
-            }
-
-            Section {
-                Toggle("Rewind Buffer", isOn: $model.rewind)
-            } header: {
-                Text("Emulation")
-            } footer: {
-                Text("Lets you step back in time. Uses more memory.")
-            }
-
-            Section {
-                AdvancedRow(title: "General", systemImage: "slider.horizontal.3", tab: "general")
-                AdvancedRow(title: "System & Region", systemImage: "globe", tab: "system")
-                AdvancedRow(title: "Video", systemImage: "tv", tab: "video")
-                AdvancedRow(title: "Audio", systemImage: "speaker.wave.2", tab: "audio")
-                AdvancedRow(title: "Cartridge", systemImage: "memorychip", tab: "cartridge")
-                AdvancedRow(title: "CD Block", systemImage: "opticaldisc", tab: "cdblock")
-                AdvancedRow(title: "Tweaks", systemImage: "wrench.and.screwdriver", tab: "tweaks")
-            } header: {
-                Text("Advanced")
-            } footer: {
-                Text("Opens the emulator's built-in settings window over the game.")
+                NavigationLink {
+                    SystemSettingsView()
+                } label: {
+                    Label("System & Region", systemImage: "globe")
+                }
+                NavigationLink {
+                    CartridgeSettingsView()
+                } label: {
+                    Label("Cartridge", systemImage: "memorychip")
+                }
+                NavigationLink {
+                    CDBlockSettingsView()
+                } label: {
+                    Label("CD Drive", systemImage: "opticaldisc")
+                }
+                NavigationLink {
+                    PerformanceSettingsView()
+                } label: {
+                    Label("Performance & Accuracy", systemImage: "speedometer")
+                }
+                NavigationLink {
+                    InterfaceSettingsView()
+                } label: {
+                    Label("Interface", systemImage: "rectangle.on.rectangle")
+                }
             }
 
             Section {
@@ -163,7 +192,11 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .onAppear { model.load() }
+        .environmentObject(store)
+        .onAppear {
+            hasBIOS = YmirHost.hasBIOS
+            biosName = YmirHost.biosName
+        }
         .overlay {
             if isImporting {
                 ProgressView("Loading BIOS…")
@@ -188,37 +221,437 @@ struct SettingsView: View {
             _ = await Task.detached(priority: .userInitiated) { () -> ImportService.Outcome in
                 ImportService.copy(urls, to: AppPaths.bios)
             }.value
-            _ = YmirHost.reloadBIOS()
-            // The emulator loads the BIOS on its next frame
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            model.refreshBIOS()
+            let error = YmirHost.reloadBIOS()
+            hasBIOS = YmirHost.hasBIOS
+            biosName = YmirHost.biosName
             isImporting = false
-            if !model.hasBIOS {
-                biosAlert = "That file doesn't look like a valid Sega Saturn BIOS. Try a different image."
+            if !hasBIOS {
+                biosAlert = error ?? "That file doesn't look like a valid Sega Saturn BIOS. Try a different image."
             }
         }
     }
 }
 
-/// A row that opens one of the emulator's own settings pages.
-private struct AdvancedRow: View {
-    let title: String
-    let systemImage: String
-    let tab: String
+// MARK: - Display
+
+struct DisplaySettingsView: View {
+    @EnvironmentObject private var store: SettingStore
 
     var body: some View {
-        Button {
-            YmirShell.openAdvancedSettings(tab)
-        } label: {
-            HStack {
-                Label(title, systemImage: systemImage)
-                    .foregroundStyle(.primary)
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.tertiary)
+        Form {
+            Section("Scaling") {
+                Toggle("Integer Scaling", isOn: store.bool("video.forceIntegerScaling"))
+                Toggle("Force Aspect Ratio", isOn: store.bool("video.forceAspectRatio", default: true))
+                Picker("Aspect Ratio", selection: store.int("video.aspect")) {
+                    Text("4:3").tag(0)
+                    Text("3:2").tag(1)
+                    Text("16:10").tag(2)
+                    Text("16:9").tag(3)
+                }
+                .disabled(!YmirHost.boolValue(key: "video.forceAspectRatio", default: true))
+                Picker("Rotation", selection: store.int("video.rotation")) {
+                    Text("None").tag(0)
+                    Text("90° Clockwise").tag(1)
+                    Text("180°").tag(2)
+                    Text("90° Counterclockwise").tag(3)
+                }
             }
-            .contentShape(Rectangle())
+
+            Section {
+                Toggle("GPU Renderer", isOn: store.bool("video.hardwareAcceleration"))
+            } header: {
+                Text("Renderer")
+            } footer: {
+                Text("Renders the Saturn's graphics on the GPU instead of the CPU. Experimental.")
+            }
+
+            Section {
+                Toggle("Deinterlacing", isOn: store.bool("video.deinterlace"))
+                Toggle("Transparent Meshes", isOn: store.bool("video.transparentMeshes"))
+            } header: {
+                Text("Enhancements")
+            } footer: {
+                Text("Deinterlacing smooths high resolution interlaced video. Transparent meshes replaces the checkerboard patterns games use for transparency with real transparency.")
+            }
+
+            Section {
+                Toggle("Video Sync", isOn: store.bool("video.sync", default: true))
+                Toggle("Use Full Refresh Rate", isOn: store.bool("video.fullRefreshRate"))
+                Toggle("Reduce Latency", isOn: store.bool("video.reduceLatency"))
+            } header: {
+                Text("Synchronization")
+            } footer: {
+                Text("Video sync paces emulation to the display. Reduce Latency helps on displays with a low refresh rate.")
+            }
         }
+        .navigationTitle("Display")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Audio
+
+struct AudioSettingsView: View {
+    @EnvironmentObject private var store: SettingStore
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Mute", isOn: store.bool("audio.mute"))
+                SettingSlider(title: "Volume", value: store.float("audio.volume", default: 1), range: 0...1, format: percent)
+            }
+
+            Section {
+                Picker("Interpolation", selection: store.int("audio.interpolation", default: 1)) {
+                    Text("Nearest Neighbor").tag(0)
+                    Text("Linear").tag(1)
+                }
+                Toggle("Multithreaded SCSP", isOn: store.bool("audio.threadedSCSP"))
+                Stepper(
+                    "Step Granularity: \(store.int("audio.stepGranularity").wrappedValue)",
+                    value: store.int("audio.stepGranularity"),
+                    in: 0...5
+                )
+            } header: {
+                Text("Sound Chip")
+            } footer: {
+                Text("Linear interpolation matches the real SCSP. Higher step granularity is more accurate and slower.")
+            }
+        }
+        .navigationTitle("Audio")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Controls
+
+struct ControlsSettingsView: View {
+    @EnvironmentObject private var store: SettingStore
+
+    private static let peripherals = [
+        (0, "None"), (1, "Saturn Control Pad"), (2, "Saturn 3D Control Pad"), (3, "Arcade Racer"),
+        (4, "Mission Stick"), (5, "Virtua Gun"), (6, "Shuttle Mouse"),
+    ]
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("On-Screen Controls", isOn: store.bool("touch.enabled", default: true))
+            } footer: {
+                Text("MFi, Xbox, PlayStation and other Bluetooth controllers work automatically, using the default bindings. On-screen controls hide while a controller is connected. Press Select on a controller to open the menu.")
+            }
+
+            Section {
+                ForEach(1...2, id: \.self) { port in
+                    Picker("Port \(port)", selection: store.int("input.port\(port)Type", default: port == 1 ? 1 : 0)) {
+                        ForEach(Self.peripherals, id: \.0) { entry in
+                            Text(entry.1).tag(entry.0)
+                        }
+                    }
+                }
+            } header: {
+                Text("Connected Peripherals")
+            } footer: {
+                Text("Touch controls and the default controller bindings drive the Saturn Control Pad on port 1.")
+            }
+
+            Section {
+                SettingSlider(title: "Left Stick Deadzone", value: store.float("input.lsDeadzone", default: 0.15),
+                              range: 0.05...0.9, format: percent)
+                SettingSlider(title: "Right Stick Deadzone", value: store.float("input.rsDeadzone", default: 0.15),
+                              range: 0.05...0.9, format: percent)
+                SettingSlider(title: "Analog to Digital Sensitivity",
+                              value: store.float("input.analogToDigital", default: 0.5), range: 0.05...0.9, format: percent)
+            } header: {
+                Text("Controller")
+            } footer: {
+                Text("The deadzone is the stick travel that is ignored. Analog to digital sensitivity is how far a stick must move to press a digital button.")
+            }
+        }
+        .navigationTitle("Controls")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Emulation
+
+struct EmulationSettingsView: View {
+    @EnvironmentObject private var store: SettingStore
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Use Alternate Speed", isOn: store.bool("general.useAltSpeed"))
+                SettingSlider(title: "Primary Speed", value: store.float("general.speedMain", default: 1),
+                              range: 0.1...5, step: 0.1, format: percent)
+                SettingSlider(title: "Alternate Speed", value: store.float("general.speedAlt", default: 0.5),
+                              range: 0.1...5, step: 0.1, format: percent)
+            } header: {
+                Text("Speed")
+            } footer: {
+                Text("Switch between the two speeds to slow the game down or run it faster. Fast forward in the in-game menu ignores them.")
+            }
+
+            Section("Behavior") {
+                Toggle("Unpause After Loading a Game", isOn: store.bool("general.unpauseOnDiscLoad", default: true))
+                Toggle("Preload Disc Images to RAM", isOn: store.bool("general.preloadDiscImages"))
+            }
+
+            Section {
+                Toggle("Rewind Buffer", isOn: store.bool("general.rewind"))
+                SettingSlider(title: "Compression", value: store.intSlider("general.rewindCompression"),
+                              range: 0...16, step: 1, format: { String(format: "%.0f", $0) })
+            } header: {
+                Text("Rewind")
+            } footer: {
+                Text("Lets you step back in time, at the cost of memory and some performance. Higher compression uses less memory but is slower.")
+            }
+
+            Section {
+                Stepper(
+                    "Screenshot Scale: \(store.int("general.screenshotScale", default: 1).wrappedValue)×",
+                    value: store.int("general.screenshotScale", default: 1),
+                    in: 1...4
+                )
+            } header: {
+                Text("Screenshots")
+            } footer: {
+                Text("Screenshots are saved in the Ymir folder under screenshots.")
+            }
+        }
+        .navigationTitle("Emulation")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - System
+
+struct SystemSettingsView: View {
+    @EnvironmentObject private var store: SettingStore
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Autodetect Region from Games", isOn: store.bool("system.autodetectRegion", default: true))
+                Picker("Video Standard", selection: store.int("system.videoStandard")) {
+                    Text("NTSC").tag(0)
+                    Text("PAL").tag(1)
+                }
+                Picker("Preferred BIOS", selection: store.int("system.iplVariant")) {
+                    Text("Any").tag(0)
+                    Text("Saturn").tag(1)
+                    Text("Hi-Saturn").tag(2)
+                    Text("V-Saturn").tag(3)
+                    Text("Dev Kit").tag(4)
+                }
+            } header: {
+                Text("Region")
+            } footer: {
+                Text("With autodetection on, the region and video standard follow the loaded game. Reset the console after changing them.")
+            }
+
+            Section {
+                Picker("Mode", selection: store.int("system.rtcMode")) {
+                    Text("Host Clock").tag(0)
+                    Text("Virtual").tag(1)
+                }
+                if store.int("system.rtcMode").wrappedValue == 1 {
+                    Picker("On Hard Reset", selection: store.int("system.rtcResetStrategy")) {
+                        Text("Sync to Host").tag(0)
+                        Text("Reset to Fixed Time").tag(1)
+                        Text("Preserve").tag(2)
+                    }
+                }
+            } header: {
+                Text("Clock")
+            } footer: {
+                Text("The virtual clock is deterministic and only moves while the emulator runs.")
+            }
+
+            Section {
+                Toggle("Separate Backup Memory per Game", isOn: store.bool("system.backupRAMPerGame"))
+            } header: {
+                Text("Saves")
+            } footer: {
+                Text("Creates an internal backup memory image for each game. Backup files are in the Ymir folder under backup.")
+            }
+        }
+        .navigationTitle("System & Region")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Cartridge
+
+struct CartridgeSettingsView: View {
+    @EnvironmentObject private var store: SettingStore
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Switch to Recommended Cartridges", isOn: store.bool("cartridge.autoLoad", default: true))
+            } footer: {
+                Text("Automatically inserts the cartridge a game needs, such as a RAM expansion.")
+            }
+
+            Section {
+                Picker("Cartridge", selection: store.int("cartridge.type")) {
+                    Text("None").tag(0)
+                    Text("Backup RAM").tag(1)
+                    Text("DRAM Expansion").tag(2)
+                    Text("ROM").tag(3)
+                }
+
+                switch store.int("cartridge.type").wrappedValue {
+                case 1:
+                    Picker("Capacity", selection: store.int("cartridge.backupCapacity")) {
+                        Text("4 Mbit").tag(0)
+                        Text("8 Mbit").tag(1)
+                        Text("16 Mbit").tag(2)
+                        Text("32 Mbit").tag(3)
+                    }
+                case 2:
+                    Picker("Capacity", selection: store.int("cartridge.dramCapacity")) {
+                        Text("48 Mbit").tag(0)
+                        Text("32 Mbit").tag(1)
+                        Text("8 Mbit").tag(2)
+                    }
+                default:
+                    EmptyView()
+                }
+            } header: {
+                Text("Inserted Cartridge")
+            } footer: {
+                Text("ROM cartridge and backup RAM images are read from the Ymir folder under roms/cart and backup.")
+            }
+        }
+        .navigationTitle("Cartridge")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - CD drive
+
+struct CDBlockSettingsView: View {
+    @EnvironmentObject private var store: SettingStore
+
+    var body: some View {
+        Form {
+            Section {
+                SettingSlider(title: "Read Speed", value: store.intSlider("cdblock.readSpeed", default: 2),
+                              range: 2...200, step: 1, format: { String(format: "%.0f×", $0) })
+            } footer: {
+                Text("The maximum read speed of the emulated drive. 2× is how fast a real Saturn reads discs.")
+            }
+
+            Section {
+                Toggle("Low Level Emulation", isOn: store.bool("cdblock.useLLE"))
+            } header: {
+                Text("Accuracy")
+            } footer: {
+                Text("Emulates the CD block's own CPU. Needs a CD block ROM image in the Ymir folder under roms/cdb, and is much slower.")
+            }
+        }
+        .navigationTitle("CD Drive")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Performance
+
+struct PerformanceSettingsView: View {
+    @EnvironmentObject private var store: SettingStore
+
+    var body: some View {
+        Form {
+            Section {
+                Button("Recommended") {
+                    apply(sh2Cache: false, interpolation: 1, granularity: 0, lle: false)
+                }
+                Button("Best Accuracy") {
+                    apply(sh2Cache: true, interpolation: 1, granularity: 5, lle: false)
+                }
+                Button("Best Performance") {
+                    apply(sh2Cache: false, interpolation: 0, granularity: 0, lle: false)
+                }
+            } header: {
+                Text("Presets")
+            } footer: {
+                Text("Presets change the options below and the sound chip settings in Audio.")
+            }
+
+            Section {
+                Toggle("Emulate SH-2 Cache", isOn: store.bool("system.emulateSH2Cache"))
+                SettingSlider(title: "SH-2 Clock", value: store.intSlider("system.sh2ClockFactor", default: 100),
+                              range: 25...500, step: 5, format: { String(format: "%.0f%%", $0) })
+                Button("Reset Clock to 100%") {
+                    store.intSlider("system.sh2ClockFactor").wrappedValue = 100
+                }
+            } header: {
+                Text("Accuracy")
+            } footer: {
+                Text("A few games need the SH-2 cache. Changing the clock may break games, desync audio or cause crashes: above 100% reduces slowdowns, below 100% helps slower devices.")
+            }
+
+            Section {
+                Toggle("Threaded VDP1", isOn: store.bool("video.threadedVDP1", default: true))
+                Toggle("Threaded VDP2", isOn: store.bool("video.threadedVDP2", default: true))
+                Toggle("Threaded Deinterlacer", isOn: store.bool("video.threadedDeinterlacer", default: true))
+                Toggle("Threaded Sound Chip", isOn: store.bool("audio.threadedSCSP"))
+            } header: {
+                Text("Multithreading")
+            } footer: {
+                Text("Spreads emulation over several CPU cores for speed.")
+            }
+
+            Section {
+                Toggle("Boost Emulator Thread Priority", isOn: store.bool("general.boostEmuThread"))
+            } footer: {
+                Text("May reduce stuttering, at the cost of more battery use.")
+            }
+        }
+        .navigationTitle("Performance")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func apply(sh2Cache: Bool, interpolation: Int, granularity: Int, lle: Bool) {
+        store.bool("system.emulateSH2Cache").wrappedValue = sh2Cache
+        store.intSlider("system.sh2ClockFactor").wrappedValue = 100
+        store.int("audio.interpolation").wrappedValue = interpolation
+        store.int("audio.stepGranularity").wrappedValue = granularity
+        store.intSlider("cdblock.readSpeed").wrappedValue = 2
+        store.bool("cdblock.useLLE").wrappedValue = lle
+    }
+}
+
+// MARK: - Interface
+
+struct InterfaceSettingsView: View {
+    @EnvironmentObject private var store: SettingStore
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Show Frame Rate", isOn: store.bool("gui.showFrameRate"))
+                Picker("Position", selection: store.int("gui.frameRatePosition")) {
+                    Text("Top Left").tag(0)
+                    Text("Top Right").tag(1)
+                    Text("Bottom Left").tag(2)
+                    Text("Bottom Right").tag(3)
+                }
+                .disabled(!YmirHost.boolValue(key: "gui.showFrameRate", default: false))
+            } header: {
+                Text("Frame Rate")
+            }
+
+            Section {
+                Toggle("Show Messages", isOn: store.bool("gui.showMessages", default: true))
+                Toggle("Always Show Speed Indicator", isOn: store.bool("gui.showSpeedIndicator"))
+            } header: {
+                Text("On-Screen Display")
+            }
+        }
+        .navigationTitle("Interface")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

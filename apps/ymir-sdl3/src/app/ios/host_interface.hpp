@@ -37,17 +37,19 @@ struct HostInterface {
     std::function<void()> hardReset;
     std::function<void()> openCloseTray;
     std::function<void()> ejectDisc;
+    std::function<void()> quitGame; // unloads the game and leaves the emulator idle
     std::function<void(int)> saveState;
     std::function<void(int)> loadState;
     std::function<void()> takeScreenshot;
     std::function<std::string()> reloadIPLROM; // rescans the IPL ROM folder; returns an error message or "" on success
-    std::function<void(int)> openAdvancedSettings; // takes an app::ui::SettingsTab value
 
     // -- Settings --
     std::function<bool(const std::string &, bool)> getBool;    // key, default
     std::function<void(const std::string &, bool)> setBool;    // key, value
     std::function<float(const std::string &, float)> getFloat; // key, default
     std::function<void(const std::string &, float)> setFloat;  // key, value
+    std::function<int(const std::string &, int)> getInt;       // key, default (also used for enumerations)
+    std::function<void(const std::string &, int)> setInt;      // key, value
 };
 
 /// @brief Gets the global host interface. Callbacks are empty while the emulator isn't running.

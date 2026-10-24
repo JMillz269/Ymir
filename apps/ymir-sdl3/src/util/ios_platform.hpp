@@ -38,6 +38,12 @@ void ShowLauncher();
 /// @brief Presents the native in-game menu (sheet) over the emulator view.
 void ShowGameMenu();
 
+/// @brief Opens the in-game menu, or closes it if it is already open.
+void ToggleGameMenu();
+
+/// @brief Runs the main run loop for the given time, so that UIKit can handle touches and animations.
+void PumpNativeUI(double seconds);
+
 /// @brief Whether any native UI is currently covering the emulator view.
 bool IsNativeUIVisible();
 

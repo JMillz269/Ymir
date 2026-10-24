@@ -7,6 +7,7 @@ struct GameMenuView: View {
     @State private var fastForward = YmirHost.fastForward
     @State private var touchControls = YmirHost.boolValue(key: "touch.enabled", default: true)
     @State private var confirmHardReset = false
+    @State private var confirmClose = false
     @State private var gameTitle = GameMenuView.currentGameTitle()
 
     private static func currentGameTitle() -> String {
@@ -103,6 +104,20 @@ struct GameMenuView: View {
                         YmirShell.showLibraryFromMenu()
                     } label: {
                         Label("Game Library", systemImage: "square.grid.2x2")
+                    }
+
+                    Button(role: .destructive) {
+                        confirmClose = true
+                    } label: {
+                        Label("Close Game", systemImage: "xmark.circle")
+                    }
+                    .confirmationDialog("Close this game?", isPresented: $confirmClose, titleVisibility: .visible) {
+                        Button("Close Game", role: .destructive) {
+                            YmirShell.closeGame()
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Unsaved progress is lost. Use a save state first to keep it.")
                     }
                 }
             }

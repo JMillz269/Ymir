@@ -446,6 +446,8 @@ if (IOS)
         src/app/input/touch_controls.cpp
         src/app/input/touch_controls.hpp
         src/app/ios/host_interface.hpp
+        src/app/ios/ios_settings.cpp
+        src/app/ios/ios_settings.hpp
         src/util/ios_platform.hpp
         src/util/ios_platform.mm
 

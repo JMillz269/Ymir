@@ -222,10 +222,9 @@ struct GamesView: View {
                 ImportService.copy(urls, to: folder)
             }.value
 
+            var biosError: String?
             if kind == .bios {
-                _ = YmirHost.reloadBIOS()
-                // The emulator loads the BIOS on its next frame
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                biosError = YmirHost.reloadBIOS()
             }
             refresh()
             isImporting = false
@@ -238,7 +237,7 @@ struct GamesView: View {
             } else if kind == .bios && !hasBIOS {
                 alert = AlertInfo(
                     title: "BIOS Not Recognized",
-                    message: "That file doesn't look like a valid Sega Saturn BIOS. Try a different image."
+                    message: biosError ?? "That file doesn't look like a valid Sega Saturn BIOS. Try a different image."
                 )
             }
         }

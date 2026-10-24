@@ -161,6 +161,14 @@ void ShowGameMenu() {
     CallShell("showGameMenu");
 }
 
+void ToggleGameMenu() {
+    CallShell("toggleGameMenu");
+}
+
+void PumpNativeUI(double seconds) {
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, false);
+}
+
 bool IsNativeUIVisible() {
     Class shell = NSClassFromString(@"YmirShell");
     SEL selector = sel_registerName("isNativeUIVisible");

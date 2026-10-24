@@ -39,6 +39,9 @@
     <!-- Presentation -->
     <key>UILaunchScreen</key>
     <dict/>
+    <!-- Lets animations in the native UI run at the display's full refresh rate (ProMotion) -->
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
     <key>UIRequiresFullScreen</key>
     <true/>
     <!-- The status bar is shown by the native UI and hidden by the emulator's full screen view -->

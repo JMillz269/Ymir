@@ -152,21 +152,25 @@ final class YmirShell: NSObject {
         action?()
     }
 
-    /// Closes the native UI and opens one of the emulator's own settings windows.
-    static func openAdvancedSettings(_ tab: String) {
+    /// Opens the in-game menu, or closes it when it is already open (the Select button of a controller does this).
+    @objc static func toggleGameMenu() {
         if menuController != nil {
-            closeMenu { YmirHost.openAdvancedSettings(tab: tab) }
+            closeMenu()
         } else {
-            if pausedByLauncher {
-                YmirHost.paused = false
-                pausedByLauncher = false
-            }
-            dismissLauncher { YmirHost.openAdvancedSettings(tab: tab) }
+            showGameMenu()
         }
     }
 
-    /// Returns from the in-game menu to the game library.
+    /// Returns from the in-game menu to the game library, leaving the game paused where it is.
     static func showLibraryFromMenu() {
         closeMenu { YmirShell.showLauncher() }
+    }
+
+    /// Unloads the game and returns to the game library.
+    static func closeGame() {
+        closeMenu {
+            YmirHost.quitGame()
+            YmirShell.showLauncher()
+        }
     }
 }

@@ -117,6 +117,7 @@
 #if YMIR_PLATFORM_IOS
     #include <app/input/touch_controls.hpp>
     #include <app/ios/host_interface.hpp>
+    #include <app/ios/ios_settings.hpp>
     #include <util/ios_platform.hpp>
 #endif
 
@@ -1231,7 +1232,8 @@ void App::RunEmulator() {
 
     auto &inputContext = m_context.inputContext;
 
-    m_context.paused = m_options.startPaused || settings.general.startPaused;
+    // On iOS nothing runs until the user picks a game in the native game library
+    m_context.paused = m_options.startPaused || settings.general.startPaused || YMIR_PLATFORM_IOS;
     bool pausedByLostFocus = false;
 
     if (m_options.enableDebugTracing) {
@@ -1439,65 +1441,24 @@ void App::RunEmulator() {
     iosHost.takeScreenshot = [this] { m_context.EnqueueEvent(events::gui::TakeScreenshot()); };
     iosHost.reloadIPLROM = [this]() -> std::string {
         m_romService.ScanIPLROMs();
-        m_context.EnqueueEvent(events::gui::ReloadIPLROM());
+        const util::ROMLoadResult result = m_romService.LoadIPLROM();
+        if (!result.succeeded) {
+            return result.errorMessage.empty() ? std::string{"No valid IPL ROM found"} : std::string{result.errorMessage};
+        }
+        m_context.EnqueueEvent(events::emu::HardReset());
         return {};
     };
-    iosHost.openAdvancedSettings = [this](int tab) {
-        m_context.EnqueueEvent(events::gui::OpenSettings(static_cast<ui::SettingsTab>(tab)));
-    };
-    iosHost.getBool = [&settings, &touchControls](const std::string &key, bool defaultValue) {
-        if (key == "video.forceIntegerScaling") {
-            return settings.video.forceIntegerScaling;
-        } else if (key == "video.forceAspectRatio") {
-            return settings.video.forceAspectRatio;
-        } else if (key == "video.threadedVDP") {
-            return settings.video.swRenderer.threadedVDP2.Get();
-        } else if (key == "gui.showFrameRateOSD") {
-            return settings.gui.showFrameRateOSD;
-        } else if (key == "audio.mute") {
-            return settings.audio.mute.Get();
-        } else if (key == "touch.enabled") {
-            return touchControls.IsEnabled();
-        } else if (key == "general.enableRewindBuffer") {
-            return settings.general.enableRewindBuffer;
-        }
-        return defaultValue;
-    };
-    iosHost.setBool = [this, &settings, &touchControls](const std::string &key, bool value) {
-        if (key == "video.forceIntegerScaling") {
-            settings.video.forceIntegerScaling = value;
-        } else if (key == "video.forceAspectRatio") {
-            settings.video.forceAspectRatio = value;
-        } else if (key == "video.threadedVDP") {
-            settings.video.swRenderer.threadedVDP1 = value;
-            settings.video.swRenderer.threadedVDP2 = value;
-        } else if (key == "gui.showFrameRateOSD") {
-            settings.gui.showFrameRateOSD = value;
-        } else if (key == "audio.mute") {
-            settings.audio.mute = value;
-        } else if (key == "touch.enabled") {
-            touchControls.SetEnabled(value);
-        } else if (key == "general.enableRewindBuffer") {
-            if (settings.general.enableRewindBuffer != value) {
-                ToggleRewindBuffer();
-            }
-            return;
-        } else {
-            return;
-        }
-        settings.MakeDirty();
-    };
-    iosHost.getFloat = [&settings](const std::string &key, float defaultValue) {
-        if (key == "audio.volume") {
-            return settings.audio.volume.Get();
-        }
-        return defaultValue;
-    };
-    iosHost.setFloat = [&settings](const std::string &key, float value) {
-        if (key == "audio.volume") {
-            settings.audio.volume = std::clamp(value, 0.0f, 1.0f);
-            settings.MakeDirty();
-        }
+    app::ios::InstallSettingsAccessors(iosHost, m_context, settings,
+                                       {.getTouchControls = [&touchControls] { return touchControls.IsEnabled(); },
+                                        .setTouchControls = [&touchControls](bool enable) {
+                                            touchControls.SetEnabled(enable);
+                                        }});
+    iosHost.quitGame = [this] {
+        // Leaves the emulator idle (and silent) on the BIOS until another game is launched
+        m_context.EnqueueEvent(events::emu::SetPaused(true));
+        m_context.EnqueueEvent(events::emu::EjectDisc());
+        m_context.EnqueueEvent(events::emu::HardReset());
+        m_context.state.loadedDiscImagePath.clear();
     };
     util::ScopeGuard sgClearIOSHost{[&] { app::ios::GetHost() = {}; }};
 
@@ -1813,6 +1774,15 @@ void App::RunEmulator() {
             case SDL_EVENT_GAMEPAD_BUTTON_DOWN: [[fallthrough]];
             case SDL_EVENT_GAMEPAD_BUTTON_UP: //
             {
+#if YMIR_PLATFORM_IOS
+                // The Select/Back button opens the native in-game menu instead of reaching the game
+                if (evt.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) {
+                    if (evt.gbutton.down) {
+                        util::ios::ToggleGameMenu();
+                    }
+                    break;
+                }
+#endif
                 const int playerIndex = gamepadPlayerIndices.GetPlayerIndex(evt.gbutton.which);
                 inputContext.ProcessPrimitive(
                     playerIndex, input::SDL3ToGamepadButton((SDL_GamepadButton)evt.gbutton.button), evt.gbutton.down);
@@ -1922,6 +1892,15 @@ void App::RunEmulator() {
         if (iosLauncherDelayFrames > 0 && --iosLauncherDelayFrames == 0) {
             util::ios::AttachGameWindow(screen.window);
             util::ios::ShowLauncher();
+        }
+#endif
+
+#if YMIR_PLATFORM_IOS
+        // A native screen covers the emulator (which is paused): skip rendering and let UIKit have the main thread so
+        // that scrolling and animations stay smooth
+        if (util::ios::IsNativeUIVisible()) {
+            util::ios::PumpNativeUI(1.0 / 120.0);
+            continue;
         }
 #endif
 

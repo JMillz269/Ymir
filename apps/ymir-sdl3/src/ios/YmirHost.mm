@@ -1,7 +1,6 @@
 #import "YmirHost.h"
 
 #include <app/ios/host_interface.hpp>
-#include <app/ui/defs/settings_defs.hpp>
 
 #include <string>
 
@@ -132,6 +131,13 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     }
 }
 
++ (void)quitGame {
+    auto &host = app::ios::GetHost();
+    if (host.quitGame) {
+        host.quitGame();
+    }
+}
+
 + (void)takeScreenshot {
     auto &host = app::ios::GetHost();
     if (host.takeScreenshot) {
@@ -163,28 +169,6 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     return result;
 }
 
-+ (void)openAdvancedSettings:(NSString *)tab {
-    using Tab = app::ui::SettingsTab;
-    static NSDictionary<NSString *, NSNumber *> *tabs = @{
-        @"general" : @(static_cast<int>(Tab::General)),
-        @"gui" : @(static_cast<int>(Tab::GUI)),
-        @"hotkeys" : @(static_cast<int>(Tab::Hotkeys)),
-        @"system" : @(static_cast<int>(Tab::System)),
-        @"ipl" : @(static_cast<int>(Tab::IPL)),
-        @"input" : @(static_cast<int>(Tab::Input)),
-        @"video" : @(static_cast<int>(Tab::Video)),
-        @"audio" : @(static_cast<int>(Tab::Audio)),
-        @"cartridge" : @(static_cast<int>(Tab::Cartridge)),
-        @"cdblock" : @(static_cast<int>(Tab::CDBlock)),
-        @"tweaks" : @(static_cast<int>(Tab::Tweaks)),
-    };
-    NSNumber *value = tabs[tab];
-    auto &host = app::ios::GetHost();
-    if (host.openAdvancedSettings) {
-        host.openAdvancedSettings(value != nil ? value.intValue : static_cast<int>(Tab::General));
-    }
-}
-
 + (BOOL)boolForKey:(NSString *)key defaultValue:(BOOL)defaultValue {
     auto &host = app::ios::GetHost();
     return host.getBool ? host.getBool(key.UTF8String, defaultValue) : defaultValue;
@@ -194,6 +178,18 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     auto &host = app::ios::GetHost();
     if (host.setBool) {
         host.setBool(key.UTF8String, value);
+    }
+}
+
++ (NSInteger)intForKey:(NSString *)key defaultValue:(NSInteger)defaultValue {
+    auto &host = app::ios::GetHost();
+    return host.getInt ? host.getInt(key.UTF8String, static_cast<int>(defaultValue)) : defaultValue;
+}
+
++ (void)setInt:(NSInteger)value forKey:(NSString *)key {
+    auto &host = app::ios::GetHost();
+    if (host.setInt) {
+        host.setInt(key.UTF8String, static_cast<int>(value));
     }
 }
 
