@@ -1899,6 +1899,10 @@ void App::RunEmulator() {
         // A native screen covers the emulator (which is paused): skip rendering and let UIKit have the main thread so
         // that scrolling and animations stay smooth
         if (util::ios::IsNativeUIVisible()) {
+            // The emulator thread may be waiting for the GUI thread to hand it the next frame. Release it, otherwise it
+            // never gets to process the pause event and the audio keeps repeating the last buffer.
+            screen.frameRequestEvent.Set();
+            m_emuProcessEvent.Set();
             util::ios::PumpNativeUI(1.0 / 120.0);
             continue;
         }
