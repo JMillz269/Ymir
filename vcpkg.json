@@ -10,7 +10,17 @@
         "http3",
         "ssl",
         "zstd"
-      ]
+      ],
+      "platform": "!ios"
+    },
+    {
+      "name": "curl",
+      "features": [
+        "ssl",
+        "http2",
+        "zstd"
+      ],
+      "platform": "ios"
     },
     "cxxopts",
     "date",
@@ -18,11 +28,13 @@
     "nlohmann-json",
     "openssl",
     "rtmidi",
+    "sdl3",
     {
       "name": "sdl3",
       "features": [
         "vulkan"
-      ]
+      ],
+      "platform": "!ios"
     },
     {
       "name": "sdl3",
@@ -39,7 +51,7 @@
         "alsa",
         "x11"
       ],
-      "platform": "!windows"
+      "platform": "!windows & !ios"
     },
     "tomlplusplus",
     "zlib",

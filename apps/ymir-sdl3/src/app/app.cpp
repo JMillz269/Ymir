@@ -111,7 +111,12 @@
 
 #include <util/os_exception_handler.hpp>
 #include <util/os_features.hpp>
+#include <util/platform.hpp>
 #include <util/std_lib.hpp>
+
+#if YMIR_PLATFORM_IOS
+    #include <app/input/touch_controls.hpp>
+#endif
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_events.h>
@@ -356,6 +361,12 @@ int App::Run(const CommandLineOptions &options) {
     } else {
         bool hasSettingsFile = false;
 
+#if YMIR_PLATFORM_IOS
+        // iOS only has one place to store data, the app's Documents directory (visible in the Files app)
+        m_context.profile.UseUserProfilePath();
+        hasSettingsFile = true; // skips all checks below
+#endif
+
 #ifdef __linux__
         // Force "installed" mode under Flatpak
         if (getenv("FLATPAK_ID") != nullptr) {
@@ -439,6 +450,10 @@ int App::Run(const CommandLineOptions &options) {
     if (auto result = settings.Load(m_context.profile.GetPath(ProfilePath::Root) / kSettingsFile); !result) {
         devlog::warn<grp::base>("Failed to load settings: {}", result.string());
     }
+#if YMIR_PLATFORM_IOS
+    // iOS apps are always full screen; this also makes the main menu bar auto-hide so it doesn't cover the game
+    settings.video.fullScreen = true;
+#endif
     util::ScopeGuard sgSaveSettings{[&] {
         if (auto result = settings.Save(); !result) {
             devlog::warn<grp::base>("Failed to save settings: {}", result.string());
@@ -1362,6 +1377,12 @@ void App::RunEmulator() {
     std::unordered_map<SDL_JoystickID, SDL_Gamepad *> gamepads{};
     PlayerIndexMap gamepadPlayerIndices;
 
+#if YMIR_PLATFORM_IOS
+    // On-screen control pad, driven by touch events. Hidden while a hardware gamepad is connected.
+    input::TouchControls touchControls{m_context.inputContext};
+    SDL_DisableScreenSaver();
+#endif
+
     std::array<GUIEvent, 64> evts{};
 
 #if Ymir_ENABLE_IMGUI_DEMO
@@ -1629,6 +1650,9 @@ void App::RunEmulator() {
                     const int playerIndex = gamepadPlayerIndices.AssignPlayerIndex(evt.gdevice.which);
                     gamepads[evt.gdevice.which] = gamepad;
                     inputContext.ConnectGamepad(playerIndex);
+#if YMIR_PLATFORM_IOS
+                    touchControls.SetHardwareGamepadPresent(true);
+#endif
                     devlog::debug<grp::base>("Gamepad {} added -> player index {}", evt.gdevice.which, playerIndex);
                 }
                 break;
@@ -1640,6 +1664,9 @@ void App::RunEmulator() {
                     SDL_CloseGamepad(gamepads.at(evt.gdevice.which));
                     inputContext.DisconnectGamepad(playerIndex);
                     gamepads.erase(evt.gdevice.which);
+#if YMIR_PLATFORM_IOS
+                    touchControls.SetHardwareGamepadPresent(!gamepads.empty());
+#endif
                     devlog::debug<grp::base>("Gamepad {} removed -> player index {}", evt.gdevice.which, playerIndex);
                 } else {
                     devlog::warn<grp::base>("Gamepad {} removed, but it was not open!", evt.gdevice.which);
@@ -1688,6 +1715,15 @@ void App::RunEmulator() {
                 // evt.gsensor.sensor;
                 // evt.gsensor.data;
                 break;
+
+#if YMIR_PLATFORM_IOS
+            case SDL_EVENT_FINGER_DOWN: [[fallthrough]];
+            case SDL_EVENT_FINGER_MOTION: [[fallthrough]];
+            case SDL_EVENT_FINGER_UP: [[fallthrough]];
+            case SDL_EVENT_FINGER_CANCELED: //
+                touchControls.ProcessFingerEvent(evt, io.DisplaySize, io.WantCaptureMouse);
+                break;
+#endif
 
             case SDL_EVENT_QUIT: goto end_loop; break;
 
@@ -1750,6 +1786,10 @@ void App::RunEmulator() {
             rescaleUIPending = false;
             m_displayService.RescaleUI();
         }
+
+#if YMIR_PLATFORM_IOS
+        touchControls.Update(screen.window, io.DisplaySize);
+#endif
 
         // Process all axis changes
         m_context.inputContext.ProcessAxes();
@@ -2151,6 +2191,13 @@ void App::RunEmulator() {
         auto *viewport = ImGui::GetMainViewport();
 
         const bool drawMainMenu = [&] {
+#if YMIR_PLATFORM_IOS
+            // The on-screen Menu button toggles the main menu bar
+            if (touchControls.IsMenuRequested()) {
+                return true;
+            }
+#endif
+
             // Always draw main menu bar in windowed mode
             if (!fullScreen) {
                 return true;
@@ -2413,6 +2460,15 @@ void App::RunEmulator() {
                         videoSettings.fullScreen = fullScreen;
                         settings.MakeDirty();
                     }
+
+#if YMIR_PLATFORM_IOS
+                    {
+                        bool touchControlsEnabled = touchControls.IsEnabled();
+                        if (ImGui::MenuItem("Touch controls", nullptr, &touchControlsEnabled)) {
+                            touchControls.SetEnabled(touchControlsEnabled);
+                        }
+                    }
+#endif
 
                     ImGui::Separator();
 
@@ -2792,6 +2848,11 @@ void App::RunEmulator() {
                 ImGui::PopStyleVar();
             }
         }
+
+#if YMIR_PLATFORM_IOS
+        // Draw behind windows and menus so they stay usable
+        touchControls.Draw(ImGui::GetBackgroundDrawList());
+#endif
 
         {
             ImGuiViewport *viewport = ImGui::GetMainViewport();

@@ -1,5 +1,10 @@
 #include "profile.hpp"
 
+#include <util/platform.hpp>
+#if YMIR_PLATFORM_IOS
+    #include <util/ios_platform.hpp>
+#endif
+
 #include <ymir/util/process.hpp>
 
 #include <SDL3/SDL_filesystem.h>
@@ -27,14 +32,22 @@ Profile::Profile() {
 }
 
 std::filesystem::path Profile::GetUserProfilePath() {
+#if YMIR_PLATFORM_IOS
+    // The Documents directory is shown in the Files app, which is the only way users can add BIOS images and games
+    return util::ios::GetDocumentsPath();
+#else
     char *cpath = SDL_GetPrefPath(Ymir_ORGANIZATION_NAME, Ymir_APP_NAME);
     std::string path = cpath;
     SDL_free(cpath);
     return std::u8string{path.begin(), path.end()};
+#endif
 }
 
 std::filesystem::path Profile::GetPortableProfilePath() {
-#ifdef __APPLE__
+#if YMIR_PLATFORM_IOS
+    // The app bundle is read-only; there is no portable mode
+    return util::ios::GetDocumentsPath();
+#elif defined(__APPLE__)
     // SDL_GetCurrentDirectory() returns "/" for some reason
     return GetExecutableProfilePath();
 #else
@@ -46,7 +59,11 @@ std::filesystem::path Profile::GetPortableProfilePath() {
 }
 
 std::filesystem::path Profile::GetExecutableProfilePath() {
+#if YMIR_PLATFORM_IOS
+    return util::ios::GetDocumentsPath();
+#else
     return util::GetCurrentProcessExecutablePath().parent_path();
+#endif
 }
 
 void Profile::UseUserProfilePath() {

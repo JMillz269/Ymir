@@ -499,6 +499,16 @@ function(_shader_make_compile_metal_command)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     if (APPLE AND SPIRV_CROSS_EXECUTABLE AND METAL_EXECUTABLE AND METALLIB_EXECUTABLE)
+        # The Metal compiler needs the iOS SDK to build shaders for iOS; invoking it through xcrun selects it
+        set(_metal_command "${METAL_EXECUTABLE}")
+        set(_metallib_command "${METALLIB_EXECUTABLE}")
+        set(_spirv_cross_platform_flags "")
+        if (IOS AND XCRUN_EXECUTABLE)
+            set(_metal_command "${XCRUN_EXECUTABLE}" -sdk iphoneos metal)
+            set(_metallib_command "${XCRUN_EXECUTABLE}" -sdk iphoneos metallib)
+            set(_spirv_cross_platform_flags --msl-ios)
+        endif ()
+
         set(_metal_compile_flags "")
         if (CMAKE_BUILD_TYPE STREQUAL "Debug")
             list(APPEND _metal_compile_flags "-gline-tables-only" "-MO")
@@ -511,12 +521,13 @@ function(_shader_make_compile_metal_command)
                 "${ARG_SPIRV_SOURCE}"
                 --msl
                 --msl-version 20200  # for 64-bit integers
+                ${_spirv_cross_platform_flags}
                 --output "${ARG_METAL_DESTINATION}"
-            COMMAND "${METAL_EXECUTABLE}"
+            COMMAND ${_metal_command}
                 ${_metal_compile_flags}
                 -c "${ARG_METAL_DESTINATION}"
                 -o "${ARG_AIR_DESTINATION}"
-            COMMAND "${METALLIB_EXECUTABLE}"
+            COMMAND ${_metallib_command}
                 "${ARG_AIR_DESTINATION}"
                 -o "${ARG_METALLIB_DESTINATION}"
             PARENT_SCOPE

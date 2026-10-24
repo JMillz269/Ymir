@@ -1,6 +1,11 @@
 #include "file_dialog_service.hpp"
 #include "display_service.hpp"
 
+#include <util/platform.hpp>
+#if YMIR_PLATFORM_IOS
+    #include <util/ios_platform.hpp>
+#endif
+
 #include <ymir/util/dev_log.hpp>
 
 #include <SDL3/SDL.h>
@@ -58,6 +63,11 @@ void FileDialogService::InvokeSelectFolderDialog(const FolderDialogParams &param
 void FileDialogService::InvokeFileDialog(SDL_FileDialogType type, const char *title, void *filters, int numFilters,
                                          bool allowMany, const char *location, void *userdata,
                                          SDL_DialogFileCallback callback) const {
+#if YMIR_PLATFORM_IOS
+    // SDL does not implement file dialogs on iOS; use the system document picker instead
+    util::ios::ShowFileDialog(m_context.screen.window, type, allowMany, location, userdata, callback);
+    return;
+#else
     SDL_PropertiesID props = m_fileDialogProps;
 
     SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, title);
@@ -100,6 +110,7 @@ void FileDialogService::InvokeFileDialog(SDL_FileDialogType type, const char *ti
     } else {
         SDL_ShowFileDialogWithProperties(type, callback, userdata, props);
     }
+#endif
 }
 
 } // namespace app::services

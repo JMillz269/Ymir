@@ -6,8 +6,15 @@
 #include <cxxopts.hpp>
 #include <fmt/format.h>
 
+#include <util/platform.hpp>
+
 #if defined(__APPLE__)
     #include <objc/message.h>
+#endif
+
+#if YMIR_PLATFORM_IOS
+    // Provides the UIApplicationMain bootstrap that calls main() once UIKit is up
+    #include <SDL3/SDL_main.h>
 #endif
 
 #include <memory>

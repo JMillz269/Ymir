@@ -1,5 +1,7 @@
 #include "os_exception_handler.hpp"
 
+#include <util/platform.hpp>
+
 #include <ymir/version.hpp>
 
 #include <SDL3/SDL_messagebox.h>
@@ -21,6 +23,8 @@
 #elif defined(__FreeBSD__)
     #include <iterator>
     #include <signal.h>
+#elif YMIR_PLATFORM_IOS
+    // Nothing needed
 #elif defined(__APPLE__)
     #include <mach/mach.h>
     #include <ymir/util/thread_name.hpp>
@@ -266,6 +270,15 @@ void RegisterExceptionHandler(bool allExceptions) {
     sigaction(SIGSEGV, &action, nullptr);
     sigaction(SIGBUS, &action, nullptr);
 }
+
+#elif YMIR_PLATFORM_IOS
+
+// -----------------------------------------------------------------------------
+// iOS implementation
+
+// Intentionally empty. The system already produces crash reports, and installing Mach exception ports would steal
+// exceptions from an attached debugger, which many sideloading and JIT enablement workflows depend on.
+void RegisterExceptionHandler(bool /*allExceptions*/) {}
 
 #elif defined(__APPLE__)
 

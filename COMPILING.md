@@ -202,6 +202,36 @@ build/apps/ymir-sdl3/ymir-sdl3.app
 ```
 
 
+## Building for iOS
+
+The iOS port targets arm64 devices (iPhone and iPad) running iOS 16 or later and uses the Metal graphics backend. It must be built on macOS with Xcode installed.
+
+Besides the macOS requirements, you need DXC (with SPIR-V support) and `spirv-cross` in your `PATH` to compile the shaders. The Vulkan SDK provides both.
+
+The `arm64-ios16` vcpkg triplet is provided in `vcpkg-triplets`. Use the Xcode generator, which compiles the asset catalog and assembles the app bundle:
+
+```sh
+cmake -S . -B build-ios -G Xcode \
+    -DCMAKE_SYSTEM_NAME=iOS \
+    -DCMAKE_OSX_SYSROOT=iphoneos \
+    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+    -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+    -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+    -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY= \
+    -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake \
+    -DVCPKG_TARGET_TRIPLET=arm64-ios16 \
+    -DYmir_DEV_BUILD=OFF -DYmir_ENABLE_UPDATE_CHECKS=OFF \
+    -DYmir_ENABLE_SANDBOX=OFF -DYmir_ENABLE_YMDASM=OFF -DYmir_ENABLE_TESTS=OFF
+cmake --build build-ios --config Release --target ymir-sdl3 --parallel
+```
+
+The commands above produce an unsigned app. To create an IPA, copy the built `ymir-sdl3.app` into a `Payload` folder and zip it as `Ymir.ipa`; the [iOS workflow](.github/workflows/ios.yaml) does exactly this and uploads the result as an artifact. Install it with a sideloading tool that signs it with your own certificate.
+To sign it from Xcode instead, drop the `CODE_SIGN*` attributes and set your team and bundle identifier (`-DYmir_IOS_BUNDLE_ID=...`) in the generated project.
+
+See [docs/ios.md](docs/ios.md) for how to use the app once it's installed.
+
+
 ## Profile Guided Optimization (PGO)
 
 PGO is supported for Clang/AppleClang and GCC (MSVC PGO may be added in future releases).

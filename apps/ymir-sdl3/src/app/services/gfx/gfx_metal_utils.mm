@@ -1,6 +1,7 @@
 #include "gfx_metal_utils.hpp"
 
 #import <Metal/Metal.h>
+#import <TargetConditionals.h>
 
 namespace app::gfx {
 
@@ -20,7 +21,12 @@ void EnumerateMetalGraphicsAdapters() {
         g_metalAdapters.clear();
 
         id<MTLDevice> defaultDevice = MTLCreateSystemDefaultDevice();
+#if TARGET_OS_OSX
         NSArray<id<MTLDevice>> *devices = MTLCopyAllDevices();
+#else
+        // MTLCopyAllDevices is unavailable on iOS, which only ever exposes the integrated GPU
+        NSArray<id<MTLDevice>> *devices = nil;
+#endif
 
         if (devices == nil || devices.count == 0) {
             if (defaultDevice != nil) {

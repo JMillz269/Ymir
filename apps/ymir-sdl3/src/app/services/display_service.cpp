@@ -7,6 +7,8 @@
 
 #include <app/ui/fonts/IconsMaterialSymbols.h>
 
+#include <util/platform.hpp>
+
 #include <ymir/util/dev_log.hpp>
 #include <ymir/util/scope_guard.hpp>
 
@@ -38,7 +40,11 @@ namespace {
 
     float LogicalUIScale(SDL_Window *window) {
         // ImGui handles Retina via DisplayFramebufferScale
-#if defined(__APPLE__)
+#if YMIR_PLATFORM_IOS
+        // Points on iPhones are small touch targets; make the UI comfortable to tap
+        (void)window;
+        return 1.5f;
+#elif defined(__APPLE__)
         (void)window;
         return 1.0f;
 #else

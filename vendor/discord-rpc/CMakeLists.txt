@@ -25,6 +25,11 @@ if(WIN32)
 		src/discord_register_win.cpp
 	)
 	target_link_libraries(discord-rpc PRIVATE ws2_32)
+elseif(IOS)
+	target_sources(discord-rpc PRIVATE
+		src/connection_unix.cpp
+		src/discord_register_ios.cpp
+	)
 elseif(APPLE)
 	target_sources(discord-rpc PRIVATE
 		src/connection_unix.cpp

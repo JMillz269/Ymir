@@ -441,6 +441,17 @@ if (Vulkan_FOUND)
     )
 endif ()
 
+if (IOS)
+    target_sources(ymir-sdl3 PRIVATE
+        src/app/input/touch_controls.cpp
+        src/app/input/touch_controls.hpp
+        src/util/ios_platform.hpp
+        src/util/ios_platform.mm
+    )
+    set_source_files_properties(src/util/ios_platform.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+endif ()
+target_sources(ymir-sdl3 PRIVATE src/util/platform.hpp)
+
 if (APPLE)
     target_sources(ymir-sdl3 PRIVATE
         src/app/services/gfx/gfx_context_impl_metal.mm
@@ -506,7 +517,27 @@ set_target_properties(ymir-sdl3 PROPERTIES
                       VERSION ${Ymir_VERSION}
                       SOVERSION ${Ymir_VERSION_MAJOR})
 
-if(APPLE)
+if (IOS)
+    set(Ymir_IOS_BUNDLE_ID "io.github.jmillz269.ymir" CACHE STRING "Bundle identifier of the iOS app")
+    set(Ymir_IOS_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    if (NOT Ymir_IOS_DEPLOYMENT_TARGET)
+        set(Ymir_IOS_DEPLOYMENT_TARGET "16.0")
+    endif ()
+
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/res/Info-ios.plist.in ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
+
+    set(IOS_ASSET_CATALOG "${CMAKE_CURRENT_SOURCE_DIR}/res/ios/Assets.xcassets")
+    set_source_files_properties(${IOS_ASSET_CATALOG} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+    target_sources(ymir-sdl3 PRIVATE ${IOS_ASSET_CATALOG})
+
+    set_target_properties(ymir-sdl3 PROPERTIES
+                          MACOSX_BUNDLE TRUE
+                          MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/Info.plist
+                          XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
+                          XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+                          XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${Ymir_IOS_DEPLOYMENT_TARGET}"
+                          XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${Ymir_IOS_BUNDLE_ID}")
+elseif (APPLE)
     # Configure Info.plist
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/res/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
 
@@ -565,6 +596,14 @@ if (WIN32)
         WIL::WIL
     )
 endif ()
+if (IOS)
+    target_link_libraries(ymir-sdl3 PRIVATE
+        "-framework UIKit"
+        "-framework UniformTypeIdentifiers"
+        "-framework Metal"
+        "-framework QuartzCore"
+    )
+endif ()
 target_compile_features(ymir-sdl3 PUBLIC cxx_std_20)
 
 ## Create embedded resource library
@@ -591,8 +630,8 @@ cmrc_add_resource_library(ymir-sdl3-rc
 
 cmrk_copy_runtime_dlls(ymir-sdl3)
 
-## Generate MacOS mig IPC implementation
-if (APPLE)
+## Generate MacOS mig IPC implementation (not used on iOS, where no exception ports are installed)
+if (APPLE AND NOT IOS)
     find_path(MACH_EXC_DEFS_DIR "mach/mach_exc.defs")
     message(STATUS "mach/mach_exc.defs location: ${MACH_EXC_DEFS_DIR}")
     if(MACH_EXC_DEFS_DIR)

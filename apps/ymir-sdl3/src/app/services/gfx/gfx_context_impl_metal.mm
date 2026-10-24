@@ -12,6 +12,7 @@
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <TargetConditionals.h>
 
 #include <SDL3/SDL.h>
 #include <fmt/format.h>
@@ -202,7 +203,9 @@ struct MetalGraphicsContext::Impl {
             metalLayer.device = device;
             metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
             metalLayer.framebufferOnly = YES;
+#if TARGET_OS_OSX
             metalLayer.displaySyncEnabled = (presentMode != PresentMode::NoSync);
+#endif // iOS drawables are always paced by the display
 
             int pxW = 0, pxH = 0;
             SDL_GetWindowSizeInPixels(spec.window, &pxW, &pxH);
@@ -1057,9 +1060,11 @@ util::ValueResult<size_t> MetalGraphicsContext::DownloadDisplayOutputTexture(voi
 
 util::VoidResult<> MetalGraphicsContext::SetPresentMode(PresentMode mode) {
     m_impl->presentMode = mode;
+#if TARGET_OS_OSX
     if (m_impl->metalLayer != nil) {
         m_impl->metalLayer.displaySyncEnabled = (mode != PresentMode::NoSync);
     }
+#endif
     return {};
 }
 

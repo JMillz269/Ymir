@@ -62,6 +62,11 @@ endif ()
 option(Ymir_FF_HOST_CD_DRIVES "Enable support for reading discs from host drives" ${Ymir_LOCAL_BUILD})
 option(Ymir_FF_ENABLE_UNIMPL_GFX_BACKENDS "Enable unimplemented graphics backends" ${Ymir_LOCAL_BUILD})
 
+# iOS has no access to host drives (the macOS implementation depends on IOKit)
+if (IOS)
+    set(Ymir_FF_HOST_CD_DRIVES OFF CACHE BOOL "Enable support for reading discs from host drives" FORCE)
+endif ()
+
 if (Ymir_LIBRARY_ONLY)
     message(STATUS "Ymir: Library-only build")
 endif ()
