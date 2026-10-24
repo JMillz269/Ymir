@@ -23,7 +23,7 @@ Ymir stores everything in its Documents folder, which shows up in the Files app 
 
 The iOS app has a native SwiftUI interface (sources in `apps/ymir-sdl3/src/ios`) instead of the desktop menu bar:
 
-- **Games** lists the disc images found in the Ymir folder (`.cue`, `.chd`, `.iso`, `.ccd`, `.mds`). The emulator stays idle until you tap a game. Swipe or long-press a game to delete it. The **+** button imports games or a BIOS with the system document picker and opens the Ymir folder in the Files app. To show cover art, put a `.png` or `.jpg` named like the disc image next to it, or in `covers`.
+- **Games** lists the disc images found in the Ymir folder (`.cue`, `.chd`, `.iso`, `.ccd`, `.mds`). The emulator stays idle until you tap a game. Swipe or long-press a game to delete it. The **+** button imports games or a BIOS with the system document picker and opens the Ymir folder in the Files app. Long-press a game to set its artwork (from Photos, Files or a Google Images search where you touch and hold the image you want) or to rename it; the name only changes in the app. Artwork is stored in `covers`, and a `.png` or `.jpg` named like the disc image next to it is used too.
 - **Settings** replaces the menu bar and the desktop settings window with native pages: Display, Audio, Controls (peripherals, deadzones), Emulation (speed, rewind), System & Region, Cartridge, CD Drive, Performance & Accuracy and Interface, plus BIOS import. The only thing not available is editing individual button and hotkey bindings; controllers use the default bindings.
 - On iOS 26 and later the tab bar and the buttons use Liquid Glass; older systems get translucent materials.
 

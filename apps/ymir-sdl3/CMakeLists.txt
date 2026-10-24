@@ -455,6 +455,7 @@ if (IOS)
         src/ios/Ymir-Bridging-Header.h
         src/ios/YmirHost.h
         src/ios/YmirHost.mm
+        src/ios/ArtworkSearchView.swift
         src/ios/GameLibrary.swift
         src/ios/GameMenuView.swift
         src/ios/LauncherRoot.swift
@@ -620,6 +621,8 @@ if (IOS)
     target_link_libraries(ymir-sdl3 PRIVATE
         "-framework UIKit"
         "-framework SwiftUI"
+        "-framework PhotosUI"
+        "-framework WebKit"
         "-framework UniformTypeIdentifiers"
         "-framework Metal"
         "-framework QuartzCore"

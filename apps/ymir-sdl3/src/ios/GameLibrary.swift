@@ -6,9 +6,16 @@ import UIKit
 struct GameEntry: Identifiable, Hashable {
     let url: URL
     let sizeBytes: Int64
+    /// Name chosen by the user, if any.
+    var customName: String?
+    /// Modification time of the cover art file; changes whenever the artwork changes.
+    var coverStamp: TimeInterval = 0
 
     var id: String { url.path }
-    var title: String { url.deletingPathExtension().lastPathComponent }
+    /// The file name without extension.
+    var stem: String { url.deletingPathExtension().lastPathComponent }
+    /// The name shown in the app.
+    var title: String { customName ?? stem }
     var format: String { url.pathExtension.uppercased() }
 
     var subtitle: String {
@@ -30,7 +37,6 @@ struct GameEntry: Identifiable, Hashable {
     func relatedFiles() -> [URL] {
         let fm = FileManager.default
         let dir = url.deletingLastPathComponent()
-        let stem = url.deletingPathExtension().lastPathComponent
         var files = [url]
 
         switch url.pathExtension.lowercased() {
@@ -65,10 +71,11 @@ struct GameEntry: Identifiable, Hashable {
     /// Cover art placed next to the game or in Documents/covers, named like the game. Optional.
     func coverURL() -> URL? {
         let fm = FileManager.default
-        let folders = [url.deletingLastPathComponent(), AppPaths.covers]
+        // Artwork chosen in the app lives in covers; images next to the game are used as a fallback
+        let folders = [AppPaths.covers, url.deletingLastPathComponent()]
         for folder in folders {
             for ext in ["png", "jpg", "jpeg"] {
-                let candidate = folder.appendingPathComponent(title + "." + ext)
+                let candidate = folder.appendingPathComponent(stem + "." + ext)
                 if fm.fileExists(atPath: candidate.path) { return candidate }
             }
         }
@@ -88,6 +95,7 @@ final class GameLibrary: ObservableObject {
         "roms", "backup", "savestates", "state", "screenshots", "dumps", "covers", "exports",
     ]
     private static let lastPlayedKey = "ymir.lastPlayed"
+    private static let customNamesKey = "ymir.customNames"
 
     init() {
         reload()
@@ -98,6 +106,7 @@ final class GameLibrary: ObservableObject {
         try? fm.createDirectory(at: AppPaths.games, withIntermediateDirectories: true)
 
         let lastPlayed = Self.lastPlayed()
+        let names = Self.customNames()
         var found: [GameEntry] = []
 
         let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey]
@@ -118,7 +127,10 @@ final class GameLibrary: ObservableObject {
                     let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
                     return sum + Int64(size)
                 }
-                entry = GameEntry(url: url, sizeBytes: total)
+                let stamp = entry.coverURL()
+                    .flatMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }?
+                    .timeIntervalSince1970 ?? 0
+                entry = GameEntry(url: url, sizeBytes: total, customName: names[entry.relativePath], coverStamp: stamp)
                 found.append(entry)
             }
         }
@@ -139,7 +151,74 @@ final class GameLibrary: ObservableObject {
         var played = Self.lastPlayed()
         played.removeValue(forKey: game.relativePath)
         UserDefaults.standard.set(played, forKey: Self.lastPlayedKey)
+        removeArtworkFiles(for: game)
+        rename(game, to: nil, reloadAfter: false)
         reload()
+    }
+
+    // MARK: Names
+
+    /// Changes the name the game has in the app. An empty name restores the file name.
+    func rename(_ game: GameEntry, to name: String?, reloadAfter: Bool = true) {
+        var names = Self.customNames()
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty || trimmed == game.stem {
+            names.removeValue(forKey: game.relativePath)
+        } else {
+            names[game.relativePath] = trimmed
+        }
+        UserDefaults.standard.set(names, forKey: Self.customNamesKey)
+        if reloadAfter { reload() }
+    }
+
+    // MARK: Artwork
+
+    func hasCustomArtwork(_ game: GameEntry) -> Bool {
+        ["png", "jpg", "jpeg"].contains {
+            FileManager.default.fileExists(atPath: AppPaths.covers.appendingPathComponent(game.stem + "." + $0).path)
+        }
+    }
+
+    /// Saves an image as the game's artwork. Returns false if the data isn't an image.
+    @discardableResult
+    func setArtwork(_ data: Data, for game: GameEntry) -> Bool {
+        guard let image = UIImage(data: data) else { return false }
+
+        // Covers are shown small; keep the files light
+        let maxSide: CGFloat = 800
+        let scale = min(1, maxSide / max(image.size.width, image.size.height))
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let resized = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        guard let jpeg = resized.jpegData(compressionQuality: 0.88) else { return false }
+
+        removeArtworkFiles(for: game)
+        do {
+            try FileManager.default.createDirectory(at: AppPaths.covers, withIntermediateDirectories: true)
+            try jpeg.write(to: AppPaths.covers.appendingPathComponent(game.stem + ".jpg"), options: .atomic)
+        } catch {
+            return false
+        }
+        reload()
+        return true
+    }
+
+    func removeArtwork(for game: GameEntry) {
+        removeArtworkFiles(for: game)
+        reload()
+    }
+
+    private func removeArtworkFiles(for game: GameEntry) {
+        for ext in ["png", "jpg", "jpeg"] {
+            try? FileManager.default.removeItem(at: AppPaths.covers.appendingPathComponent(game.stem + "." + ext))
+        }
+    }
+
+    private static func customNames() -> [String: String] {
+        (UserDefaults.standard.dictionary(forKey: customNamesKey) as? [String: String]) ?? [:]
     }
 
     static func markPlayed(_ game: GameEntry) {
@@ -194,7 +273,7 @@ private final class CoverCache: @unchecked Sendable {
     private let cache = NSCache<NSString, UIImage>()
 
     func image(for game: GameEntry, pixelSize: CGFloat) async -> UIImage? {
-        let key = "\(game.id)@\(Int(pixelSize))" as NSString
+        let key = "\(game.id)|\(game.coverStamp)@\(Int(pixelSize))" as NSString
         if let cached = cache.object(forKey: key) {
             return cached
         }
@@ -233,7 +312,7 @@ struct CoverArtView: View {
             RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
         )
-        .task(id: game.id) {
+        .task(id: "\(game.id)|\(game.coverStamp)") {
             image = await CoverCache.shared.image(for: game, pixelSize: size * displayScale)
         }
     }

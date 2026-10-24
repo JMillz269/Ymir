@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -51,6 +52,13 @@ struct GamesView: View {
     @State private var isImporting = false
     @State private var alert: AlertInfo?
     @State private var pendingDelete: GameEntry?
+    @State private var artworkTarget: GameEntry?
+    @State private var showPhotoPicker = false
+    @State private var showArtworkFiles = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var searchTarget: GameEntry?
+    @State private var renameTarget: GameEntry?
+    @State private var renameText = ""
     @State private var hasBIOS = YmirHost.hasBIOS
     @State private var activePath: String? = YmirHost.loadedGamePath
 
@@ -103,6 +111,40 @@ struct GamesView: View {
                                 } label: {
                                     Label("Play", systemImage: "play.fill")
                                 }
+                                Menu {
+                                    Button {
+                                        artworkTarget = game
+                                        showPhotoPicker = true
+                                    } label: {
+                                        Label("Photos", systemImage: "photo.on.rectangle")
+                                    }
+                                    Button {
+                                        artworkTarget = game
+                                        showArtworkFiles = true
+                                    } label: {
+                                        Label("Files", systemImage: "folder")
+                                    }
+                                    Button {
+                                        searchTarget = game
+                                    } label: {
+                                        Label("Search", systemImage: "magnifyingglass")
+                                    }
+                                    if library.hasCustomArtwork(game) {
+                                        Button(role: .destructive) {
+                                            library.removeArtwork(for: game)
+                                        } label: {
+                                            Label("Remove Artwork", systemImage: "trash")
+                                        }
+                                    }
+                                } label: {
+                                    Label("Set Artwork", systemImage: "photo")
+                                }
+                                Button {
+                                    renameText = game.title
+                                    renameTarget = game
+                                } label: {
+                                    Label("Rename", systemImage: "pencil")
+                                }
                                 Button(role: .destructive) {
                                     pendingDelete = game
                                 } label: {
@@ -111,6 +153,53 @@ struct GamesView: View {
                             }
                         }
                     }
+                }
+            }
+            .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
+            .onChange(of: photoItem) { item in
+                guard let item, let game = artworkTarget else { return }
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self) {
+                        if !library.setArtwork(data, for: game) {
+                            alert = AlertInfo(title: "Couldn't Use That Image", message: "The file isn't a supported image.")
+                        }
+                    }
+                    photoItem = nil
+                }
+            }
+            .fileImporter(isPresented: $showArtworkFiles, allowedContentTypes: [.image], allowsMultipleSelection: false) { result in
+                guard case .success(let urls) = result, let url = urls.first, let game = artworkTarget else { return }
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                if let data = try? Data(contentsOf: url), library.setArtwork(data, for: game) {
+                    return
+                }
+                alert = AlertInfo(title: "Couldn't Use That Image", message: "The file isn't a supported image.")
+            }
+            .alert(
+                "Rename Game",
+                isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })
+            ) {
+                TextField("Name", text: $renameText)
+                Button("Save") {
+                    if let game = renameTarget {
+                        library.rename(game, to: renameText)
+                    }
+                    renameTarget = nil
+                }
+                if let game = renameTarget, game.customName != nil {
+                    Button("Use File Name") {
+                        library.rename(game, to: nil)
+                        renameTarget = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) { renameTarget = nil }
+            } message: {
+                Text("This only changes how the game is named in Ymir.")
+            }
+            .sheet(item: $searchTarget) { game in
+                ArtworkSearchView(game: game) { data in
+                    library.setArtwork(data, for: game)
                 }
             }
             .listStyle(.insetGrouped)
