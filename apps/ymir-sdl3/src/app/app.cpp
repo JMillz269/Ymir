@@ -116,6 +116,8 @@
 
 #if YMIR_PLATFORM_IOS
     #include <app/input/touch_controls.hpp>
+    #include <app/ios/host_interface.hpp>
+    #include <util/ios_platform.hpp>
 #endif
 
 #include <SDL3/SDL.h>
@@ -133,7 +135,9 @@
 
 #include <rtmidi/RtMidi.h>
 
+#include <algorithm>
 #include <clocale>
+#include <ctime>
 #include <mutex>
 #include <numbers>
 #include <span>
@@ -492,7 +496,8 @@ int App::Run(const CommandLineOptions &options) {
     if (!options.gameDiscPath.empty()) {
         // This also inserts the game-specific cartridges or the one configured by the user in Settings > Cartridge
         m_discService.LoadDiscImage(options.gameDiscPath, false);
-    } else if (settings.general.rememberLastLoadedDisc && !m_context.state.recentDiscs.empty()) {
+    } else if (!YMIR_PLATFORM_IOS && settings.general.rememberLastLoadedDisc && !m_context.state.recentDiscs.empty()) {
+        // (on iOS the user picks a game from the native game library instead)
         m_discService.LoadDiscImage(m_context.state.recentDiscs[0], false);
     } else {
         m_context.EnqueueEvent(events::emu::InsertCartridgeFromSettings());
@@ -518,7 +523,10 @@ int App::Run(const CommandLineOptions &options) {
     if (!iplLoadResult.succeeded) {
         if (m_context.romManager.GetIPLROMs().empty()) {
             // Could not load IPL ROM because there are none -- likely to be a fresh install, so show the Welcome screen
-            m_windowManagerService.OpenWelcomeModal(true);
+            // (on iOS the native game library explains how to import a BIOS instead)
+            if constexpr (!YMIR_PLATFORM_IOS) {
+                m_windowManagerService.OpenWelcomeModal(true);
+            }
         } else {
             m_windowManagerService.OpenSimpleErrorModal(
                 fmt::format("Could not load IPL ROM: {}", iplLoadResult.errorMessage));
@@ -1381,6 +1389,120 @@ void App::RunEmulator() {
     // On-screen control pad, driven by touch events. Hidden while a hardware gamepad is connected.
     input::TouchControls touchControls{m_context.inputContext};
     SDL_DisableScreenSaver();
+
+    // Expose the emulator to the native iOS user interface (game library, settings and in-game menu)
+    auto &iosHost = app::ios::GetHost();
+    iosHost.isPaused = [this] { return m_context.paused; };
+    iosHost.isFastForward = [this] { return !m_context.emuSpeed.limitSpeed; };
+    iosHost.isDiscLoaded = [this] { return !m_context.state.loadedDiscImagePath.empty(); };
+    iosHost.loadedDiscPath = [this] { return m_context.state.loadedDiscImagePath; };
+    iosHost.hasIPLROM = [this] { return !m_context.iplRomPath.empty(); };
+    iosHost.iplName = [this]() -> std::string {
+        if (m_context.iplRomInfo != nullptr && m_context.iplRomInfo->version != nullptr) {
+            return fmt::format("{} ({})", m_context.iplRomInfo->version, m_context.iplRomPath.filename().string());
+        }
+        return m_context.iplRomPath.filename().string();
+    };
+    iosHost.saveSlots = [this] {
+        std::vector<app::ios::SaveSlotInfo> slots;
+        for (const auto &meta : m_saveStateService.List()) {
+            app::ios::SaveSlotInfo info{};
+            info.index = static_cast<int>(meta.index);
+            info.present = meta.present;
+            if (meta.present) {
+                std::tm localTime = util::to_local_time(meta.ts);
+                char buf[64]{};
+                std::strftime(buf, sizeof(buf), "%b %d, %H:%M", &localTime);
+                info.description = buf;
+            }
+            slots.push_back(std::move(info));
+        }
+        return slots;
+    };
+    iosHost.launchGame = [this](const std::filesystem::path &path) {
+        m_context.EnqueueEvent(events::emu::LoadDisc(path));
+        m_context.EnqueueEvent(events::emu::SetPaused(false));
+        m_context.emuSpeed.limitSpeed = true;
+        m_context.audioSystem.SetSync(m_context.emuSpeed.ShouldSyncToAudio());
+    };
+    iosHost.setPaused = [this](bool paused) { m_context.EnqueueEvent(events::emu::SetPaused(paused)); };
+    iosHost.setFastForward = [this](bool enable) {
+        m_context.emuSpeed.limitSpeed = !enable;
+        m_context.audioSystem.SetSync(m_context.emuSpeed.ShouldSyncToAudio());
+    };
+    iosHost.softReset = [this] { m_context.EnqueueEvent(events::emu::SoftReset()); };
+    iosHost.hardReset = [this] { m_context.EnqueueEvent(events::emu::HardReset()); };
+    iosHost.openCloseTray = [this] { m_context.EnqueueEvent(events::emu::OpenCloseTray()); };
+    iosHost.ejectDisc = [this] { m_context.EnqueueEvent(events::emu::EjectDisc()); };
+    iosHost.saveState = [this](int slot) { m_saveStateService.SaveSaveStateSlot(static_cast<std::size_t>(slot)); };
+    iosHost.loadState = [this](int slot) { m_saveStateService.LoadSaveStateSlot(static_cast<std::size_t>(slot)); };
+    iosHost.takeScreenshot = [this] { m_context.EnqueueEvent(events::gui::TakeScreenshot()); };
+    iosHost.reloadIPLROM = [this]() -> std::string {
+        m_romService.ScanIPLROMs();
+        m_context.EnqueueEvent(events::gui::ReloadIPLROM());
+        return {};
+    };
+    iosHost.openAdvancedSettings = [this](int tab) {
+        m_context.EnqueueEvent(events::gui::OpenSettings(static_cast<ui::SettingsTab>(tab)));
+    };
+    iosHost.getBool = [&settings, &touchControls](const std::string &key, bool defaultValue) {
+        if (key == "video.forceIntegerScaling") {
+            return settings.video.forceIntegerScaling;
+        } else if (key == "video.forceAspectRatio") {
+            return settings.video.forceAspectRatio;
+        } else if (key == "video.threadedVDP") {
+            return settings.video.swRenderer.threadedVDP2.Get();
+        } else if (key == "gui.showFrameRateOSD") {
+            return settings.gui.showFrameRateOSD;
+        } else if (key == "audio.mute") {
+            return settings.audio.mute.Get();
+        } else if (key == "touch.enabled") {
+            return touchControls.IsEnabled();
+        } else if (key == "general.enableRewindBuffer") {
+            return settings.general.enableRewindBuffer;
+        }
+        return defaultValue;
+    };
+    iosHost.setBool = [this, &settings, &touchControls](const std::string &key, bool value) {
+        if (key == "video.forceIntegerScaling") {
+            settings.video.forceIntegerScaling = value;
+        } else if (key == "video.forceAspectRatio") {
+            settings.video.forceAspectRatio = value;
+        } else if (key == "video.threadedVDP") {
+            settings.video.swRenderer.threadedVDP1 = value;
+            settings.video.swRenderer.threadedVDP2 = value;
+        } else if (key == "gui.showFrameRateOSD") {
+            settings.gui.showFrameRateOSD = value;
+        } else if (key == "audio.mute") {
+            settings.audio.mute = value;
+        } else if (key == "touch.enabled") {
+            touchControls.SetEnabled(value);
+        } else if (key == "general.enableRewindBuffer") {
+            if (settings.general.enableRewindBuffer != value) {
+                ToggleRewindBuffer();
+            }
+            return;
+        } else {
+            return;
+        }
+        settings.MakeDirty();
+    };
+    iosHost.getFloat = [&settings](const std::string &key, float defaultValue) {
+        if (key == "audio.volume") {
+            return settings.audio.volume.Get();
+        }
+        return defaultValue;
+    };
+    iosHost.setFloat = [&settings](const std::string &key, float value) {
+        if (key == "audio.volume") {
+            settings.audio.volume = std::clamp(value, 0.0f, 1.0f);
+            settings.MakeDirty();
+        }
+    };
+    util::ScopeGuard sgClearIOSHost{[&] { app::ios::GetHost() = {}; }};
+
+    // The native UI is presented on top of the emulator view once the first frames have been drawn
+    int iosLauncherDelayFrames = 10;
 #endif
 
     std::array<GUIEvent, 64> evts{};
@@ -1789,6 +1911,18 @@ void App::RunEmulator() {
 
 #if YMIR_PLATFORM_IOS
         touchControls.Update(screen.window, io.DisplaySize);
+
+        // The on-screen Menu button opens the native in-game menu
+        if (touchControls.IsMenuRequested()) {
+            touchControls.ClearMenuRequest();
+            util::ios::ShowGameMenu();
+        }
+
+        // Present the native game library over the emulator view on startup
+        if (iosLauncherDelayFrames > 0 && --iosLauncherDelayFrames == 0) {
+            util::ios::AttachGameWindow(screen.window);
+            util::ios::ShowLauncher();
+        }
 #endif
 
         // Process all axis changes
@@ -2191,12 +2325,10 @@ void App::RunEmulator() {
         auto *viewport = ImGui::GetMainViewport();
 
         const bool drawMainMenu = [&] {
-#if YMIR_PLATFORM_IOS
-            // The on-screen Menu button toggles the main menu bar
-            if (touchControls.IsMenuRequested()) {
-                return true;
+            // On iOS all menus live in the native user interface
+            if constexpr (YMIR_PLATFORM_IOS) {
+                return false;
             }
-#endif
 
             // Always draw main menu bar in windowed mode
             if (!fullScreen) {

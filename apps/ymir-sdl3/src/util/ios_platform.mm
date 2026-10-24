@@ -3,7 +3,11 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#import "ios/YmirHost.h"
+
 #include <SDL3/SDL_properties.h>
+
+#import <objc/message.h>
 
 #include <string>
 #include <vector>
@@ -131,6 +135,39 @@ void ShowFileDialog(SDL_Window *window, SDL_FileDialogType type, bool allowMany,
         picker.delegate = delegate;
         [presenter presentViewController:picker animated:YES completion:nil];
     }
+}
+
+static void CallShell(const char *selectorName) {
+    Class shell = NSClassFromString(@"YmirShell");
+    SEL selector = sel_registerName(selectorName);
+    if (shell != nil && [shell respondsToSelector:selector]) {
+        ((void (*)(id, SEL))objc_msgSend)(shell, selector);
+    }
+}
+
+void AttachGameWindow(SDL_Window *window) {
+    if (window == nullptr) {
+        return;
+    }
+    SDL_PropertiesID props = SDL_GetWindowProperties(window);
+    YmirHost.gameWindow = (__bridge UIWindow *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
+}
+
+void ShowLauncher() {
+    CallShell("showLauncher");
+}
+
+void ShowGameMenu() {
+    CallShell("showGameMenu");
+}
+
+bool IsNativeUIVisible() {
+    Class shell = NSClassFromString(@"YmirShell");
+    SEL selector = sel_registerName("isNativeUIVisible");
+    if (shell != nil && [shell respondsToSelector:selector]) {
+        return ((BOOL (*)(id, SEL))objc_msgSend)(shell, selector);
+    }
+    return false;
 }
 
 } // namespace util::ios

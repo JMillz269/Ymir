@@ -29,4 +29,16 @@ std::filesystem::path GetDocumentsPath();
 void ShowFileDialog(SDL_Window *window, SDL_FileDialogType type, bool allowMany, const char *location, void *userdata,
                     SDL_DialogFileCallback callback);
 
+/// @brief Registers the window that hosts the emulator view so that the native UI can be presented on top of it.
+void AttachGameWindow(SDL_Window *window);
+
+/// @brief Presents the native game library and settings (full screen) over the emulator view.
+void ShowLauncher();
+
+/// @brief Presents the native in-game menu (sheet) over the emulator view.
+void ShowGameMenu();
+
+/// @brief Whether any native UI is currently covering the emulator view.
+bool IsNativeUIVisible();
+
 } // namespace util::ios

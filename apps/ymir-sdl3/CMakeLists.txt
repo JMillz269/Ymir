@@ -445,10 +445,24 @@ if (IOS)
     target_sources(ymir-sdl3 PRIVATE
         src/app/input/touch_controls.cpp
         src/app/input/touch_controls.hpp
+        src/app/ios/host_interface.hpp
         src/util/ios_platform.hpp
         src/util/ios_platform.mm
+
+        # Native iOS user interface
+        src/ios/Ymir-Bridging-Header.h
+        src/ios/YmirHost.h
+        src/ios/YmirHost.mm
+        src/ios/GameLibrary.swift
+        src/ios/GameMenuView.swift
+        src/ios/LauncherRoot.swift
+        src/ios/SettingsView.swift
+        src/ios/Theme.swift
+        src/ios/YmirShell.swift
     )
-    set_source_files_properties(src/util/ios_platform.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(src/util/ios_platform.mm src/ios/YmirHost.mm PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON
+                                COMPILE_OPTIONS "-fobjc-arc")
 endif ()
 target_sources(ymir-sdl3 PRIVATE src/util/platform.hpp)
 
@@ -536,7 +550,11 @@ if (IOS)
                           XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
                           XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
                           XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${Ymir_IOS_DEPLOYMENT_TARGET}"
-                          XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${Ymir_IOS_BUNDLE_ID}")
+                          XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${Ymir_IOS_BUNDLE_ID}"
+                          XCODE_ATTRIBUTE_SWIFT_VERSION "5.0"
+                          XCODE_ATTRIBUTE_SWIFT_OBJC_BRIDGING_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/src/ios/Ymir-Bridging-Header.h"
+                          XCODE_ATTRIBUTE_CLANG_ENABLE_MODULES "YES"
+                          XCODE_ATTRIBUTE_ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES "NO")
 elseif (APPLE)
     # Configure Info.plist
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/res/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
@@ -599,6 +617,7 @@ endif ()
 if (IOS)
     target_link_libraries(ymir-sdl3 PRIVATE
         "-framework UIKit"
+        "-framework SwiftUI"
         "-framework UniformTypeIdentifiers"
         "-framework Metal"
         "-framework QuartzCore"
@@ -669,7 +688,9 @@ if (WIN32 AND NOT Ymir_ENABLE_DEVLOG)
     set_target_properties(ymir-sdl3 PROPERTIES WIN32_EXECUTABLE ON)
 endif ()
 
-if (IPO_SUPPORTED AND Ymir_ENABLE_IPO)
+# IPO is skipped on iOS: the app target mixes C++, Objective-C++ and Swift, and the hot code lives in ymir-core, which
+# is still built with IPO
+if (IPO_SUPPORTED AND Ymir_ENABLE_IPO AND NOT IOS)
     message(STATUS "Enabling IPO / LTO for ymir-sdl3")
     set_property(TARGET ymir-sdl3 PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()

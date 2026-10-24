@@ -1,6 +1,6 @@
 # Ymir on iOS
 
-This is the iOS port of Ymir. It runs the same emulator core as the desktop builds, rendered with the Metal graphics backend. It targets arm64 iPhones and iPads on iOS 16 or later.
+This is the iOS port of Ymir. It runs the same emulator core as the desktop builds, rendered with the Metal graphics backend and a native SwiftUI interface. It targets arm64 iPhones and iPads on iOS 16 or later.
 
 ## Installing
 
@@ -15,20 +15,26 @@ Ymir stores everything in its Documents folder, which shows up in the Files app 
 | `roms/ipl`         | Saturn BIOS (IPL ROM) images      |
 | `roms/cdb`         | CD block ROM images (optional)    |
 | `roms/cart`        | Cartridge ROM images              |
-| `games`            | Discs imported with **File > Load disc image** |
+| `games`            | Discs imported from the Games tab |
 | `backup`, `state`, `savestates`, `screenshots` | Saves and state    |
 | `exports`          | Targets of save/export dialogs    |
 
-Copy your BIOS into `roms/ipl` using the Files app, then open **File > Load disc image**. The system document picker copies the selected files into `games`. Pick every file of a multi-file image (e.g. the `.cue` and all `.bin` files) at once so they end up side by side. `.chd` and `.iso` images are single files and avoid this.
+## Native interface
 
-You can also share a disc image to Ymir from the Files app with **Open in...**.
+The iOS app has a native SwiftUI interface (sources in `apps/ymir-sdl3/src/ios`) instead of the desktop menu bar:
+
+- **Games** lists the disc images found in the Ymir folder (`.cue`, `.chd`, `.iso`, `.ccd`, `.mds`). Tap a game to play it. Swipe or long-press a game to delete it. The **+** button imports games or a BIOS with the system document picker and opens the Ymir folder in the Files app. To show cover art, put a `.png` or `.jpg` named like the disc image next to it, or in `covers`.
+- **Settings** has the BIOS status and import, display, audio and control options, and shortcuts to the emulator's own settings windows (the **Advanced** section). It replaces the menu bar's File, View, System, Emulation and Settings menus.
+- On iOS 26 and later the tab bar and the buttons use Liquid Glass; older systems get translucent materials.
+
+Import a BIOS first (Games tab banner or Settings > System). Files can also be copied by hand into `roms/ipl` and `games` with the Files app, or shared to Ymir with **Open in...**. Pick every file of a multi-file image (e.g. the `.cue` and all `.bin` files) at once so they end up side by side; `.chd` and `.iso` images are single files and avoid this.
 
 ## Controls
 
 An on-screen Saturn control pad is drawn over the game: D-pad, A/B/C, X/Y/Z, L/R, Start and a Menu button. It is mapped to the default port 1 Control Pad binds, so it works out of the box. Fingers can slide between buttons and multi-touch works.
 
-- The **Menu** button toggles the main menu bar. Tapping near the top of the screen also reveals it.
-- **View > Touch controls** turns the overlay off.
+- The **Menu** button opens the in-game menu: resume, pause, fast forward, reset, disc tray, save states, screenshots, settings and a way back to the game library. The game is paused while the menu is open.
+- **Settings > Controls > On-Screen Controls** turns the overlay off.
 - The overlay hides itself while a hardware controller is connected. MFi, Xbox, PlayStation and other controllers supported by iOS work through SDL's gamepad support and use the same default binds as on desktop.
 
 ## JIT

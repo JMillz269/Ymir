@@ -37,6 +37,17 @@ jobs:
     runs-on: macos-latest
 
     steps:
+      # The Liquid Glass tab bar and buttons need the iOS 26 SDK (Xcode 26 or later)
+      - name: Select the newest Xcode
+        shell: bash
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)"
+          if [ -n "$xcode" ]; then
+            sudo xcode-select -s "$xcode/Contents/Developer"
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
       # Provides DXC with SPIR-V support and spirv-cross, used to compile the HLSL shaders into Metal libraries
       - name: Set up Vulkan SDK
         uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa

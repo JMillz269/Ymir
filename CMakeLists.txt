@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.28)
 project(Ymir VERSION 0.4.2)
 
+# The iOS user interface (game library, settings and in-game menu) is written in Swift/SwiftUI.
+# Swift is only supported by the Xcode and Ninja generators; the iOS build uses Xcode.
+if (IOS)
+    set(CMAKE_Swift_LANGUAGE_VERSION 5.0)
+    enable_language(Swift)
+endif ()
+
 # Check for Vulkan support before including CompileShaders as it depends on knowing if Vulkan
 # is available to determine whether to make SPIR-V compilation required or optional.
 # Vulkan support is excluded from macOS as the system doesn't support it natively.

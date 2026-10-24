@@ -1,0 +1,265 @@
+import SwiftUI
+import UIKit
+
+// MARK: - Model
+
+struct GameEntry: Identifiable, Hashable {
+    let url: URL
+    let sizeBytes: Int64
+
+    var id: String { url.path }
+    var title: String { url.deletingPathExtension().lastPathComponent }
+    var format: String { url.pathExtension.uppercased() }
+
+    var subtitle: String {
+        let size = ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
+        return "\(format) · \(size)"
+    }
+
+    /// Path relative to the Documents folder; stable across app reinstalls, unlike the absolute path.
+    var relativePath: String {
+        let root = AppPaths.documents.path
+        let path = url.path
+        if path.hasPrefix(root) {
+            return String(path.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        return path
+    }
+
+    /// All files that make up this disc image (the descriptor file plus its data tracks).
+    func relatedFiles() -> [URL] {
+        let fm = FileManager.default
+        let dir = url.deletingLastPathComponent()
+        let stem = url.deletingPathExtension().lastPathComponent
+        var files = [url]
+
+        switch url.pathExtension.lowercased() {
+        case "cue":
+            let text = (try? String(contentsOf: url, encoding: .utf8))
+                ?? (try? String(contentsOf: url, encoding: .isoLatin1))
+                ?? ""
+            for line in text.split(whereSeparator: \.isNewline) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.uppercased().hasPrefix("FILE") else { continue }
+                let parts = trimmed.split(separator: "\"", omittingEmptySubsequences: false)
+                guard parts.count >= 3 else { continue }
+                let file = dir.appendingPathComponent(String(parts[1]))
+                if fm.fileExists(atPath: file.path) && !files.contains(file) {
+                    files.append(file)
+                }
+            }
+        case "ccd":
+            for ext in ["img", "sub"] {
+                let file = dir.appendingPathComponent(stem + "." + ext)
+                if fm.fileExists(atPath: file.path) { files.append(file) }
+            }
+        case "mds":
+            let file = dir.appendingPathComponent(stem + ".mdf")
+            if fm.fileExists(atPath: file.path) { files.append(file) }
+        default:
+            break
+        }
+        return files
+    }
+
+    /// Cover art placed next to the game or in Documents/covers, named like the game. Optional.
+    func coverURL() -> URL? {
+        let fm = FileManager.default
+        let folders = [url.deletingLastPathComponent(), AppPaths.covers]
+        for folder in folders {
+            for ext in ["png", "jpg", "jpeg"] {
+                let candidate = folder.appendingPathComponent(title + "." + ext)
+                if fm.fileExists(atPath: candidate.path) { return candidate }
+            }
+        }
+        return nil
+    }
+}
+
+// MARK: - Library
+
+@MainActor
+final class GameLibrary: ObservableObject {
+    @Published private(set) var games: [GameEntry] = []
+
+    private static let discExtensions: Set<String> = ["cue", "chd", "iso", "ccd", "mds"]
+    // Folders of the emulator profile that never contain games
+    private static let ignoredFolders: Set<String> = [
+        "roms", "backup", "savestates", "state", "screenshots", "dumps", "covers", "exports",
+    ]
+    private static let lastPlayedKey = "ymir.lastPlayed"
+
+    init() {
+        reload()
+    }
+
+    func reload() {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: AppPaths.games, withIntermediateDirectories: true)
+
+        let lastPlayed = Self.lastPlayed()
+        var found: [GameEntry] = []
+
+        let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey]
+        if let enumerator = fm.enumerator(at: AppPaths.documents, includingPropertiesForKeys: keys,
+                                          options: [.skipsHiddenFiles]) {
+            for case let url as URL in enumerator {
+                let values = try? url.resourceValues(forKeys: Set(keys))
+                if values?.isDirectory == true {
+                    if Self.ignoredFolders.contains(url.lastPathComponent.lowercased()) {
+                        enumerator.skipDescendants()
+                    }
+                    continue
+                }
+                guard Self.discExtensions.contains(url.pathExtension.lowercased()) else { continue }
+
+                var entry = GameEntry(url: url, sizeBytes: 0)
+                let total = entry.relatedFiles().reduce(Int64(0)) { sum, file in
+                    let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                    return sum + Int64(size)
+                }
+                entry = GameEntry(url: url, sizeBytes: total)
+                found.append(entry)
+            }
+        }
+
+        found.sort { a, b in
+            let da = lastPlayed[a.relativePath] ?? 0
+            let db = lastPlayed[b.relativePath] ?? 0
+            if da != db { return da > db }
+            return a.title.localizedStandardCompare(b.title) == .orderedAscending
+        }
+        games = found
+    }
+
+    func delete(_ game: GameEntry) {
+        for file in game.relatedFiles() {
+            try? FileManager.default.removeItem(at: file)
+        }
+        var played = Self.lastPlayed()
+        played.removeValue(forKey: game.relativePath)
+        UserDefaults.standard.set(played, forKey: Self.lastPlayedKey)
+        reload()
+    }
+
+    static func markPlayed(_ game: GameEntry) {
+        var played = lastPlayed()
+        played[game.relativePath] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(played, forKey: lastPlayedKey)
+    }
+
+    private static func lastPlayed() -> [String: Double] {
+        (UserDefaults.standard.dictionary(forKey: lastPlayedKey) as? [String: Double]) ?? [:]
+    }
+}
+
+// MARK: - Importing files
+
+enum ImportService {
+    struct Outcome {
+        var copied = 0
+        var failed = 0
+    }
+
+    /// Copies files picked with the document picker into a folder inside Documents.
+    /// Meant to be called off the main thread, since disc images can be large.
+    static func copy(_ urls: [URL], to folder: URL) -> Outcome {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        var outcome = Outcome()
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
+            let destination = folder.appendingPathComponent(url.lastPathComponent)
+            do {
+                if fm.fileExists(atPath: destination.path) {
+                    try fm.removeItem(at: destination)
+                }
+                try fm.copyItem(at: url, to: destination)
+                outcome.copied += 1
+            } catch {
+                outcome.failed += 1
+            }
+        }
+        return outcome
+    }
+}
+
+// MARK: - Cover art
+
+private final class CoverCache: @unchecked Sendable {
+    static let shared = CoverCache()
+    private let cache = NSCache<NSString, UIImage>()
+
+    func image(for game: GameEntry, pixelSize: CGFloat) async -> UIImage? {
+        let key = "\(game.id)@\(Int(pixelSize))" as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        let url = game.coverURL()
+        let image: UIImage? = await Task.detached(priority: .utility) { () -> UIImage? in
+            guard let url, let full = UIImage(contentsOfFile: url.path) else { return nil }
+            return full.preparingThumbnail(of: CGSize(width: pixelSize, height: pixelSize)) ?? full
+        }.value
+        if let image {
+            cache.setObject(image, forKey: key)
+        }
+        return image
+    }
+}
+
+struct CoverArtView: View {
+    let game: GameEntry
+    var size: CGFloat = 60
+
+    @State private var image: UIImage?
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                placeholder
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+        )
+        .task(id: game.id) {
+            image = await CoverCache.shared.image(for: game, pixelSize: size * displayScale)
+        }
+    }
+
+    /// A stable colour per title, so that games are easy to tell apart without cover art.
+    private var hue: Double {
+        var hash: UInt32 = 5381
+        for byte in game.title.utf8 {
+            hash = (hash &* 33) &+ UInt32(byte)
+        }
+        return Double(hash % 360) / 360.0
+    }
+
+    private var placeholder: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(hue: hue, saturation: 0.55, brightness: 0.88),
+                    Color(hue: (hue + 0.08).truncatingRemainder(dividingBy: 1), saturation: 0.75, brightness: 0.55),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Image(systemName: "opticaldisc.fill")
+                .font(.system(size: size * 0.46, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+        }
+    }
+}
