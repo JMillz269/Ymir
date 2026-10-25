@@ -660,6 +660,7 @@ struct PerformanceSettingsView: View {
                 if jitAvailable && store.bool("system.useRecompiler").wrappedValue {
                     Toggle("Keep Registers in CPU Registers", isOn: store.bool("system.jitRegisterCache", default: true))
                     Toggle("Link Blocks Directly", isOn: store.bool("system.jitBlockLinking", default: true))
+                    Toggle("Skip Idle Waiting (Experimental)", isOn: store.bool("system.jitIdleDetection"))
                 }
                 if !jitAvailable {
                     Button {
@@ -718,7 +719,9 @@ struct PerformanceSettingsView: View {
         }
         return "Translates the Saturn's SH-2 processors to native code instead of interpreting them. Experimental: games "
             + "may run faster, or may misbehave; turn it off if something looks wrong. It needs a JIT enabler "
-            + "(StikDebug, StosDebug, ...) attached to Ymir, and the change applies to the running game immediately."
+            + "(StikDebug, StosDebug, ...) attached to Ymir, and the change applies to the running game immediately. "
+            + "Skip Idle Waiting lets both processors run in longer steps while they are only waiting for something "
+            + "in RAM (no writes, no hardware access), which saves power but changes timing slightly."
     }
 
     private func refreshJIT() {

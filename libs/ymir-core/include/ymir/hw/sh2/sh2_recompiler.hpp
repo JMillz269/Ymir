@@ -18,6 +18,7 @@ and interrupts), and are validated against the code memory every time they are e
 #include <ymir/sys/bus.hpp>
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <cstdlib>
 #include <memory>
@@ -93,6 +94,20 @@ public:
     /// Meant for finding out which one is responsible when something is slow or wrong.
     static void SetOptions(bool registerCache, bool blockLinking);
 
+    /// @brief Idle detection: a CPU that spends a whole time slice in recompiled code without writing to memory,
+    /// calling the interpreter or changing any register is waiting for something. While both CPUs are waiting, the
+    /// emulator lets them run in longer slices. Off by default.
+    static void SetIdleDetection(bool enable) {
+        s_idleDetect.store(enable, std::memory_order_relaxed);
+    }
+    static bool IdleDetectionEnabled() {
+        return s_idleDetect.load(std::memory_order_relaxed);
+    }
+    /// @brief Number of time slices spent waiting, for the statistics display.
+    static uint64 IdleSlices() {
+        return s_idleSlices.load(std::memory_order_relaxed);
+    }
+
     struct Stats {
         uint64 blocksCompiled = 0;
         uint64 blocksExecuted = 0;
@@ -108,6 +123,10 @@ public:
     }
 
 private:
+    friend class SH2;
+    static inline std::atomic<bool> s_idleDetect{false};
+    static inline std::atomic<uint64> s_idleSlices{0};
+
     static constexpr uint32 kMaxInstructions = 32;
     // (rounded up to 16 bytes: blocks are compared in chunks of 16 when one block jumps to another)
     static constexpr uint32 kMaxBlockBytes = ((kMaxInstructions + 1) * 2 + 2 + 15) & ~15u;

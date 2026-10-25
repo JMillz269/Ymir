@@ -462,6 +462,32 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
     // The recompiler only handles the simple model: no debug tracing and no cache emulation
     const bool useRecompiler = !debug && !emulateCache && *m_useRecompiler && !m_recompilerUnavailable;
 
+    // Idle detection: a slice spent entirely in recompiled code that wrote nothing to memory, called no interpreter
+    // handler and ended with every register as it started means the CPU is waiting for something outside
+    struct IdleState {
+        std::array<uint32, 16> R;
+        uint32 PC, PR, GBR, VBR, SR;
+        uint64 MAC;
+        bool operator==(const IdleState &) const = default;
+    };
+    bool trackIdle = false;
+    bool idleCandidate = false;
+    IdleState idleBefore{};
+    auto captureIdle = [&] { return IdleState{R, PC, PR, GBR, VBR, SR.u32, MAC.u64}; };
+    if (useRecompiler) {
+        if (SH2Recompiler::IdleDetectionEnabled()) {
+            if (m_idleStreak != 0 || m_idleBackoff == 0) {
+                trackIdle = true;
+                idleBefore = captureIdle();
+                m_jitImpure = false;
+            } else {
+                --m_idleBackoff;
+            }
+        } else {
+            m_idleStreak = 0;
+        }
+    }
+
     while (m_cyclesExecuted < cycles) {
         // [[maybe_unused]] const uint32 prevPC = PC; // debug aid
 
@@ -470,11 +496,13 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
                 const uint64 jitCycles = RunRecompiledBlock(cycles - m_cyclesExecuted);
                 if (jitCycles != 0) {
                     m_cyclesExecuted += jitCycles;
+                    idleCandidate = true;
                     continue;
                 }
             }
         }
 
+        m_jitImpure = true;
         m_cyclesExecuted += InterpretNext<debug, emulateCache>();
 
         // Check for breakpoints and watchpoints and validate PC in debug tracing mode
@@ -523,6 +551,22 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
                 // TODO: trace event
             }
         }
+    }
+    if (trackIdle && idleCandidate) {
+        if (!m_jitImpure && captureIdle() == idleBefore) {
+            if (m_idleStreak < 255) {
+                ++m_idleStreak;
+            }
+            m_idleBackoff = 0;
+            SH2Recompiler::s_idleSlices.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            m_idleStreak = 0;
+            m_idleBackoff = 3;
+        }
+    } else if (trackIdle) {
+        // The slice used the interpreter only
+        m_idleStreak = 0;
+        m_idleBackoff = 3;
     }
     AdvanceDMA<debug, emulateCache>(m_cyclesExecuted - spilloverCycles);
     return m_cyclesExecuted;

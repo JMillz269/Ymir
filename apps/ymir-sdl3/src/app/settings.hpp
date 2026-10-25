@@ -191,6 +191,7 @@ struct Settings {
         util::Observable<bool> useSH2Recompiler;
         bool jitRegisterCache; // recompiler options, for finding the cause of slowdowns
         bool jitBlockLinking;
+        bool jitIdleDetection;
         util::Observable<uint32> sh2ClockFactor;
 
         std::filesystem::path internalBackupRAMImagePath;

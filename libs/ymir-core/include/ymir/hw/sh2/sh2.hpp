@@ -1133,9 +1133,22 @@ private:
     // Executes one instruction without fetching it and without checking for interrupts. Used by recompiled code.
     uint64 JitStep(uint16 instr);
 
+    // Idle detection for the recompiler (see SH2Recompiler::SetIdleDetection)
+    bool m_jitImpure = false;  // set by generated code that writes memory and by every call to the interpreter
+    uint8 m_idleStreak = 0;    // consecutive time slices that looked like waiting
+    uint8 m_idleBackoff = 0;   // time slices to skip before looking again after one that didn't
+
     // Runs a recompiled block starting at the current PC, if possible. Returns the number of cycles executed, or 0 if
     // nothing was run and the interpreter must execute the next instruction.
     uint64 RunRecompiledBlock(uint64 cyclesLeft);
+
+public:
+    /// @brief Whether this CPU has been waiting for something, so that it can run in longer slices.
+    [[nodiscard]] bool IsIdle() const {
+        return m_sleep || m_idleStreak >= 2;
+    }
+
+private:
 
 #define TPL_DBG_CACHE_DS template <bool debug, bool emulateCache, bool delaySlot>
 #define TPL_DBG_CACHE template <bool debug, bool emulateCache>

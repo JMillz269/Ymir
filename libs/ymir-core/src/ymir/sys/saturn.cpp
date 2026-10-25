@@ -2,6 +2,7 @@
 
 #include <ymir/db/game_db.hpp>
 
+#include <ymir/hw/sh2/sh2_recompiler.hpp>
 #include <ymir/util/dev_log.hpp>
 
 #include <bit>
@@ -521,6 +522,9 @@ void Saturn::RunFrameImpl() {
 template <bool debug, bool enableSH2Cache, bool cdblockLLE>
 bool Saturn::Run() {
     static constexpr uint64 kSH2SyncMaxStep = 32;
+    // While every CPU is waiting for something (see SH2Recompiler::SetIdleDetection) the time slices can be longer
+    static constexpr uint64 kSH2IdleSyncStep = 512;
+    const bool idleSync = !debug && sh2::SH2Recompiler::IdleDetectionEnabled();
 
     const uint64 cycles = static_config::max_timing_granularity ? 1 : std::max<sint64>(m_scheduler.RemainingCount(), 0);
 
@@ -536,7 +540,9 @@ bool Saturn::Run() {
             uint64 slaveCycles = m_ssh2SpilloverCycles;
             do {
                 const uint64 prevExecCycles = execCycles;
-                const uint64 targetCycles = std::min(execCycles + kSH2SyncMaxStep, cycles);
+                const uint64 step =
+                    idleSync && masterSH2.IsIdle() && slaveSH2.IsIdle() ? kSH2IdleSyncStep : kSH2SyncMaxStep;
+                const uint64 targetCycles = std::min(execCycles + step, cycles);
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 slaveCycles = slaveSH2.Advance<debug, enableSH2Cache>(execCycles, slaveCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
@@ -560,7 +566,8 @@ bool Saturn::Run() {
         } else {
             do {
                 const uint64 prevExecCycles = execCycles;
-                const uint64 targetCycles = std::min(execCycles + kSH2SyncMaxStep, cycles);
+                const uint64 step = idleSync && masterSH2.IsIdle() ? kSH2IdleSyncStep : kSH2SyncMaxStep;
+                const uint64 targetCycles = std::min(execCycles + step, cycles);
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
                 if constexpr (debug) {

@@ -91,6 +91,14 @@ Tests: `tools/jit-tests` checks the ARM64 assembler against Keystone and runs ra
 the recompiler side by side (the generated code executes in the Unicorn CPU emulator). Those pass; the recompiler has
 not been run on an actual device yet.
 
+
+**Skip Idle Waiting** (Settings > Performance & Accuracy, off by default): a processor that spends a whole time slice in
+recompiled code without writing to memory, calling the interpreter (this includes any access to hardware registers) or
+changing any register is waiting for something. While both processors are waiting, the emulator runs them in 512 cycle
+steps instead of 32, so they notice changes made by the other processor or by hardware up to 512 cycles later and the
+emulator loop's own work is done far less often. The count of slices spent waiting is shown with the recompiler's
+statistics. Loops that poll hardware registers are never treated as waiting.
+
 ## Known limitations
 
 - Save and export dialogs don't exist on iOS; they write to `Documents/exports`.

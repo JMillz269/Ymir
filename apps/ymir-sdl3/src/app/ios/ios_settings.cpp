@@ -193,6 +193,11 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
                 cfg->system.jitBlockLinking = v;
                 ymir::sh2::SH2Recompiler::SetOptions(cfg->system.jitRegisterCache, cfg->system.jitBlockLinking);
             });
+    addBool("system.jitIdleDetection", [cfg] { return cfg->system.jitIdleDetection; },
+            [cfg](bool v) {
+                cfg->system.jitIdleDetection = v;
+                ymir::sh2::SH2Recompiler::SetIdleDetection(v);
+            });
     addInt("system.sh2ClockFactor", [cfg] { return static_cast<int>(cfg->system.sh2ClockFactor.Get()); },
            [cfg](int v) {
                cfg->system.sh2ClockFactor =

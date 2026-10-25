@@ -1063,6 +1063,7 @@ void Settings::ResetToDefaults() {
     system.useSH2Recompiler = false;
     system.jitRegisterCache = true;
     system.jitBlockLinking = true;
+    system.jitIdleDetection = false;
     system.sh2ClockFactor = config_defaults::system::kDefaultSH2ClockFactor;
 
     system.ipl.overrideImage = false;
@@ -1305,6 +1306,8 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblSystem, "JitRegisterCache", system.jitRegisterCache);
         Parse(tblSystem, "JitBlockLinking", system.jitBlockLinking);
         ymir::sh2::SH2Recompiler::SetOptions(system.jitRegisterCache, system.jitBlockLinking);
+        Parse(tblSystem, "JitIdleDetection", system.jitIdleDetection);
+        ymir::sh2::SH2Recompiler::SetIdleDetection(system.jitIdleDetection);
         Parse(tblSystem, "SH2ClockFactor", system.sh2ClockFactor, kDefaultSH2ClockFactor, kMinSH2ClockFactor,
               kMaxSH2ClockFactor);
         Parse(tblSystem, "InternalBackupRAMImagePath", system.internalBackupRAMImagePath);
@@ -1955,6 +1958,7 @@ SettingsSaveResult Settings::Save() {
             {"UseSH2Recompiler", system.useSH2Recompiler.Get()},
             {"JitRegisterCache", system.jitRegisterCache},
             {"JitBlockLinking", system.jitBlockLinking},
+            {"JitIdleDetection", system.jitIdleDetection},
             {"SH2ClockFactor", system.sh2ClockFactor.Get()},
             {"InternalBackupRAMImagePath", Proximate(ProfilePath::PersistentState, system.internalBackupRAMImagePath).native()},
             {"InternalBackupRAMPerGame", system.internalBackupRAMPerGame},

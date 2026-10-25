@@ -215,6 +215,7 @@ void SH2Recompiler::GetPoolRegion(uint8 **base, size_t *size) {
 }
 
 uint64 SH2Recompiler::StepThunk(SH2 *sh2, uint32 instr) {
+    sh2->m_jitImpure = true;
     return sh2->JitStep(static_cast<uint16>(instr));
 }
 
@@ -617,7 +618,7 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
 
     // Offsets of the CPU state that generated code reads and writes
     struct {
-        size_t R, PC, SR, GBR, VBR, PR, IntcLevel, DelaySlot, DelaySlotTarget, MAC, WbReg, IntrPending, IntrAllow;
+        size_t R, PC, SR, GBR, VBR, PR, IntcLevel, DelaySlot, DelaySlotTarget, MAC, WbReg, IntrPending, IntrAllow, Impure;
         uint8 WbNone;
         uint8 WbPR;
     } const L{offsetof(SH2, R),
@@ -634,6 +635,7 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
               offsetof(SH2, m_wbReg),
               offsetof(SH2, m_intrFlags) + offsetof(SH2::IntrFlags, pending),
               offsetof(SH2, m_intrFlags) + offsetof(SH2::IntrFlags, allow),
+              offsetof(SH2, m_jitImpure),
               SH2::kWBRegNone,
               SH2::kWBRegPR};
 
@@ -650,6 +652,37 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
     bool hasMem = false;
     for (uint32 k = 0; k < count; ++k) {
         hasMem = hasMem || insns[k].kind == Kind::Mem || insns[k].kind == Kind::Mac || insns[k].normalKind == Kind::Mem;
+    }
+    // Whether any instruction writes to memory in generated code; idle detection has to know
+    auto isStore = [](OpcodeType op) {
+        switch (op) {
+        case OpcodeType::MOVB_S:
+        case OpcodeType::MOVW_S:
+        case OpcodeType::MOVL_S:
+        case OpcodeType::MOVB_M:
+        case OpcodeType::MOVW_M:
+        case OpcodeType::MOVL_M:
+        case OpcodeType::MOVB_S0:
+        case OpcodeType::MOVW_S0:
+        case OpcodeType::MOVL_S0:
+        case OpcodeType::MOVB_S4:
+        case OpcodeType::MOVW_S4:
+        case OpcodeType::MOVL_S4:
+        case OpcodeType::MOVB_SG:
+        case OpcodeType::MOVW_SG:
+        case OpcodeType::MOVL_SG:
+        case OpcodeType::STC_GBR_M:
+        case OpcodeType::STC_SR_M:
+        case OpcodeType::STC_VBR_M:
+        case OpcodeType::STS_MACH_M:
+        case OpcodeType::STS_MACL_M:
+        case OpcodeType::STS_PR_M: return true;
+        default: return false;
+        }
+    };
+    bool hasStore = false;
+    for (uint32 k = 0; k < count; ++k) {
+        hasStore = hasStore || isStore(insns[k].opcode);
     }
     const sys::SH2Bus::PageLayout pages = m_bus.GetPageLayout();
 
@@ -691,6 +724,10 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
     // Like the interpreter, interrupts are allowed again from the first instruction on
     a.MovImm(Sz::W, kT0, 1);
     field.Store(0, kT0, L.IntrAllow);
+    if (hasStore) {
+        // kT0 is still 1
+        field.Store(0, kT0, L.Impure);
+    }
 
     auto loadR = [&](Reg dst, uint32 index) {
         ++useCount[index];
