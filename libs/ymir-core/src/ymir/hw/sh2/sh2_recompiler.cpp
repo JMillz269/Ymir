@@ -34,7 +34,7 @@ namespace {
     constexpr size_t kPoolSize = 64u * 1024u * 1024u;
     constexpr size_t kBigPoolSize = 256u * 1024u * 1024u;
 
-    std::atomic<uint64> g_statBlocks{0}, g_statFlushes{0}, g_statBytes{0}, g_statInstructions{0}, g_statCompileNs{0},
+    std::atomic<uint64> g_statConflicts{0}, g_statInvalidations{0}, g_statBlocks{0}, g_statFlushes{0}, g_statBytes{0}, g_statInstructions{0}, g_statCompileNs{0},
         g_statSlowestNs{0};
 
     // Optimizations that can be switched off; changing them bumps the generation, which makes every recompiler discard
@@ -200,7 +200,8 @@ void SH2Recompiler::SetOptions(bool registerCache, bool blockLinking) {
 SH2Recompiler::GlobalStats SH2Recompiler::GetGlobalStats() {
     return {g_statBlocks.load(std::memory_order_relaxed), g_statFlushes.load(std::memory_order_relaxed),
             g_statBytes.load(std::memory_order_relaxed), g_statInstructions.load(std::memory_order_relaxed),
-            g_statCompileNs.load(std::memory_order_relaxed), g_statSlowestNs.load(std::memory_order_relaxed)};
+            g_statCompileNs.load(std::memory_order_relaxed), g_statSlowestNs.load(std::memory_order_relaxed),
+            g_statConflicts.load(std::memory_order_relaxed), g_statInvalidations.load(std::memory_order_relaxed)};
 }
 
 void SH2Recompiler::GetBlockTableRegion(void **base, size_t *size) const {
@@ -221,10 +222,11 @@ uint64 SH2Recompiler::StepThunk(SH2 *sh2, uint32 instr) {
 
 uint64 SH2Recompiler::CodeUnchangedThunk(SH2 *sh2, uint32 blockPc, uint32 offset, uint32 storePc) {
     SH2Recompiler *self = sh2->m_recompiler.get();
-    const Block &block = self->m_blocks[SlotFor(blockPc)];
-    if (block.pc != blockPc) {
+    const Block *found = self->FindBlock(blockPc);
+    if (found == nullptr) {
         return 0;
     }
+    const Block &block = *found;
     const uint8 *src = self->m_bus.GetArrayPointer(blockPc);
     if (src == nullptr) {
         return 0;
@@ -432,10 +434,30 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
         return 0;
     }
 
-    Block &block = m_blocks[SlotFor(pc)];
+    Block *slots = &m_blocks[SlotFor(pc)];
+    Block &block = [&]() -> Block & {
+        if (slots[0].pc == pc) {
+            return slots[0];
+        }
+        if (slots[1].pc == pc) {
+            return slots[1];
+        }
+        // Not there: use an empty slot, or else throw out the second one so that a block that other blocks link to
+        // stays where it is
+        if ((slots[0].pc & 1u) != 0) {
+            return slots[0];
+        }
+        if ((slots[1].pc & 1u) != 0) {
+            return slots[1];
+        }
+        ++m_stats.conflictEvictions;
+        g_statConflicts.fetch_add(1, std::memory_order_relaxed);
+        return slots[1];
+    }();
     if (block.pc != pc || block.hostSrc != src || std::memcmp(src, block.bytes.data(), block.byteLen) != 0) {
         if (block.pc == pc) {
             ++m_stats.invalidations;
+            g_statInvalidations.fetch_add(1, std::memory_order_relaxed);
         }
         Compile(block, pc, src, sys::SH2Bus::PageBytesLeft(pc));
     }
@@ -497,8 +519,8 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
     for (uint32 offset = 0; offset + 2 <= maxBytes && !done; offset += 2) {
         // Code that already has a block of its own is not translated again: this block ends here and continues in it
         if (offset > 0 && !inDelaySlot) {
-            const Block &existing = m_blocks[SlotFor(pc + offset)];
-            if (existing.pc == pc + offset && existing.fn != nullptr) {
+            const Block *existing = FindBlock(pc + offset);
+            if (existing != nullptr && existing->fn != nullptr) {
                 break;
             }
         }

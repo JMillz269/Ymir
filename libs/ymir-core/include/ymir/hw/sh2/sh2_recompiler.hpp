@@ -87,6 +87,8 @@ public:
         uint64 instructionsTranslated = 0;
         uint64 compileNanoseconds = 0;
         uint64 slowestCompileNanoseconds = 0;
+        uint64 conflictEvictions = 0; // blocks thrown out of the table by a block for another address
+        uint64 invalidations = 0;     // blocks compiled again because the code in memory changed
     };
     static GlobalStats GetGlobalStats();
 
@@ -122,6 +124,7 @@ public:
         uint64 blocksExecuted = 0;
         uint64 blocksRejected = 0; // PCs where no block could be generated
         uint64 invalidations = 0;  // blocks recompiled because their code changed
+        uint64 conflictEvictions = 0; // blocks thrown out of the table by a block for another address
         uint64 cacheFlushes = 0;
         uint64 inlineInstructions = 0; // translated inline
         uint64 helperInstructions = 0; // executed through the interpreter's handlers
@@ -141,7 +144,11 @@ private:
     static constexpr uint32 kMaxInstructions = 32;
     // (rounded up to 16 bytes: blocks are compared in chunks of 16 when one block jumps to another)
     static constexpr uint32 kMaxBlockBytes = ((kMaxInstructions + 1) * 2 + 2 + 15) & ~15u;
-    static constexpr uint32 kBlockTableSize = 8192;
+    // The table has two ways per set: a block lives in either of the two slots its address maps to. Slot numbers
+    // returned by SlotFor are those of the first way; generated code only links to blocks found there.
+    static constexpr uint32 kBlockTableSize = 32768;
+    static constexpr uint32 kBlockSetBits = 14;
+    static_assert((1u << (kBlockSetBits + 1)) == kBlockTableSize);
 
     struct Block {
         uint32 pc = 1; // odd = empty slot
@@ -164,7 +171,15 @@ private:
 
     static Kind Classify(OpcodeType opcode);
     static uint32 SlotFor(uint32 pc) {
-        return ((pc >> 1) ^ (pc >> 14)) & (kBlockTableSize - 1);
+        return (((pc >> 1) * 0x9E3779B1u) >> (32 - kBlockSetBits)) << 1;
+    }
+    // The block for `pc` if there is one in the table
+    const Block *FindBlock(uint32 pc) const {
+        const Block *first = &m_blocks[SlotFor(pc)];
+        if (first[0].pc == pc) {
+            return &first[0];
+        }
+        return first[1].pc == pc ? &first[1] : nullptr;
     }
 
     void Compile(Block &block, uint32 pc, const uint8 *src, uint32 bytesAvailable);
