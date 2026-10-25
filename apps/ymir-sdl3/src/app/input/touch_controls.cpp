@@ -1,4 +1,5 @@
 #include "touch_controls.hpp"
+#include "touch_controls_atlas.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -314,7 +315,7 @@ void TouchControls::Load() {
             if (ss >> v) {
                 m_globalScale = std::clamp(v, 0.5f, 1.6f);
             }
-        } else if (key == "opacity") {
+        } else if (key == "alpha") {
             float v;
             if (ss >> v) {
                 m_opacity = std::clamp(v, 0.1f, 1.0f);
@@ -351,7 +352,7 @@ void TouchControls::Save() {
         return;
     }
     out << "scale " << m_globalScale << "\n";
-    out << "opacity " << m_opacity << "\n";
+    out << "alpha " << m_opacity << "\n";
     out << "snap " << (m_snapToGrid ? 1 : 0) << "\n";
     for (int o = 0; o < 2; ++o) {
         if (!m_placementsReady[o]) {
@@ -455,17 +456,12 @@ void TouchControls::ReleaseAll() {
     }
 }
 
-void TouchControls::Draw(ImDrawList *drawList) const {
+void TouchControls::Draw(ImDrawList *drawList, std::optional<ImTextureID> atlas) const {
     if (drawList == nullptr || (!m_editing && (!m_enabled || m_hardwareGamepad))) {
         return;
     }
 
-    const auto alpha = [&](float a) { return (int)std::clamp(a * m_opacity * 255.0f / 0.3f, 0.0f, 255.0f); };
-    const ImU32 idle = IM_COL32(255, 255, 255, alpha(0.27f));
-    const ImU32 active = IM_COL32(255, 255, 255, alpha(0.55f));
-    const ImU32 outline = IM_COL32(255, 255, 255, alpha(0.5f));
-    const ImU32 text = IM_COL32(255, 255, 255, std::max(alpha(0.7f), 90));
-    const ImU32 selectedFill = IM_COL32(60, 150, 255, 150);
+    const ImU32 selectedFill = IM_COL32(60, 150, 255, 60);
     const ImU32 selectedOutline = IM_COL32(120, 190, 255, 255);
 
     if (m_editing) {
@@ -484,31 +480,96 @@ void TouchControls::Draw(ImDrawList *drawList) const {
                           0, 1.5f);
     }
 
-    const auto fillFor = [&](int element, bool pressed) {
-        if (m_editing && element == m_selected) {
-            return selectedFill;
-        }
-        return pressed ? active : idle;
-    };
-    const auto outlineFor = [&](int element) { return (m_editing && element == m_selected) ? selectedOutline : outline; };
+    const int alpha = (int)std::clamp(m_opacity * 255.0f, 0.0f, 255.0f);
+    const ImU32 idleTint = IM_COL32(225, 225, 225, alpha);
+    const ImU32 pressedTint = IM_COL32(255, 255, 255, alpha);
 
-    // D-pad cross
+    // Draws a sprite so that its visible body (without the transparent margin) is bodyWidth wide
+    const auto drawSprite = [&](const touch_atlas::Rect &r, ImVec2 center, float bodyWidth, bool pressed) {
+        constexpr float kMargin = 8.0f; // transparent margin around each sprite in the atlas
+        const float factor = bodyWidth / std::max(1.0f, r.w - kMargin * 2.0f) * (pressed ? 0.94f : 1.0f);
+        const float w = r.w * factor;
+        const float h = r.h * factor;
+        const ImVec2 p0{center.x - w * 0.5f, center.y - h * 0.5f};
+        const ImVec2 p1{p0.x + w, p0.y + h};
+        const ImVec2 uv0{(float)r.x / touch_atlas::kWidth, (float)r.y / touch_atlas::kHeight};
+        const ImVec2 uv1{(float)(r.x + r.w) / touch_atlas::kWidth, (float)(r.y + r.h) / touch_atlas::kHeight};
+        drawList->AddImage(*atlas, p0, p1, uv0, uv1, pressed ? pressedTint : idleTint);
+    };
+
+    if (atlas) {
+        const bool dpadSelected = m_editing && m_selected == ElDPad;
+        if (dpadSelected) {
+            drawList->AddCircleFilled(m_layout.dpadCenter, m_layout.dpadRadius * 1.08f, selectedFill, 48);
+            drawList->AddCircle(m_layout.dpadCenter, m_layout.dpadRadius * 1.08f, selectedOutline, 48, 3.0f);
+        }
+        drawSprite(touch_atlas::kDpad, m_layout.dpadCenter, m_layout.dpadRadius * 2.08f, false);
+        // Light up the arms that are held down
+        for (int c : {Up, Down, Left, Right}) {
+            if (m_state[c]) {
+                const ImVec2 ctr = m_layout.centers[c];
+                const ImVec2 hs = m_layout.halfSizes[c];
+                drawList->AddRectFilled({ctr.x - hs.x, ctr.y - hs.y}, {ctr.x + hs.x, ctr.y + hs.y},
+                                        IM_COL32(255, 255, 255, 90), hs.x * 0.3f);
+            }
+        }
+
+        const touch_atlas::Rect *sprites[_Count] = {};
+        sprites[A] = &touch_atlas::kA;
+        sprites[B] = &touch_atlas::kB;
+        sprites[C] = &touch_atlas::kC;
+        sprites[X] = &touch_atlas::kX;
+        sprites[Y] = &touch_atlas::kY;
+        sprites[Z] = &touch_atlas::kZ;
+        sprites[L] = &touch_atlas::kL;
+        sprites[R] = &touch_atlas::kR;
+        sprites[Start] = &touch_atlas::kStart;
+        sprites[Menu] = &touch_atlas::kMode;
+
+        for (int c = A; c < _Count; ++c) {
+            const ImVec2 ctr = m_layout.centers[c];
+            const ImVec2 hs = m_layout.halfSizes[c];
+            if (m_editing && m_selected == c - A + 1) {
+                if (hs.x == hs.y) {
+                    drawList->AddCircleFilled(ctr, hs.x * 1.1f, selectedFill, 32);
+                    drawList->AddCircle(ctr, hs.x * 1.1f, selectedOutline, 32, 3.0f);
+                } else {
+                    const ImVec2 pad{hs.x * 0.04f, hs.y * 0.15f};
+                    drawList->AddRectFilled({ctr.x - hs.x - pad.x, ctr.y - hs.y - pad.y},
+                                            {ctr.x + hs.x + pad.x, ctr.y + hs.y + pad.y}, selectedFill, hs.y);
+                    drawList->AddRect({ctr.x - hs.x - pad.x, ctr.y - hs.y - pad.y},
+                                      {ctr.x + hs.x + pad.x, ctr.y + hs.y + pad.y}, selectedOutline, hs.y, 0, 3.0f);
+                }
+            }
+            drawSprite(*sprites[c], ctr, hs.x * 2.0f, m_state[c]);
+        }
+        return;
+    }
+
+    // No artwork available: plain shapes
+    const float scaleAlpha = m_opacity / 0.9f;
+    const auto a = [&](int v) { return (int)std::clamp(v * scaleAlpha, 0.0f, 255.0f); };
+    const ImU32 idle = IM_COL32(255, 255, 255, a(70));
+    const ImU32 active = IM_COL32(255, 255, 255, a(150));
+    const ImU32 outline = IM_COL32(255, 255, 255, a(140));
+    const ImU32 text = IM_COL32(255, 255, 255, a(200));
+
     const bool dpadSelected = m_editing && m_selected == ElDPad;
     for (int c : {Up, Down, Left, Right}) {
         const ImVec2 ctr = m_layout.centers[c];
         const ImVec2 hs = m_layout.halfSizes[c];
         drawList->AddRectFilled({ctr.x - hs.x, ctr.y - hs.y}, {ctr.x + hs.x, ctr.y + hs.y},
-                                dpadSelected ? selectedFill : (m_state[c] ? active : idle), hs.x * 0.3f);
+                                dpadSelected ? selectedOutline : (m_state[c] ? active : idle), hs.x * 0.3f);
         drawList->AddRect({ctr.x - hs.x, ctr.y - hs.y}, {ctr.x + hs.x, ctr.y + hs.y},
                           dpadSelected ? selectedOutline : outline, hs.x * 0.3f);
     }
 
     for (int c = A; c < _Count; ++c) {
-        const int element = c - A + 1;
         const ImVec2 ctr = m_layout.centers[c];
         const ImVec2 hs = m_layout.halfSizes[c];
-        const ImU32 fill = fillFor(element, m_state[c]);
-        const ImU32 line = outlineFor(element);
+        const bool selected = m_editing && m_selected == c - A + 1;
+        const ImU32 fill = selected ? selectedOutline : (m_state[c] ? active : idle);
+        const ImU32 line = selected ? selectedOutline : outline;
         if (hs.x == hs.y) {
             drawList->AddCircleFilled(ctr, hs.x, fill, 32);
             drawList->AddCircle(ctr, hs.x, line, 32, 2.0f);

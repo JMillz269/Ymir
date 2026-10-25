@@ -45,7 +45,7 @@ struct TouchEditorBar: View {
             .opacity(selected < 0 ? 0.5 : 1)
 
             sizeRow(title: "All sizes", value: store.float("touch.globalScale", default: 1), range: 0.5...1.6)
-            sizeRow(title: "Opacity", value: store.float("touch.opacity", default: 0.3), range: 0.1...1)
+            sizeRow(title: "Opacity", value: store.float("touch.opacity", default: 0.9), range: 0.1...1)
         }
         .padding(14)
         .ymirGlass(in: RoundedRectangle(cornerRadius: 26, style: .continuous), interactive: false)

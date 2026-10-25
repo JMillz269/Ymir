@@ -445,6 +445,7 @@ if (IOS)
     target_sources(ymir-sdl3 PRIVATE
         src/app/input/touch_controls.cpp
         src/app/input/touch_controls.hpp
+        src/app/input/touch_controls_atlas.hpp
         src/app/ios/host_interface.hpp
         src/app/ios/ios_settings.cpp
         src/app/ios/ios_settings.hpp
@@ -651,6 +652,7 @@ cmrc_add_resource_library(ymir-sdl3-rc
     res/embed/fonts/SplineSansMono-Medium.ttf
     res/embed/fonts/ZenDots-Regular.ttf
 
+    res/embed/images/touch_controls.png
     res/embed/images/ymir.png
 )
 

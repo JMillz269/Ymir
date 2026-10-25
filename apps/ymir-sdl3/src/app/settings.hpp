@@ -466,6 +466,7 @@ struct Settings {
 
         bool forceIntegerScaling;
         bool forceAspectRatio;
+        bool forceStretch; // fill the whole display, ignoring the aspect ratio and integer scaling
         Ratio forcedAspect;
         DisplayRotation rotation;
 

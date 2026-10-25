@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <unordered_map>
 
 namespace app::input {
@@ -91,7 +92,8 @@ public:
     void Update(SDL_Window *window, ImVec2 displaySize);
 
     /// @brief Draws the overlay on the foreground draw list.
-    void Draw(ImDrawList *drawList) const;
+    /// @param[in] atlas texture with the controller artwork; if not provided, plain shapes are drawn instead
+    void Draw(ImDrawList *drawList, std::optional<ImTextureID> atlas = std::nullopt) const;
 
 private:
     enum Control {
@@ -167,7 +169,7 @@ private:
     bool m_editing = false;
     bool m_snapToGrid = false;
     float m_globalScale = 1.0f;
-    float m_opacity = 0.3f;
+    float m_opacity = 0.9f;
     std::array<Placements, 2> m_placements{}; // [0]=portrait, [1]=landscape
     std::array<bool, 2> m_placementsReady{};
     std::array<uint32, 2> m_loadedElements{};

@@ -241,7 +241,9 @@ struct DisplaySettingsView: View {
     var body: some View {
         Form {
             Section("Scaling") {
+                Toggle("Stretch to Fill Screen", isOn: store.bool("video.forceStretch"))
                 Toggle("Integer Scaling", isOn: store.bool("video.forceIntegerScaling"))
+                    .disabled(YmirHost.boolValue(key: "video.forceStretch", default: false))
                 Toggle("Force Aspect Ratio", isOn: store.bool("video.forceAspectRatio", default: true))
                 Picker("Aspect Ratio", selection: store.int("video.aspect")) {
                     Text("4:3").tag(0)
@@ -249,7 +251,8 @@ struct DisplaySettingsView: View {
                     Text("16:10").tag(2)
                     Text("16:9").tag(3)
                 }
-                .disabled(!YmirHost.boolValue(key: "video.forceAspectRatio", default: true))
+                .disabled(!YmirHost.boolValue(key: "video.forceAspectRatio", default: true)
+                    || YmirHost.boolValue(key: "video.forceStretch", default: false))
                 Picker("Rotation", selection: store.int("video.rotation")) {
                     Text("None").tag(0)
                     Text("90° Clockwise").tag(1)
@@ -369,7 +372,7 @@ struct ControlsSettingsView: View {
                 }
                 SettingSlider(title: "Size", value: store.float("touch.globalScale", default: 1), range: 0.5...1.6,
                               format: percent)
-                SettingSlider(title: "Opacity", value: store.float("touch.opacity", default: 0.3), range: 0.1...1,
+                SettingSlider(title: "Opacity", value: store.float("touch.opacity", default: 0.9), range: 0.1...1,
                               format: percent)
             } footer: {
                 Text("MFi, Xbox, PlayStation and other Bluetooth controllers work automatically, using the default bindings. On-screen controls hide while a controller is connected. Press Select on a controller to open the menu.")

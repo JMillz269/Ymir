@@ -1002,6 +1002,15 @@ void App::RunEmulator() {
         }
     };
 
+#if YMIR_PLATFORM_IOS
+    // Artwork of the on-screen controller; kept alive for the whole run in case the texture has to be recreated
+    gfx::GUITextureHandle touchAtlasTexture = gfx::kInvalidGUITextureHandle;
+    stbi_uc *touchAtlasPixels = nullptr;
+    int touchAtlasWidth = 0;
+    int touchAtlasHeight = 0;
+    ScopeGuard sgFreeTouchAtlas{[&] { stbi_image_free(touchAtlasPixels); }};
+#endif
+
     // Logo texture
     stbi_uc *ymirLogoImgData;
     {
@@ -1047,6 +1056,38 @@ void App::RunEmulator() {
         m_context.images.ymirLogo.size.y = imgH;
         sgFreeImageData.Cancel();
     }
+
+#if YMIR_PLATFORM_IOS
+    {
+        cmrc::file atlasFile = embedfs.open("images/touch_controls.png");
+        int chans = 0;
+        touchAtlasPixels = stbi_load_from_memory((const stbi_uc *)atlasFile.begin(), atlasFile.size(),
+                                                 &touchAtlasWidth, &touchAtlasHeight, &chans, 4);
+        if (touchAtlasPixels != nullptr) {
+            auto atlasResult = m_graphicsService.CreateTexture(
+                {
+                    .width = static_cast<uint32>(touchAtlasWidth),
+                    .height = static_cast<uint32>(touchAtlasHeight),
+                    .format = gfx::PixelFormat::R8G8B8A8_UNORM,
+                    .access = gfx::TextureAccess::Static,
+                    .name = "[Ymir] On-screen controls",
+                },
+                [&](gfx::GUITextureHandle, bool, void *data, size_t pitch) {
+                    auto byteData = static_cast<char *>(data);
+                    for (int y = 0; y < touchAtlasHeight; ++y) {
+                        memcpy(byteData + y * pitch, touchAtlasPixels + (size_t)y * touchAtlasWidth * sizeof(uint32),
+                               touchAtlasWidth * sizeof(uint32));
+                    }
+                });
+            if (atlasResult) {
+                touchAtlasTexture = atlasResult.Value();
+            } else {
+                devlog::warn<grp::base>("Failed to create the on-screen controls texture: {}",
+                                        atlasResult.Error().message);
+            }
+        }
+    }
+#endif
     ScopeGuard sgFreeImageData{[&] { stbi_image_free(ymirLogoImgData); }};
 
     // ---------------------------------
@@ -2964,7 +3005,11 @@ void App::RunEmulator() {
 
 #if YMIR_PLATFORM_IOS
         // Draw behind windows and menus so they stay usable
-        touchControls.Draw(ImGui::GetBackgroundDrawList());
+        if (touchAtlasTexture != gfx::kInvalidGUITextureHandle) {
+            touchControls.Draw(ImGui::GetBackgroundDrawList(), m_graphicsService.GetImGuiTextureID(touchAtlasTexture));
+        } else {
+            touchControls.Draw(ImGui::GetBackgroundDrawList());
+        }
 #endif
 
         {
@@ -3518,6 +3563,12 @@ void App::RunEmulator() {
             }
             if (!horzDisplay) {
                 std::swap(scaledWidth, scaledHeight);
+            }
+
+            // Stretch to the whole display regardless of the aspect ratio
+            if (videoSettings.forceStretch && !fitWindowToScreen) {
+                scaledWidth = ww;
+                scaledHeight = wh;
             }
 
             // Render framebuffer to display texture

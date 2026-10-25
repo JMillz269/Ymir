@@ -71,6 +71,8 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
     };
     addBool("video.forceIntegerScaling", [cfg] { return cfg->video.forceIntegerScaling; },
             [cfg](bool v) { cfg->video.forceIntegerScaling = v; });
+    addBool("video.forceStretch", [cfg] { return cfg->video.forceStretch; },
+            [cfg](bool v) { cfg->video.forceStretch = v; });
     addBool("video.forceAspectRatio", [cfg] { return cfg->video.forceAspectRatio; },
             [cfg](bool v) { cfg->video.forceAspectRatio = v; });
     addInt(
