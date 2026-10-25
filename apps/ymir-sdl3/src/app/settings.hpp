@@ -467,7 +467,7 @@ struct Settings {
         bool forceIntegerScaling;
         bool forceAspectRatio;
         bool forceStretch; // fill the whole display, ignoring the aspect ratio and integer scaling
-        float portraitStretchHeight; // 0..1: how far the stretched picture reaches down the screen in portrait
+        float portraitStretchHeight; // 0..1: extra height on top of the uniformly scaled picture, up to the full screen height, in portrait
         Ratio forcedAspect;
         DisplayRotation rotation;
 

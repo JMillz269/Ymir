@@ -1126,7 +1126,7 @@ void Settings::ResetToDefaults() {
     video.reduceLatency = true;
     video.metalFXMode = 0;
     video.forceStretch = false;
-    video.portraitStretchHeight = 0.3f;
+    video.portraitStretchHeight = 0.0f;
     video.sharpness = 0.0f;
     video.scanlines = 0.0f;
     video.maskStrength = 0.0f;

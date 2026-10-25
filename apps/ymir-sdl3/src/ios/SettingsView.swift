@@ -242,7 +242,7 @@ struct DisplaySettingsView: View {
         Form {
             Section("Scaling") {
                 Toggle("Stretch to Fill Screen", isOn: store.bool("video.forceStretch"))
-                SettingSlider(title: "Portrait Height", value: store.float("video.portraitStretch", default: 0.3),
+                SettingSlider(title: "Extra Portrait Height", value: store.float("video.portraitStretch", default: 0),
                               range: 0...1, format: percent)
                     .disabled(!YmirHost.boolValue(key: "video.forceStretch", default: false))
                 Toggle("Integer Scaling", isOn: store.bool("video.forceIntegerScaling"))

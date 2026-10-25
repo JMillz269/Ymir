@@ -3574,7 +3574,13 @@ void App::RunEmulator() {
                 scaledWidth = ww;
                 scaledHeight = wh;
                 if (ww < wh) {
-                    const double naturalHeight = (double)ww * baseHeight / std::max(1.0, baseWidth);
+                    // Scale the height by the same factor as the width, so that pixels keep their shape
+                    double nativeWidth = (double)screen.width * screen.scaleX;
+                    double nativeHeight = (double)screen.height * screen.scaleY;
+                    if (!horzDisplay) {
+                        std::swap(nativeWidth, nativeHeight);
+                    }
+                    const double naturalHeight = (double)ww * nativeHeight / std::max(1.0, nativeWidth);
                     const double t = std::clamp((double)videoSettings.portraitStretchHeight, 0.0, 1.0);
                     scaledHeight = (int)std::min((double)wh, naturalHeight + t * ((double)wh - naturalHeight));
                     stretchedInPortrait = true;
