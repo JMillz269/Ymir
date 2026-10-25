@@ -11,6 +11,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdio>
+#include <string>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -216,7 +217,45 @@ void SH2Recompiler::GetPoolRegion(uint8 **base, size_t *size) {
     *size = g_pool.IsInitialized() ? g_pool.Capacity() : 0;
 }
 
+namespace {
+    std::array<uint32, 0x10000> g_helperHits{};
+
+    constexpr const char *kOpcodeNames[] = {"NOP","SLEEP","MOV_R","MOVB_L","MOVW_L","MOVL_L","MOVB_L0","MOVW_L0","MOVL_L0","MOVB_L4","MOVW_L4","MOVL_L4","MOVB_LG","MOVW_LG","MOVL_LG","MOVB_M","MOVW_M","MOVL_M","MOVB_P","MOVW_P","MOVL_P","MOVB_S","MOVW_S","MOVL_S","MOVB_S0","MOVW_S0","MOVL_S0","MOVB_S4","MOVW_S4","MOVL_S4","MOVB_SG","MOVW_SG","MOVL_SG","MOV_I","MOVW_I","MOVL_I","MOVA","MOVT","CLRT","SETT","EXTUB","EXTUW","EXTSB","EXTSW","SWAPB","SWAPW","XTRCT","LDC_GBR_R","LDC_SR_R","LDC_VBR_R","LDS_MACH_R","LDS_MACL_R","LDS_PR_R","STC_GBR_R","STC_SR_R","STC_VBR_R","STS_MACH_R","STS_MACL_R","STS_PR_R","LDC_GBR_M","LDC_SR_M","LDC_VBR_M","LDS_MACH_M","LDS_MACL_M","LDS_PR_M","STC_GBR_M","STC_SR_M","STC_VBR_M","STS_MACH_M","STS_MACL_M","STS_PR_M","ADD","ADD_I","ADDC","ADDV","AND_R","AND_I","AND_M","NEG","NEGC","NOT","OR_R","OR_I","OR_M","ROTCL","ROTCR","ROTL","ROTR","SHAL","SHAR","SHLL","SHLL2","SHLL8","SHLL16","SHLR","SHLR2","SHLR8","SHLR16","SUB","SUBC","SUBV","XOR_R","XOR_I","XOR_M","DT","CLRMAC","MACW","MACL","MUL","MULS","MULU","DMULS","DMULU","DIV0S","DIV0U","DIV1","CMP_EQ_I","CMP_EQ_R","CMP_GE","CMP_GT","CMP_HI","CMP_HS","CMP_PL","CMP_PZ","CMP_STR","TAS","TST_R","TST_I","TST_M","BF","BFS","BT","BTS","BRA","BRAF","BSR","BSRF","JMP","JSR","TRAPA","RTE","RTS","Illegal","Delay_NOP","Delay_SLEEP","Delay_MOV_R","Delay_MOVB_L","Delay_MOVW_L","Delay_MOVL_L","Delay_MOVB_L0","Delay_MOVW_L0","Delay_MOVL_L0","Delay_MOVB_L4","Delay_MOVW_L4","Delay_MOVL_L4","Delay_MOVB_LG","Delay_MOVW_LG","Delay_MOVL_LG","Delay_MOVB_M","Delay_MOVW_M","Delay_MOVL_M","Delay_MOVB_P","Delay_MOVW_P","Delay_MOVL_P","Delay_MOVB_S","Delay_MOVW_S","Delay_MOVL_S","Delay_MOVB_S0","Delay_MOVW_S0","Delay_MOVL_S0","Delay_MOVB_S4","Delay_MOVW_S4","Delay_MOVL_S4","Delay_MOVB_SG","Delay_MOVW_SG","Delay_MOVL_SG","Delay_MOV_I","Delay_MOVW_I","Delay_MOVL_I","Delay_MOVA","Delay_MOVT","Delay_CLRT","Delay_SETT","Delay_EXTUB","Delay_EXTUW","Delay_EXTSB","Delay_EXTSW","Delay_SWAPB","Delay_SWAPW","Delay_XTRCT","Delay_LDC_GBR_R","Delay_LDC_SR_R","Delay_LDC_VBR_R","Delay_LDS_MACH_R","Delay_LDS_MACL_R","Delay_LDS_PR_R","Delay_STC_GBR_R","Delay_STC_SR_R","Delay_STC_VBR_R","Delay_STS_MACH_R","Delay_STS_MACL_R","Delay_STS_PR_R","Delay_LDC_GBR_M","Delay_LDC_SR_M","Delay_LDC_VBR_M","Delay_LDS_MACH_M","Delay_LDS_MACL_M","Delay_LDS_PR_M","Delay_STC_GBR_M","Delay_STC_SR_M","Delay_STC_VBR_M","Delay_STS_MACH_M","Delay_STS_MACL_M","Delay_STS_PR_M","Delay_ADD","Delay_ADD_I","Delay_ADDC","Delay_ADDV","Delay_AND_R","Delay_AND_I","Delay_AND_M","Delay_NEG","Delay_NEGC","Delay_NOT","Delay_OR_R","Delay_OR_I","Delay_OR_M","Delay_ROTCL","Delay_ROTCR","Delay_ROTL","Delay_ROTR","Delay_SHAL","Delay_SHAR","Delay_SHLL","Delay_SHLL2","Delay_SHLL8","Delay_SHLL16","Delay_SHLR","Delay_SHLR2","Delay_SHLR8","Delay_SHLR16","Delay_SUB","Delay_SUBC","Delay_SUBV","Delay_XOR_R","Delay_XOR_I","Delay_XOR_M","Delay_DT","Delay_CLRMAC","Delay_MACW","Delay_MACL","Delay_MUL","Delay_MULS","Delay_MULU","Delay_DMULS","Delay_DMULU","Delay_DIV0S","Delay_DIV0U","Delay_DIV1","Delay_CMP_EQ_I","Delay_CMP_EQ_R","Delay_CMP_GE","Delay_CMP_GT","Delay_CMP_HI","Delay_CMP_HS","Delay_CMP_PL","Delay_CMP_PZ","Delay_CMP_STR","Delay_TAS","Delay_TST_R","Delay_TST_I","Delay_TST_M","IllegalSlot"};
+    static_assert(sizeof(kOpcodeNames) / sizeof(kOpcodeNames[0]) == static_cast<size_t>(OpcodeType::IllegalSlot) + 1);
+} // namespace
+
+std::string SH2Recompiler::HelperReport(size_t top) {
+    std::array<uint64, sizeof(kOpcodeNames) / sizeof(kOpcodeNames[0])> perOpcode{};
+    uint64 total = 0;
+    for (uint32 word = 0; word < 0x10000; ++word) {
+        const uint32 hits = g_helperHits[word];
+        if (hits != 0) {
+            perOpcode[static_cast<size_t>(DecodeTable::s_instance.opcodes[0][word])] += hits;
+            total += hits;
+        }
+    }
+    std::string out;
+    for (size_t n = 0; n < top && total != 0; ++n) {
+        size_t best = 0;
+        for (size_t i = 1; i < perOpcode.size(); ++i) {
+            if (perOpcode[i] > perOpcode[best]) {
+                best = i;
+            }
+        }
+        if (perOpcode[best] == 0) {
+            break;
+        }
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%s%s %.0f%%", out.empty() ? "" : ", ", kOpcodeNames[best],
+                      100.0 * perOpcode[best] / total);
+        out += buf;
+        perOpcode[best] = 0;
+    }
+    return out;
+}
+
 uint64 SH2Recompiler::StepThunk(SH2 *sh2, uint32 instr) {
+    ++g_helperHits[instr & 0xFFFF];
     sh2->m_jitImpure = true;
     return sh2->JitStep(static_cast<uint16>(instr));
 }

@@ -22,6 +22,7 @@ and interrupts), and are validated against the code memory every time they are e
 #include <functional>
 #include <cstdlib>
 #include <memory>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -101,6 +102,10 @@ public:
     /// @brief Idle detection: a CPU that spends a whole time slice in recompiled code without writing to memory,
     /// calling the interpreter or changing any register is waiting for something. While both CPUs are waiting, the
     /// emulator lets them run in longer slices. Off by default.
+    /// @brief The instructions that most often had to be executed by the interpreter (as a share of those calls),
+    /// for finding out what to translate next.
+    static std::string HelperReport(size_t top);
+
     static void SetIdleDetection(bool enable) {
         s_idleDetect.store(enable, std::memory_order_relaxed);
     }

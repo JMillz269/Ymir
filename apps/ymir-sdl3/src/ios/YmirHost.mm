@@ -67,10 +67,12 @@ static NSString *ToNSString(const std::filesystem::path &path) {
 + (NSString *)jitReport {
     const auto g = ymir::sh2::SH2Recompiler::GetGlobalStats();
     const double avgMicros = g.blocksCompiled > 0 ? static_cast<double>(g.compileNanoseconds) / g.blocksCompiled / 1000.0 : 0.0;
-    return [NSString stringWithFormat:@"%llu blocks compiled (%.1f MB), %llu cache flushes, compile time %.0f µs average / %.1f ms slowest, %llu idle slices, %.1f%% of time in long slices, %llu conflict evictions, %llu invalidations, %.0f%% of instructions go through the interpreter",
+    const std::string helpers = ymir::sh2::SH2Recompiler::HelperReport(8);
+    NSString *main = [NSString stringWithFormat:@"%llu blocks compiled (%.1f MB), %llu cache flushes, compile time %.0f µs average / %.1f ms slowest, %llu idle slices, %.1f%% of time in long slices, %llu conflict evictions, %llu invalidations, %.0f%% of instructions go through the interpreter",
                                       g.blocksCompiled, g.bytesGenerated / 1048576.0, g.cacheFlushes, avgMicros,
                                       g.slowestCompileNanoseconds / 1.0e6, ymir::sh2::SH2Recompiler::IdleSlices(), ymir::sh2::SH2Recompiler::IdleTimeShare() * 100.0, g.conflictEvictions, g.invalidations,
                                       (g.inlineInstructions + g.helperInstructions) > 0 ? 100.0 * g.helperInstructions / (g.inlineInstructions + g.helperInstructions) : 0.0];
+    return [main stringByAppendingFormat:@"\nMost used interpreter calls: %s", helpers.empty() ? "none yet" : helpers.c_str()];
 }
 
 + (NSString *)documentsPath {
