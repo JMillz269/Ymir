@@ -379,7 +379,7 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
         if (m_prefetchValid && m_sh2.PC == m_prefetchPc) {
             m_sh2.m_fetchedOpcodes = m_prefetch;
         } else {
-            m_sh2.RefillPipeline<false>();
+            m_sh2.JitRefillPipeline();
         }
     }
     return cycles;

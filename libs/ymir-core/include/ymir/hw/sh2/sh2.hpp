@@ -76,6 +76,9 @@ public:
     /// replaced without the recompiler noticing (it normally detects changes by itself).
     void FlushRecompiler();
 
+    /// @brief Reloads the prefetch buffer from the current PC, for the recompiler.
+    void JitRefillPipeline();
+
     /// @brief Allows the recompiler to be set up again after it couldn't obtain executable memory (e.g. because the JIT
     /// enabler wasn't attached yet).
     void ResetRecompilerAvailability() {

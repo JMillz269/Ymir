@@ -2598,6 +2598,10 @@ uint64 SH2::RunRecompiledBlock(uint64 cyclesLeft) {
     return m_recompiler->Run(cyclesLeft);
 }
 
+void SH2::JitRefillPipeline() {
+    RefillPipeline<false>();
+}
+
 void SH2::FlushRecompiler() {
     if (m_recompiler) {
         m_recompiler->Flush();
