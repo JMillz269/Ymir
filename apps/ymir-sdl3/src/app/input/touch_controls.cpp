@@ -484,10 +484,9 @@ void TouchControls::Draw(ImDrawList *drawList, std::optional<ImTextureID> atlas)
     const ImU32 idleTint = IM_COL32(225, 225, 225, alpha);
     const ImU32 pressedTint = IM_COL32(255, 255, 255, alpha);
 
-    // Draws a sprite so that its visible body (without the transparent margin) is bodyWidth wide
+    // Draws a sprite so that the control itself (without the soft glow around it) is bodyWidth wide
     const auto drawSprite = [&](const touch_atlas::Rect &r, ImVec2 center, float bodyWidth, bool pressed) {
-        constexpr float kMargin = 8.0f; // transparent margin around each sprite in the atlas
-        const float factor = bodyWidth / std::max(1.0f, r.w - kMargin * 2.0f) * (pressed ? 0.94f : 1.0f);
+        const float factor = bodyWidth / std::max(1.0f, (float)r.bodyW) * (pressed ? 0.94f : 1.0f);
         const float w = r.w * factor;
         const float h = r.h * factor;
         const ImVec2 p0{center.x - w * 0.5f, center.y - h * 0.5f};
