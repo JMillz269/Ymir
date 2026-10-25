@@ -44,6 +44,9 @@ namespace {
     constexpr Reg kBudget = X21; // cycles that may be executed
     constexpr Reg kCodeBase = X22;  // host address of the block's code in the emulated memory
     constexpr Reg kPageTable = X23; // bus page table
+    // Callee-saved registers that hold the most used SH-2 registers while a block runs
+    constexpr uint32 kFirstCached = 24;
+    constexpr uint32 kLastCached = 28;
     constexpr Reg kTmpWb = 9;
     constexpr Reg kT0 = 10, kT1 = 11, kT2 = 12, kT3 = 13, kT4 = 14;
 
@@ -529,7 +532,25 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         hasLoop = true;
     }
 
+    // Loading SR can leave an interrupt pending that is serviced a few instructions later, which only straight-line
+    // code is checked for: blocks that do it neither loop nor jump into other blocks
+    bool hasLoadSr = false;
+    for (uint32 k = 0; k < count; ++k) {
+        hasLoadSr = hasLoadSr || insns[k].opcode == OpcodeType::LDC_SR_R || insns[k].opcode == OpcodeType::LDC_SR_M;
+    }
+    if (hasLoadSr) {
+        jumpIndex.fill(-1);
+        isTarget.fill(false);
+        hasLoop = false;
+    }
+
     // -- Generate --
+
+    // Registers that stay in host registers during the block are chosen after a first pass that counts how often each
+    // one is used. Generating is done twice: once to count, once for real.
+    std::array<uint32, kMaxBlockWords> words{};
+    auto generate = [&](const std::array<sint32, 16> &cacheHost, std::array<uint32, 16> &useCount, size_t &outWords,
+                        size_t &outChainWord) -> bool {
 
     // Offsets of the CPU state that generated code reads and writes
     struct {
@@ -553,7 +574,6 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
               SH2::kWBRegNone,
               SH2::kWBRegPR};
 
-    std::array<uint32, kMaxBlockWords> words{};
     Assembler a{words.data(), words.size()};
     FieldAccess field{a};
 
@@ -570,16 +590,37 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     }
     const sys::SH2Bus::PageLayout pages = m_bus.GetPageLayout();
 
+    // SH-2 registers that live in host registers: the host register, or -1
+    auto cached = [&](uint32 index) { return cacheHost[index]; };
+    // Writes them back to the CPU state, which the interpreter's handlers and the code that called the block read
+    auto flushRegs = [&] {
+        for (uint32 r = 0; r < 16; ++r) {
+            if (cached(r) >= 0) {
+                a.Str(2, static_cast<Reg>(cached(r)), kThis, static_cast<uint32>(L.R + 4 * r));
+            }
+        }
+    };
+    auto reloadRegs = [&] {
+        for (uint32 r = 0; r < 16; ++r) {
+            if (cached(r) >= 0) {
+                a.Ldr(2, static_cast<Reg>(cached(r)), kThis, static_cast<uint32>(L.R + 4 * r));
+            }
+        }
+    };
+
     // Prologue
-    a.StpPre(Sz::X, X29, X30, SP, -64);
+    a.StpPre(Sz::X, X29, X30, SP, -96);
     a.Stp(Sz::X, X19, X20, SP, 16);
     a.Stp(Sz::X, X21, X22, SP, 32);
-    a.Str(3, X23, SP, 48);
+    a.Stp(Sz::X, X23, X24, SP, 48);
+    a.Stp(Sz::X, X25, X26, SP, 64);
+    a.Stp(Sz::X, X27, X28, SP, 80);
     a.Mov(Sz::X, kThis, X0);
     a.Mov(Sz::X, kBudget, X1);
     a.Mov(Sz::X, kCycles, ZR);
     // Blocks that jump here have already set up the registers above
     a.Bind(chainLabel);
+    reloadRegs();
     a.MovImm(Sz::X, kCodeBase, reinterpret_cast<uint64>(src));
     if (hasMem) {
         a.MovImm(Sz::X, kPageTable, reinterpret_cast<uint64>(pages.table));
@@ -588,8 +629,22 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     a.MovImm(Sz::W, kT0, 1);
     field.Store(0, kT0, L.IntrAllow);
 
-    auto loadR = [&](Reg dst, uint32 index) { a.Ldr(2, dst, kThis, static_cast<uint32>(L.R + 4 * index)); };
-    auto storeR = [&](Reg src, uint32 index) { a.Str(2, src, kThis, static_cast<uint32>(L.R + 4 * index)); };
+    auto loadR = [&](Reg dst, uint32 index) {
+        ++useCount[index];
+        if (cached(index) >= 0) {
+            a.Mov(Sz::W, dst, static_cast<Reg>(cached(index)));
+        } else {
+            a.Ldr(2, dst, kThis, static_cast<uint32>(L.R + 4 * index));
+        }
+    };
+    auto storeR = [&](Reg src, uint32 index) {
+        ++useCount[index];
+        if (cached(index) >= 0) {
+            a.Mov(Sz::W, static_cast<Reg>(cached(index)), src);
+        } else {
+            a.Str(2, src, kThis, static_cast<uint32>(L.R + 4 * index));
+        }
+    };
     // T lives in bit 0 of SR
     auto readTBit = [&](Reg dst) {
         a.Ldr(2, dst, kThis, static_cast<uint32>(L.SR));
@@ -621,10 +676,12 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             a.MovImm(Sz::W, kT0, ipc);
             a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
         }
+        flushRegs();
         a.Mov(Sz::X, X0, kThis);
         a.MovImm(Sz::W, X1, w);
         a.MovImm(Sz::X, X16, reinterpret_cast<uint64>(&SH2Recompiler::StepThunk));
         a.Blr(X16);
+        reloadRegs();
         a.Add(Sz::X, kCycles, kCycles, X0);
         ++m_stats.helperInstructions;
         // A store may have rewritten instructions further down this very block. The interpreter would execute the
@@ -667,7 +724,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     // need no extra bookkeeping qualify: an aligned instruction in the same bus page. Returns false (emitting nothing)
     // if the target doesn't qualify. The PC must already be stored if `pcStored`.
     auto emitChain = [&](uint32 targetPc, bool pcStored, bool checkIntr) -> bool {
-        if ((targetPc & 3u) != 0 || (targetPc >> 16) != (pc >> 16) || targetPc == pc) {
+        if (hasLoadSr || (targetPc & 3u) != 0 || (targetPc >> 16) != (pc >> 16) || targetPc == pc) {
             return false;
         }
         Label *failLabel = &epilogue;
@@ -711,6 +768,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         a.AddImm(Sz::X, 9, 9, 16);
         a.SubsImm(Sz::W, 8, 8, 16);
         a.BCond(Cond::HI, loop);
+        flushRegs();
         a.Br(5);
         ++m_stats.chainSites;
         return true;
@@ -788,7 +846,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             budgetExits.back().second = targetPc;
             return budgetExits.back().first;
         };
-        if (k + 1 == intrCheckAt || pcStored) {
+        if (k + 1 >= intrCheckAt || pcStored) {
             // (after a delay slot the interrupt flags were just recomputed)
             field.Load(0, kT0, L.IntrPending);
             field.Load(0, kT1, L.IntrAllow);
@@ -1936,7 +1994,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
 
         // An instruction that loads SR can make an interrupt pending while also blocking interrupts for the next
         // instruction. The interrupt is serviced once that one is done, which the checks after handlers don't catch.
-        if (k > 0 && k == intrCheckAt) {
+        if (k > 0 && k >= intrCheckAt) {
             budgetExits.emplace_back();
             budgetExits.back().second = insn.pc;
             field.Load(0, kT0, L.IntrPending);
@@ -2111,11 +2169,14 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
 
     // Epilogue
     a.Bind(epilogue);
+    flushRegs();
     a.Mov(Sz::X, X0, kCycles);
-    a.Ldr(3, X23, SP, 48);
+    a.Ldp(Sz::X, X27, X28, SP, 80);
+    a.Ldp(Sz::X, X25, X26, SP, 64);
+    a.Ldp(Sz::X, X23, X24, SP, 48);
     a.Ldp(Sz::X, X21, X22, SP, 32);
     a.Ldp(Sz::X, X19, X20, SP, 16);
-    a.LdpPost(Sz::X, X29, X30, SP, 64);
+    a.LdpPost(Sz::X, X29, X30, SP, 96);
     a.Ret();
 
     // Exits taken when the cycle budget runs out before an instruction
@@ -2161,13 +2222,48 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             std::fprintf(stderr, "jit: block at %08X rejected (%s, %zu words)\n", pc,
                          a.Overflowed() ? "overflow" : "branch out of range", a.Size());
         }
+        return false;
+    }
+    outWords = a.Size();
+    outChainWord = static_cast<size_t>(chainLabel.position);
+    return true;
+    };
+
+    std::array<sint32, 16> noCache;
+    noCache.fill(-1);
+    std::array<uint32, 16> useCount{};
+    size_t wordCount = 0;
+    size_t chainWord = 0;
+    const Stats savedStats = m_stats;
+    if (!generate(noCache, useCount, wordCount, chainWord)) {
+        m_stats = savedStats;
+        ++m_stats.blocksRejected;
+        return;
+    }
+    m_stats = savedStats;
+    std::array<sint32, 16> cacheHost;
+    cacheHost.fill(-1);
+    for (uint32 hostReg = kFirstCached; hostReg <= kLastCached; ++hostReg) {
+        uint32 best = 16;
+        for (uint32 r = 0; r < 16; ++r) {
+            if (cacheHost[r] < 0 && useCount[r] >= 2 && (best == 16 || useCount[r] > useCount[best])) {
+                best = r;
+            }
+        }
+        if (best == 16) {
+            break;
+        }
+        cacheHost[best] = static_cast<sint32>(hostReg);
+    }
+    std::array<uint32, 16> unusedCount{};
+    if (!generate(cacheHost, unusedCount, wordCount, chainWord)) {
         ++m_stats.blocksRejected;
         return;
     }
 
     // -- Install --
 
-    const size_t sizeBytes = a.Size() * sizeof(uint32);
+    const size_t sizeBytes = wordCount * sizeof(uint32);
     if (m_chunkUsed + sizeBytes + 16 > m_chunkSize) {
         Flush();
         // The block table was cleared, so the block being compiled has to be filled in again
@@ -2182,7 +2278,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     g_pool.EndWrite(offset, sizeBytes);
     block.fn = reinterpret_cast<BlockFn>(g_pool.ExecPtr(offset));
     if (block.paddedLen != 0) {
-        block.chainEntry = g_pool.ExecPtr(offset) + chainLabel.position * sizeof(uint32);
+        block.chainEntry = g_pool.ExecPtr(offset) + chainWord * sizeof(uint32);
     }
     ++m_stats.blocksCompiled;
 }

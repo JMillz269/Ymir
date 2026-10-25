@@ -56,7 +56,7 @@ non-RAM addresses, TAS, the read-modify-write byte instructions, LDC to SR, RTE,
 interpreter's own handler, so those behave exactly as they do there. Blocks are checked against the code in memory every
 time they run, and a write into a block's own code ends the block. A block that ends in a branch to a known address jumps
 directly into the next block (after checking that its code is unchanged) instead of going back through the emulator's main
-loop. Register caching and compiling the 68K sound CPU are not done yet.
+loop. The five most used SH-2 registers of each block are kept in host registers while it runs. Compiling the 68K sound CPU is not done.
 
 Getting JIT access on iOS (the app has to be signed with `get-task-allow`, which sideloading tools do for development
 signing; TrollStore installs get JIT differently):
