@@ -234,6 +234,7 @@ struct MetalGraphicsContext::Impl {
     MTLScissorRect scissorRect{};
 
     PresentMode presentMode = PresentMode::VSync;
+    double frameRateHint = 0.0; // frames per second the app presents; 0 = unrestricted
 
     // -- Post processing filters --
 
@@ -857,7 +858,13 @@ struct MetalGraphicsContext::Impl {
 
         @autoreleasepool {
             if (currentDrawable != nil && cmdListFrame != nil) {
-                [cmdListFrame presentDrawable:currentDrawable];
+                if (frameRateHint > 0.0) {
+                    // Lets a variable refresh rate (ProMotion) display settle at the rate frames are produced at
+                    // instead of running at its maximum rate
+                    [cmdListFrame presentDrawable:currentDrawable afterMinimumDuration:1.0 / frameRateHint];
+                } else {
+                    [cmdListFrame presentDrawable:currentDrawable];
+                }
 
                 dispatch_semaphore_t sem = frameSemaphore;
                 [cmdListFrame addCompletedHandler:^(id<MTLCommandBuffer>) {
@@ -1451,6 +1458,10 @@ void MetalGraphicsContext::SetPostProcess(const PostProcessParams &params) {
 
 bool MetalGraphicsContext::SupportsUpscaling() const {
     return m_impl->SupportsUpscaling();
+}
+
+void MetalGraphicsContext::SetFrameRateHint(double framesPerSecond) {
+    m_impl->frameRateHint = framesPerSecond;
 }
 
 void MetalGraphicsContext::SetUpscaleMode(UpscaleMode mode) {

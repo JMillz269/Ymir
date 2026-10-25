@@ -1532,6 +1532,9 @@ void App::RunEmulator() {
             //! vdp.GetRenderer().IsHardwareRenderer() && // TODO: fix video sync with hardware renderers
             (fullScreen ? settings.video.syncInFullscreenMode : settings.video.syncInWindowedMode);
         screen.videoSync = videoSync && !m_context.paused && m_context.emuSpeed.limitSpeed;
+        if (!screen.videoSync) {
+            m_graphicsService.SetFrameRateHint(0.0); // paused, fast-forwarding or no video sync: no restriction
+        }
 
         const double frameIntervalAdjustFactor = 0.2; // how much adjustment is applied to the frame interval
 
@@ -1593,6 +1596,10 @@ void App::RunEmulator() {
                 // Base frame rate is higher than refresh rate; don't duplicate any frames
                 screen.dupGUIFrames = 1;
             }
+
+            // Tell the display how often frames are going to be presented, so that a variable refresh rate display
+            // doesn't run faster than needed
+            m_graphicsService.SetFrameRateHint(screen.videoSync ? baseFrameRate * screen.dupGUIFrames : 0.0);
 
             // Update VSync setting
             gfx::PresentMode newPresentMode;

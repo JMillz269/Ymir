@@ -171,6 +171,11 @@ public:
     /// @return nothing on success, an error message on failure
     virtual util::VoidResult<> SetPresentMode(PresentMode mode) = 0;
 
+    /// @brief Tells the backend how many frames per second the application is going to present, so that a variable
+    /// refresh rate display can run at a matching rate instead of its maximum. 0 means as often as the display allows.
+    /// Ignored by backends that can't use it.
+    virtual void SetFrameRateHint(double framesPerSecond) {}
+
     /// @brief Determines whether the backend can upscale the video output with a hardware upscaler.
     virtual bool SupportsUpscaling() const {
         return false;

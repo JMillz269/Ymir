@@ -253,6 +253,10 @@ util::VoidResult<> GraphicsService::SetPresentMode(PresentMode mode) {
     return m_gfxContext->SetPresentMode(mode);
 }
 
+void GraphicsService::SetFrameRateHint(double framesPerSecond) {
+    m_gfxContext->SetFrameRateHint(framesPerSecond);
+}
+
 util::ValueResult<PresentResult> GraphicsService::Present() {
     return m_gfxContext->Present();
 }
