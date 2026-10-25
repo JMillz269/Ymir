@@ -107,6 +107,15 @@ public:
     static uint64 IdleSlices() {
         return s_idleSlices.load(std::memory_order_relaxed);
     }
+    /// @brief Share of the emulated time (0 to 1) that ran in longer slices because every CPU was waiting.
+    static double IdleTimeShare() {
+        const uint64 total = s_totalCycles.load(std::memory_order_relaxed);
+        return total == 0 ? 0.0 : static_cast<double>(s_coarseCycles.load(std::memory_order_relaxed)) / total;
+    }
+    static void NoteSliceCycles(uint64 total, uint64 coarse) {
+        s_totalCycles.fetch_add(total, std::memory_order_relaxed);
+        s_coarseCycles.fetch_add(coarse, std::memory_order_relaxed);
+    }
 
     struct Stats {
         uint64 blocksCompiled = 0;
@@ -126,6 +135,8 @@ private:
     friend class SH2;
     static inline std::atomic<bool> s_idleDetect{false};
     static inline std::atomic<uint64> s_idleSlices{0};
+    static inline std::atomic<uint64> s_totalCycles{0};
+    static inline std::atomic<uint64> s_coarseCycles{0};
 
     static constexpr uint32 kMaxInstructions = 32;
     // (rounded up to 16 bytes: blocks are compared in chunks of 16 when one block jumps to another)

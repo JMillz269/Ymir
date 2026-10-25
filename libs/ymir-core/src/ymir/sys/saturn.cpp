@@ -523,8 +523,9 @@ template <bool debug, bool enableSH2Cache, bool cdblockLLE>
 bool Saturn::Run() {
     static constexpr uint64 kSH2SyncMaxStep = 32;
     // While every CPU is waiting for something (see SH2Recompiler::SetIdleDetection) the time slices can be longer
-    static constexpr uint64 kSH2IdleSyncStep = 512;
+    static constexpr uint64 kSH2IdleSyncStep = 128;
     const bool idleSync = !debug && sh2::SH2Recompiler::IdleDetectionEnabled();
+    uint64 coarseCycles = 0;
 
     const uint64 cycles = static_config::max_timing_granularity ? 1 : std::max<sint64>(m_scheduler.RemainingCount(), 0);
 
@@ -546,6 +547,9 @@ bool Saturn::Run() {
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 slaveCycles = slaveSH2.Advance<debug, enableSH2Cache>(execCycles, slaveCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
+                if (step == kSH2IdleSyncStep) {
+                    coarseCycles += execCycles - prevExecCycles;
+                }
                 if constexpr (debug) {
                     if (m_debugBreakMgr.IsDebugBreakRaised()) {
                         break;
@@ -570,6 +574,9 @@ bool Saturn::Run() {
                 const uint64 targetCycles = std::min(execCycles + step, cycles);
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
+                if (step == kSH2IdleSyncStep) {
+                    coarseCycles += execCycles - prevExecCycles;
+                }
                 if constexpr (debug) {
                     if (m_debugBreakMgr.IsDebugBreakRaised()) {
                         break;
@@ -579,6 +586,9 @@ bool Saturn::Run() {
         }
     }
     VDP.Advance(execCycles);
+    if (idleSync) {
+        sh2::SH2Recompiler::NoteSliceCycles(execCycles, coarseCycles);
+    }
 
     // SCSP+M68K and CD block are ticked by the scheduler
 

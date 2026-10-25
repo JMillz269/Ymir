@@ -1145,7 +1145,7 @@ private:
 public:
     /// @brief Whether this CPU has been waiting for something, so that it can run in longer slices.
     [[nodiscard]] bool IsIdle() const {
-        return m_sleep || m_idleStreak >= 2;
+        return m_sleep || m_idleStreak >= 4;
     }
 
 private:

@@ -488,8 +488,10 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
         }
     }
 
+    bool iterated = false;
     while (m_cyclesExecuted < cycles) {
         // [[maybe_unused]] const uint32 prevPC = PC; // debug aid
+        iterated = true;
 
         if constexpr (!debug && !emulateCache) {
             if (useRecompiler) {
@@ -552,7 +554,9 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
             }
         }
     }
-    if (trackIdle && idleCandidate) {
+    if (trackIdle && !iterated) {
+        // Nothing was executed in this slice (the CPU was already ahead of the others): nothing to learn
+    } else if (trackIdle && idleCandidate) {
         if (!m_jitImpure && captureIdle() == idleBefore) {
             if (m_idleStreak < 255) {
                 ++m_idleStreak;
