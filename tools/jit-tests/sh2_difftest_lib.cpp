@@ -179,6 +179,12 @@ void t_get_state(void *handle, uint32 *v) {
     v[28] = c.m_sleep;
 }
 
+void t_set_intc_level(void *handle, uint32 level) {
+    auto *s = static_cast<Subject *>(handle);
+    s->sh2.INTC.pending.level = static_cast<uint8>(level);
+    s->sh2.INTC.pending.source = sh2::InterruptSource::IRL;
+}
+
 uint64 t_advance(void *handle, uint64 cycles, uint64 spillover) {
     auto *s = static_cast<Subject *>(handle);
     const uint64 executed = s->sh2.Advance<false, false>(cycles, spillover);

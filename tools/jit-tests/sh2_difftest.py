@@ -35,6 +35,7 @@ lib.t_set_mem.argtypes = [vp, u32, C.c_char_p, u32]
 lib.t_get_ram.argtypes = [vp, C.c_char_p, C.c_char_p]
 lib.t_set_state.argtypes = [vp, C.POINTER(u32)]
 lib.t_get_state.argtypes = [vp, C.POINTER(u32)]
+lib.t_set_intc_level.argtypes = [vp, u32]
 lib.t_advance.restype = u64
 lib.t_advance.argtypes = [vp, u64, u64]
 lib.t_step_thunk_address.restype = u64
@@ -119,7 +120,10 @@ class Recomp:
             sh2 = uc.reg_read(UC_ARM64_REG_X0)
             pc = uc.reg_read(UC_ARM64_REG_X1) & 0xFFFFFFFF
             off = uc.reg_read(UC_ARM64_REG_X2) & 0xFFFFFFFF
-            uc.reg_write(UC_ARM64_REG_X0, lib.t_check_thunk(sh2, pc, off))
+            r = lib.t_check_thunk(sh2, pc, off)
+            if TRACE:
+                print(f"    check pc={pc:#x} off={off} -> {r}")
+            uc.reg_write(UC_ARM64_REG_X0, r)
 
         self.uc.hook_add(UC_HOOK_CODE, on_thunk, begin=self.thunk, end=self.thunk)
         self.uc.hook_add(UC_HOOK_CODE, on_check, begin=self.check_thunk, end=self.check_thunk)
@@ -136,12 +140,14 @@ class Recomp:
                 self.uc.ctl_flush_tb()
                 self.last_compiled = st[0]
             if TRACE:
-                from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-                md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
-                code = bytes(self.uc.mem_read(fn, 0x400))
-                print(f"  BLOCK {fn:#x} budget={budget}")
-                for a, _, m, o in md.disasm_lite(code, fn):
-                    print(f"    {a - fn:#05x}: {m} {o}")
+                pcnow = read_state(self.h)[16]
+                print(f"  BLOCK {fn:#x} budget={budget} pc={pcnow:#x}")
+                if os.environ.get("TRACE_ASM"):
+                    from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+                    md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+                    code = bytes(self.uc.mem_read(fn, 0x1000))
+                    for a, _, m, o in md.disasm_lite(code, fn):
+                        print(f"    {a - fn:#05x}: {m} {o}")
             self.uc.reg_write(UC_ARM64_REG_X0, sh2)
             self.uc.reg_write(UC_ARM64_REG_X1, budget)
             self.uc.reg_write(UC_ARM64_REG_X30, RETURN_SENTINEL)
@@ -282,11 +288,12 @@ def stepwise(seed, steps=600):
 
 
 def bisect_from(snap, maxb):
-    st, hi, lo = snap
+    st, hi, lo, level = snap
     for budget in range(1, maxb + 1):
         interp = lib.t_create(0)
         rec = Recomp()
         for h in (interp, rec.h):
+            lib.t_set_intc_level(h, level)
             lib.t_set_mem(h, RAM_BASE_H, hi, len(hi))
             lib.t_set_mem(h, RAM_BASE_L, lo, len(lo))
             write_state(h, st)
@@ -321,12 +328,17 @@ def run_case(seed, verbose=False):
         # Vector table used by exceptions
         lib.t_set_mem(h, RAM_BASE_H + 0x400, bytes(0x400), 0x400)
         write_state(h, st)
+    level = 0
+    if rng.random() < 0.3:
+        level = rng.randrange(1, 16)
+        for h in (interp, rec.h):
+            lib.t_set_intc_level(h, level)
 
     snap = None
     for step in range(rng.choice([6, 12])):
         budget = rng.choice([1, 2, 3, 7, 20, 64, 200])
-        if step == 0 and "FORCE_BUDGET" in os.environ:
-            budget = int(os.environ["FORCE_BUDGET"])
+        if "FORCE_BUDGET%d" % step in os.environ:
+            budget = int(os.environ["FORCE_BUDGET%d" % step])
         if rng.random() < 0.15:
             ia = read_state(interp)
             ia[24] = 1
@@ -334,7 +346,26 @@ def run_case(seed, verbose=False):
             write_state(interp, ia)
             write_state(rec.h, ia)
         hi_, lo_ = get_ram(interp)
-        snap = (read_state(interp), hi_, lo_)
+        snap = (read_state(interp), hi_, lo_, level)
+        if os.environ.get("TRACE_STEP") == str(step):
+            tot = 0
+            lines = []
+            while tot < budget and len(lines) < 200:
+                before = read_state(interp)
+                hi2, _ = get_ram(interp)
+                pc = before[16]
+                off = pc & 0xFFFFF
+                op = int.from_bytes(hi2[off:off + 2], "big") if (pc >> 24) == 6 else None
+                c = lib.t_advance(interp, 1, 0)
+                tot += c
+                after = read_state(interp)
+                lines.append(f"   I pc={pc:#x} op={'?' if op is None else f'{op:04x}'} slot={before[26]} wb={before[23]} "
+                             f"pend={before[24]}/{after[24]} allow={before[25]} c={c} tot={tot}")
+            print("\n".join(lines))
+            print("   -- recompiler:")
+            cr = lib.t_advance(rec.h, budget, 0)
+            print("   rec cycles", cr, "pc", hex(read_state(rec.h)[16]))
+            return "traced", None
         ci = lib.t_advance(interp, budget, 0)
         cr = lib.t_advance(rec.h, budget, 0)
         si, sr = read_state(interp), read_state(rec.h)
@@ -343,6 +374,11 @@ def run_case(seed, verbose=False):
         if ci != cr or si != sr:
             diffs = [f"{NAMES[i]}: interp={si[i]:#x} rec={sr[i]:#x}" for i in range(29) if si[i] != sr[i]]
             SNAPS[seed] = (snap, budget)
+            if os.environ.get("DUMP_CODE"):
+                hi_i, _ = get_ram(interp)
+                hi_r, _ = get_ram(rec.h)
+                print("   code words interp:", " ".join(f"{int.from_bytes(hi_i[0x1000+2*i:0x1002+2*i], 'big'):04x}" for i in range(30)))
+                print("   code words rec:   ", " ".join(f"{int.from_bytes(hi_r[0x1000+2*i:0x1002+2*i], 'big'):04x}" for i in range(30)))
             return (f"seed {seed} step {step} budget {budget}: cycles interp={ci} rec={cr}; " + "; ".join(diffs),
                     code)
         if get_ram(interp) != get_ram(rec.h):
@@ -382,6 +418,13 @@ def directed():
                 good = good and si[reg] == val
         print(("ok   " if good else "FAIL ") + name, "" if good else f"interp={[hex(x) for x in si[:8]]} rec={[hex(x) for x in sr[:8]]} "
               f"cycles {ci}/{cr} {rec.errors[:1]}")
+        stats = (u64 * 7)()
+        lib.t_stats(rec.h, stats)
+        if stats[1] == 0:
+            print("FAIL " + name + ": the recompiler never ran")
+            good = False
+        lib.t_destroy(interp)
+        lib.t_destroy(rec.h)
         ok = ok and good
 
     # The store rewrites an instruction further down the same block: MOV #0x11,R3 becomes MOV #7,R3
@@ -392,6 +435,10 @@ def directed():
     check("rewrite of a delay slot",
           [0x2201, 0x0009, 0xA002, 0xE311, 0x0009, 0x0009, 0xE411],
           {0: 0xE307, 2: CODE_ADDR + 6}, expect={3: 7})
+    # A loop that rewrites its own first instruction: MOV #1,R3 becomes MOV #9,R3 on the second pass
+    check("loop rewriting its head",
+          [0xE301, 0x2201, 0x4410, 0x8BFB, 0x0009, 0x0009],
+          {0: 0xE309, 2: CODE_ADDR, 4: 2}, expect={3: 9})
     # Backward branch loop that runs many times
     check("counted loop", [0xE30A, 0x4310, 0x8FFE, 0x0009, 0x0009], {}, budget=200)
     return ok
@@ -401,7 +448,7 @@ def main():
     global ILLEGAL
     # The "illegal" opcode type value: find via a known illegal word
     ILLEGAL = lib.t_opcode_type(0x0000, 0)  # 0x0000 is illegal on SH-2
-    if not directed():
+    if not os.environ.get("SKIP_DIRECTED") and not directed():
         sys.exit(1)
     iters = int(sys.argv[2]) if len(sys.argv) > 2 else 200
     seed0 = int(sys.argv[3]) if len(sys.argv) > 3 else 1
@@ -420,6 +467,9 @@ def main():
                 print("  code:", " ".join(f"{w:04x}" for w in extra[:40]))
         elif extra:
             tot = [a + b for a, b in zip(tot, extra)]
+    if tot[1] == 0:
+        print("FAIL: the recompiler never ran")
+        failures += 1
     print(f"{iters - failures}/{iters} cases matched")
     print("recompiler stats: compiled=%d executed=%d rejected=%d invalidations=%d flushes=%d inline=%d helper=%d" %
           tuple(tot))

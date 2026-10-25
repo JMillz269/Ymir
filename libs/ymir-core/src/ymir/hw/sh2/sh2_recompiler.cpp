@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <bit>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -362,6 +364,9 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         OpcodeType opcode;
         Kind kind;
         uint32 pc;
+        // For delay slots: how the instruction decodes when the branch before it isn't taken (BT/S and BF/S)
+        OpcodeType normalOpcode = OpcodeType::Illegal;
+        Kind normalKind = Kind::Helper;
     };
     std::array<Insn, kMaxInstructions + 1> insns{};
     uint32 count = 0;
@@ -378,6 +383,8 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             // Delay slots always go through the interpreter's handlers
             insn.opcode = DecodeTable::s_instance.opcodes[1][word];
             insn.kind = Kind::Helper;
+            insn.normalOpcode = DecodeTable::s_instance.opcodes[0][word];
+            insn.normalKind = Classify(insn.normalOpcode);
             done = true;
         } else {
             insn.opcode = DecodeTable::s_instance.opcodes[0][word];
@@ -411,11 +418,53 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         return;
     }
 
+    // -- Branches that stay inside the block --
+    // Loops are common in hot code; a branch to an instruction of the same block is compiled as a jump
+    std::array<sint32, kMaxInstructions + 1> jumpIndex{};
+    std::array<bool, kMaxInstructions + 1> isTarget{};
+    std::array<bool, kMaxInstructions + 1> isSlot{};
+    jumpIndex.fill(-1);
+    bool hasLoop = false;
+    for (uint32 k = 1; k < count; ++k) {
+        isSlot[k] = insns[k - 1].kind == Kind::DelayedBranch;
+    }
+    for (uint32 k = 0; k < count; ++k) {
+        const Insn &insn = insns[k];
+        const uint16 w = insn.word;
+        sint32 disp = 0;
+        switch (insn.opcode) {
+        case OpcodeType::BT:
+        case OpcodeType::BF:
+        case OpcodeType::BTS:
+        case OpcodeType::BFS: disp = static_cast<sint8>(w & 0xFF) * 2; break;
+        case OpcodeType::BRA: disp = (static_cast<sint32>((w & 0xFFF) << 20) >> 20) * 2; break;
+        default: continue;
+        }
+        if (insn.kind == Kind::DelayedBranch) {
+            // The delay slot has to be translated inline too, since that's where the jump is emitted
+            if (k + 1 >= count || insns[k + 1].normalKind != Kind::Inline ||
+                insns[k + 1].normalOpcode == OpcodeType::MOVA) {
+                continue;
+            }
+        }
+        const uint32 target = insn.pc + 4 + static_cast<uint32>(disp);
+        if (target < pc || target >= pc + count * 2) {
+            continue;
+        }
+        const uint32 index = (target - pc) / 2;
+        if (isSlot[index]) {
+            continue;
+        }
+        jumpIndex[k] = static_cast<sint32>(index);
+        isTarget[index] = true;
+        hasLoop = true;
+    }
+
     // -- Generate --
 
     // Offsets of the CPU state that generated code reads and writes
     struct {
-        size_t R, PC, SR, GBR, VBR, PR, DelaySlot, DelaySlotTarget, MAC, WbReg, IntrPending, IntrAllow;
+        size_t R, PC, SR, GBR, VBR, PR, IntcLevel, DelaySlot, DelaySlotTarget, MAC, WbReg, IntrPending, IntrAllow;
         uint8 WbNone;
         uint8 WbPR;
     } const L{offsetof(SH2, R),
@@ -424,6 +473,8 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
               offsetof(SH2, GBR),
               offsetof(SH2, VBR),
               offsetof(SH2, PR),
+              offsetof(SH2, INTC) + offsetof(InterruptController, pending) +
+                  offsetof(InterruptController::PendingInterruptInfo, level),
               offsetof(SH2, m_delaySlot),
               offsetof(SH2, m_delaySlotTarget),
               offsetof(SH2, MAC),
@@ -438,8 +489,8 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     FieldAccess field{a};
 
     Label epilogue;
-    std::vector<std::pair<Label, uint32>> budgetExits; // label, PC to store
-    budgetExits.reserve(count);
+    std::deque<Label> instrLabels(count); // targets of branches inside the block
+    std::deque<std::pair<Label, uint32>> budgetExits; // label, PC to store; references to labels must stay valid
 
     // Whether the block has loads or stores that are translated inline, and whether any of them writes
     bool hasMem = false;
@@ -486,6 +537,8 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     bool allowSet = true;
     // Whether the PC stored in the CPU is behind the instruction about to be executed (inline instructions leave it)
     bool pcStale = false;
+    // The instruction before which the block has to check for an interrupt that became serviceable
+    uint32 intrCheckAt = 0xFFFFFFFFu;
 
     // Emits a call to the interpreter's handler for the instruction `w` at `ipc` (the `k`-th of the block) and the
     // checks that follow it: whether code ahead in the block was overwritten, whether control left the block and
@@ -507,8 +560,8 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             const auto &mem = DecodeTable::s_instance.mem[w];
             // The interpreter fetches whole longwords: an instruction at an aligned address has already fetched the
             // word after it, so changes to that one are not noticed
-            const uint32 firstChecked = k + 1 + ((ipc & 2u) == 0 ? 1 : 0);
-            if (firstChecked < count && (mem.first.write || mem.second.write)) {
+            const uint32 firstChecked = hasLoop ? 0 : k + 1 + ((ipc & 2u) == 0 ? 1 : 0);
+            if ((hasLoop || firstChecked < count) && (mem.first.write || mem.second.write)) {
                 a.Mov(Sz::X, X0, kThis);
                 a.MovImm(Sz::W, X1, pc);
                 a.MovImm(Sz::W, X2, firstChecked * 2);
@@ -580,6 +633,29 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         }
     };
 
+    // Jumps to an instruction of this block: leaves the block instead if an interrupt is about to be taken or the
+    // cycle budget is used up, like the interpreter's loop would before the next instruction
+    auto emitJump = [&](uint32 k, sint32 index, uint32 targetPc, bool pcStored) {
+        auto exitTo = [&]() -> Label & {
+            if (pcStored) {
+                return epilogue;
+            }
+            budgetExits.emplace_back();
+            budgetExits.back().second = targetPc;
+            return budgetExits.back().first;
+        };
+        if (k + 1 == intrCheckAt || pcStored) {
+            // (after a delay slot the interrupt flags were just recomputed)
+            field.Load(0, kT0, L.IntrPending);
+            field.Load(0, kT1, L.IntrAllow);
+            a.And(Sz::W, kT0, kT0, kT1);
+            a.Cbnz(Sz::W, kT0, exitTo());
+        }
+        a.Cmp(Sz::X, kCycles, kBudget);
+        a.BCond(Cond::CS, exitTo());
+        a.B(instrLabels[index]);
+    };
+
     // Branches. The delay slot instruction that follows a delayed branch is executed by the handler like any other
     // instruction, with the interpreter's delay slot state set up here.
     std::deque<Label> labelPool; // labels must outlive the code that refers to them
@@ -614,9 +690,13 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 a.Tbnz(kT0, 0, notTaken);
             }
             a.AddImm(Sz::X, kCycles, kCycles, 3);
-            a.MovImm(Sz::W, kT1, target);
-            a.Str(2, kT1, kThis, static_cast<uint32>(L.PC));
-            a.B(epilogue);
+            if (jumpIndex[k] >= 0) {
+                emitJump(k, jumpIndex[k], target, false);
+            } else {
+                a.MovImm(Sz::W, kT1, target);
+                a.Str(2, kT1, kThis, static_cast<uint32>(L.PC));
+                a.B(epilogue);
+            }
             a.Bind(notTaken);
             a.AddImm(Sz::X, kCycles, kCycles, 1);
             pcStale = true;
@@ -934,15 +1014,17 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         }
         if (!load) {
             // A write into this block's own code: if instructions ahead of this one changed, leave the block
-            const uint32 firstChecked = k + 1 + ((ipc & 2u) == 0 ? 1 : 0);
-            if (firstChecked < count) {
+            const uint32 firstChecked = hasLoop ? 0 : k + 1 + ((ipc & 2u) == 0 ? 1 : 0);
+            if (hasLoop || firstChecked < count) {
                 codeChecks.emplace_back();
                 CodeCheck &check = codeChecks.back();
                 check.pcNext = ipc + 2;
                 check.firstChecked = firstChecked;
+                // The write [hp, hp + size) overlaps the code [base, base + len) if hp - base + (size - 1) < len + size - 1
                 a.Add(Sz::X, 2, 7, 5, Shift::LSL, 0);
                 a.Sub(Sz::X, 2, 2, kCodeBase);
-                a.CmpImm(Sz::X, 2, count * 2);
+                a.AddImm(Sz::X, 2, 2, size - 1);
+                a.CmpImm(Sz::X, 2, count * 2 + size - 1);
                 a.BCond(Cond::CC, check.entry);
                 a.Bind(check.back);
             }
@@ -961,47 +1043,11 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         pcStale = k + 1 != count;
     };
 
-    for (uint32 k = 0; k < count; ++k) {
-        const Insn &insn = insns[k];
+    // Translates a register-only instruction into inline code, including its cycle accounting
+    auto emitInline = [&](const Insn &insn) {
         const uint16 w = insn.word;
         const uint32 n = (w >> 8) & 0xF;
         const uint32 m = (w >> 4) & 0xF;
-
-        // Stop here if the cycle budget is used up, like the interpreter's loop would
-        if (k > 0) {
-            budgetExits.emplace_back();
-            a.Cmp(Sz::X, kCycles, kBudget);
-            a.BCond(Cond::CS, budgetExits.back().first);
-            budgetExits.back().second = insn.pc;
-
-            // Interrupts are allowed again from this instruction on (a handler may have blocked them for it)
-            if (!allowSet) {
-                a.MovImm(Sz::W, kT0, 1);
-                field.Store(0, kT0, L.IntrAllow);
-                allowSet = true;
-            }
-        }
-
-        if (insn.kind == Kind::Mem) {
-            EmitMemory(k, insn.pc, w);
-            continue;
-        }
-        if (insn.kind == Kind::CondBranch || (insn.kind == Kind::DelayedBranch && insn.opcode != OpcodeType::RTE)) {
-            EmitBranch(k, insn);
-            continue;
-        }
-
-        if (insn.kind != Kind::Inline) {
-            // Executed by the interpreter's handler, which expects the CPU's PC to point at the instruction
-            emitHelper(k, insn.pc, w, pcStale);
-            pcStale = false;
-            allowSet = false;
-            knownWb = -1;
-            prevWasHelper = true;
-            continue;
-        }
-
-        // -- Inline translation --
         ++m_stats.inlineInstructions;
         pcStale = true;
 
@@ -1597,6 +1643,126 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         case OpcodeType::STS_PR_R: field.Load(2, kT0, L.PR); storeR(kT0, n); break;
         default: break;
         }
+    };
+
+    for (uint32 k = 0; k < count; ++k) {
+        const Insn &insn = insns[k];
+        const uint16 w = insn.word;
+        const uint32 n = (w >> 8) & 0xF;
+        const uint32 m = (w >> 4) & 0xF;
+
+        // An instruction that loads SR can make an interrupt pending while also blocking interrupts for the next
+        // instruction. The interrupt is serviced once that one is done, which the checks after handlers don't catch.
+        if (k > 0 && k == intrCheckAt) {
+            budgetExits.emplace_back();
+            budgetExits.back().second = insn.pc;
+            field.Load(0, kT0, L.IntrPending);
+            field.Load(0, kT1, L.IntrAllow);
+            a.And(Sz::W, kT0, kT0, kT1);
+            a.Cbnz(Sz::W, kT0, budgetExits.back().first);
+        }
+
+        // Stop here if the cycle budget is used up, like the interpreter's loop would
+        if (k > 0) {
+            budgetExits.emplace_back();
+            a.Cmp(Sz::X, kCycles, kBudget);
+            a.BCond(Cond::CS, budgetExits.back().first);
+            budgetExits.back().second = insn.pc;
+        }
+
+        // Jumps from elsewhere in the block arrive here, after the cycle budget was checked by the jump itself. The
+        // state they come from is unknown.
+        if (isTarget[k]) {
+            a.Bind(instrLabels[k]);
+            knownWb = -1;
+            pcStale = true;
+            allowSet = false;
+        }
+
+        // Interrupts are allowed again from this instruction on (a handler may have blocked them for it)
+        if (!allowSet && (k > 0 || isTarget[k])) {
+            a.MovImm(Sz::W, kT0, 1);
+            field.Store(0, kT0, L.IntrAllow);
+            allowSet = true;
+        }
+
+        // The instruction in the delay slot of a branch translated above: register-only instructions are translated
+        // inline too, followed by what the interpreter does when a delay slot ends
+        if (k > 0 && insns[k - 1].kind == Kind::DelayedBranch && insns[k - 1].opcode != OpcodeType::RTE &&
+            insn.normalKind == Kind::Inline && insn.normalOpcode != OpcodeType::MOVA) {
+            Insn slot = insn;
+            slot.opcode = insn.normalOpcode;
+            slot.kind = Kind::Inline;
+            auto delayEnd = [&] {
+                field.Load(2, kT0, L.DelaySlotTarget);
+                a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
+                field.Store(0, ZR, L.DelaySlot);
+                // The interrupt that was held back while in the delay slot can be taken now if its level allows
+                field.Load(0, kT1, L.IntcLevel);
+                a.Ldr(2, kT2, kThis, static_cast<uint32>(L.SR));
+                a.Ubfx(Sz::W, kT2, kT2, 4, 4);
+                a.Cmp(Sz::W, kT1, kT2);
+                a.Cset(Sz::W, kT1, Cond::HI);
+                field.Store(0, kT1, L.IntrPending);
+            };
+            const OpcodeType branch = insns[k - 1].opcode;
+            const sint32 jump = jumpIndex[k - 1];
+            const uint32 branchTarget = 0; // only used for exits, which find the PC in the CPU state (pcStored)
+            if (branch != OpcodeType::BTS && branch != OpcodeType::BFS) {
+                emitInline(slot);
+                delayEnd();
+                if (jump >= 0) {
+                    emitJump(k - 1, jump, branchTarget, true);
+                }
+            } else {
+                // Whether the branch was taken decides if this is a delay slot
+                Label &normal = labelPool.emplace_back();
+                Label &finished = labelPool.emplace_back();
+                const int wbBefore = knownWb;
+                const bool allowBefore = allowSet;
+                field.Load(0, kT0, L.DelaySlot);
+                a.Cbz(Sz::W, kT0, normal);
+                emitInline(slot);
+                delayEnd();
+                if (jump >= 0) {
+                    emitJump(k - 1, jump, branchTarget, true);
+                }
+                a.B(finished);
+                knownWb = wbBefore;
+                allowSet = allowBefore;
+                a.Bind(normal);
+                emitInline(slot);
+                a.MovImm(Sz::W, kT0, insn.pc + 2);
+                a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
+                a.Bind(finished);
+            }
+            pcStale = false;
+            continue;
+        }
+
+        if (insn.kind == Kind::Mem) {
+            EmitMemory(k, insn.pc, w);
+            continue;
+        }
+        if (insn.kind == Kind::CondBranch || (insn.kind == Kind::DelayedBranch && insn.opcode != OpcodeType::RTE)) {
+            EmitBranch(k, insn);
+            continue;
+        }
+
+        if (insn.kind != Kind::Inline) {
+            // Executed by the interpreter's handler, which expects the CPU's PC to point at the instruction
+            emitHelper(k, insn.pc, w, pcStale);
+            if (insn.opcode == OpcodeType::LDC_SR_R || insn.opcode == OpcodeType::LDC_SR_M) {
+                intrCheckAt = k + 2;
+            }
+            pcStale = false;
+            allowSet = false;
+            knownWb = -1;
+            prevWasHelper = true;
+            continue;
+        }
+
+        emitInline(insn);
     }
 
     // After the last instruction: continue at the next one, unless a handler already did
@@ -1644,6 +1810,10 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     }
 
     if (a.Overflowed() || !a.Finalize()) {
+        if (std::getenv("YMIR_JIT_DEBUG") != nullptr) {
+            std::fprintf(stderr, "jit: block at %08X rejected (%s, %zu words)\n", pc,
+                         a.Overflowed() ? "overflow" : "branch out of range", a.Size());
+        }
         ++m_stats.blocksRejected;
         return;
     }
