@@ -59,6 +59,7 @@ struct GamesView: View {
     @State private var searchTarget: GameEntry?
     @State private var renameTarget: GameEntry?
     @State private var renameText = ""
+    @State private var editMode = EditMode.inactive
     @State private var hasBIOS = YmirHost.hasBIOS
     @State private var activePath: String? = YmirHost.loadedGamePath
 
@@ -66,6 +67,11 @@ struct GamesView: View {
         let query = search.trimmingCharacters(in: .whitespaces)
         if query.isEmpty { return library.games }
         return library.games.filter { $0.title.localizedCaseInsensitiveContains(query) }
+    }
+
+    /// Games can only be dragged into a new order in manual mode, and while the whole list is visible.
+    private var canReorder: Bool {
+        library.sortMode == .manual && search.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     private var activeGame: GameEntry? {
@@ -93,7 +99,9 @@ struct GamesView: View {
                     Section {
                         ForEach(filteredGames) { game in
                             Button {
-                                play(game)
+                                if !editMode.isEditing {
+                                    play(game)
+                                }
                             } label: {
                                 GameRow(game: game, isActive: game.url.path == activePath)
                             }
@@ -152,7 +160,16 @@ struct GamesView: View {
                                 }
                             }
                         }
+                        .onMove(perform: canReorder ? { source, destination in
+                            library.moveGames(from: source, to: destination)
+                        } : nil)
                     }
+                }
+            }
+            .environment(\.editMode, $editMode)
+            .onChange(of: canReorder) { value in
+                if !value {
+                    editMode = .inactive
                 }
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
@@ -207,6 +224,26 @@ struct GamesView: View {
             .searchable(text: $search, prompt: "Search games")
             .refreshable { refresh() }
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Menu {
+                        Picker("Sort By", selection: $library.sortMode) {
+                            ForEach(GameSortMode.allCases) { mode in
+                                Label(mode.label, systemImage: mode.systemImage).tag(mode)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                    }
+                }
+                if canReorder {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button(editMode.isEditing ? "Done" : "Reorder") {
+                            withAnimation {
+                                editMode = editMode.isEditing ? .inactive : .active
+                            }
+                        }
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         Button {

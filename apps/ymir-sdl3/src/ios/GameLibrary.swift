@@ -85,9 +85,52 @@ struct GameEntry: Identifiable, Hashable {
 
 // MARK: - Library
 
+/// How the games are ordered in the library.
+enum GameSortMode: String, CaseIterable, Identifiable {
+    case recent
+    case titleAscending
+    case titleDescending
+    case manual
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .recent: return "Recently Played"
+        case .titleAscending: return "Title (A to Z)"
+        case .titleDescending: return "Title (Z to A)"
+        case .manual: return "Manual"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .recent: return "clock"
+        case .titleAscending: return "arrow.down"
+        case .titleDescending: return "arrow.up"
+        case .manual: return "hand.draw"
+        }
+    }
+}
+
 @MainActor
 final class GameLibrary: ObservableObject {
     @Published private(set) var games: [GameEntry] = []
+
+    @Published var sortMode: GameSortMode = {
+        UserDefaults.standard.string(forKey: "ymir.sortMode").flatMap(GameSortMode.init(rawValue:)) ?? .recent
+    }() {
+        didSet {
+            UserDefaults.standard.set(sortMode.rawValue, forKey: Self.sortModeKey)
+            if sortMode == .manual && oldValue != .manual && Self.manualOrder().isEmpty {
+                // Manual ordering starts from what the player was looking at
+                Self.saveManualOrder(games.map(\.relativePath))
+            }
+            applySort()
+        }
+    }
+
+    private var scanned: [GameEntry] = []
 
     private static let discExtensions: Set<String> = ["cue", "chd", "iso", "ccd", "mds"]
     // Folders of the emulator profile that never contain games
@@ -96,6 +139,8 @@ final class GameLibrary: ObservableObject {
     ]
     private static let lastPlayedKey = "ymir.lastPlayed"
     private static let customNamesKey = "ymir.customNames"
+    private static let sortModeKey = "ymir.sortMode"
+    private static let manualOrderKey = "ymir.manualOrder"
 
     init() {
         reload()
@@ -105,7 +150,6 @@ final class GameLibrary: ObservableObject {
         let fm = FileManager.default
         try? fm.createDirectory(at: AppPaths.games, withIntermediateDirectories: true)
 
-        let lastPlayed = Self.lastPlayed()
         let names = Self.customNames()
         var found: [GameEntry] = []
 
@@ -135,13 +179,57 @@ final class GameLibrary: ObservableObject {
             }
         }
 
-        found.sort { a, b in
-            let da = lastPlayed[a.relativePath] ?? 0
-            let db = lastPlayed[b.relativePath] ?? 0
-            if da != db { return da > db }
-            return a.title.localizedStandardCompare(b.title) == .orderedAscending
+        scanned = found
+        applySort()
+    }
+
+    /// Orders the scanned games according to the sort mode.
+    private func applySort() {
+        let alphabetical: (GameEntry, GameEntry) -> Bool = {
+            $0.title.localizedStandardCompare($1.title) == .orderedAscending
         }
-        games = found
+        switch sortMode {
+        case .recent:
+            let lastPlayed = Self.lastPlayed()
+            games = scanned.sorted { a, b in
+                let da = lastPlayed[a.relativePath] ?? 0
+                let db = lastPlayed[b.relativePath] ?? 0
+                if da != db { return da > db }
+                return alphabetical(a, b)
+            }
+        case .titleAscending:
+            games = scanned.sorted(by: alphabetical)
+        case .titleDescending:
+            games = scanned.sorted { alphabetical($1, $0) }
+        case .manual:
+            let order = Self.manualOrder()
+            let position = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+            // Games that were never placed (new ones) go at the end, alphabetically
+            games = scanned.sorted { a, b in
+                switch (position[a.relativePath], position[b.relativePath]) {
+                case let (pa?, pb?): return pa < pb
+                case (_?, nil): return true
+                case (nil, _?): return false
+                case (nil, nil): return alphabetical(a, b)
+                }
+            }
+        }
+    }
+
+    /// Moves games in the manual order, like List's onMove. Only meaningful in manual mode.
+    func moveGames(from source: IndexSet, to destination: Int) {
+        var reordered = games
+        reordered.move(fromOffsets: source, toOffset: destination)
+        games = reordered
+        Self.saveManualOrder(reordered.map(\.relativePath))
+    }
+
+    private static func manualOrder() -> [String] {
+        UserDefaults.standard.stringArray(forKey: manualOrderKey) ?? []
+    }
+
+    private static func saveManualOrder(_ order: [String]) {
+        UserDefaults.standard.set(order, forKey: manualOrderKey)
     }
 
     func delete(_ game: GameEntry) {
