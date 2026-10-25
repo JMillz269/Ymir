@@ -625,6 +625,7 @@ if (IOS)
         "-framework WebKit"
         "-framework UniformTypeIdentifiers"
         "-framework Metal"
+        "-framework MetalFX"
         "-framework QuartzCore"
     )
 endif ()

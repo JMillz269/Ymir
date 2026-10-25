@@ -14,12 +14,22 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <TargetConditionals.h>
 
+// MetalFX upscaling is only used on iOS
+#if TARGET_OS_IOS && __has_include(<MetalFX/MetalFX.h>)
+    #import <MetalFX/MetalFX.h>
+    #define YMIR_HAS_METALFX 1
+#else
+    #define YMIR_HAS_METALFX 0
+#endif
+
 #include <SDL3/SDL.h>
 #include <fmt/format.h>
 
 #include <cmrc/cmrc.hpp>
 CMRC_DECLARE(ymir_sdl3_shaders);
 
+#include <algorithm>
+#include <cmath>
 #include <deque>
 
 using namespace ymir::gpu;
@@ -139,6 +149,203 @@ struct MetalGraphicsContext::Impl {
     MTLScissorRect scissorRect{};
 
     PresentMode presentMode = PresentMode::VSync;
+
+    // -- MetalFX upscaling --
+
+    UpscaleMode upscaleMode = UpscaleMode::Off;
+
+    id<MTLTexture> fxInput = nil;  // copy of the emulated frame, exactly as large as the frame
+    id<MTLTexture> fxOutput = nil; // upscaled frame
+    id<MTLTexture> fxDepth = nil;  // temporal scaler only: constant depth
+    id<MTLTexture> fxMotion = nil; // temporal scaler only: no motion
+    id fxScaler = nil;             // id<MTLFXSpatialScaler> or id<MTLFXTemporalScaler>
+    UpscaleMode fxScalerMode = UpscaleMode::Off;
+    MTLPixelFormat fxFormat = MTLPixelFormatInvalid;
+    uint32 fxInWidth = 0, fxInHeight = 0, fxOutWidth = 0, fxOutHeight = 0;
+    bool fxNeedsClear = false;
+    bool fxResetHistory = true;
+
+    bool SupportsUpscaling() const {
+#if YMIR_HAS_METALFX
+        if (@available(iOS 16.0, *)) {
+            return [MTLFXSpatialScalerDescriptor supportsDevice:device] &&
+                   [MTLFXTemporalScalerDescriptor supportsDevice:device];
+        }
+#endif
+        return false;
+    }
+
+    void ReleaseUpscaler() {
+        fxInput = nil;
+        fxOutput = nil;
+        fxDepth = nil;
+        fxMotion = nil;
+        fxScaler = nil;
+        fxScalerMode = UpscaleMode::Off;
+        fxFormat = MTLPixelFormatInvalid;
+        fxInWidth = fxInHeight = fxOutWidth = fxOutHeight = 0;
+    }
+
+#if YMIR_HAS_METALFX
+    id<MTLTexture> NewPrivateTexture(MTLPixelFormat format, uint32 width, uint32 height, MTLTextureUsage usage,
+                                     NSString *label) API_AVAILABLE(ios(16.0)) {
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                        width:width
+                                                                                       height:height
+                                                                                    mipmapped:NO];
+        desc.usage = usage;
+        desc.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+        texture.label = label;
+        return texture;
+    }
+
+    /// Makes sure that the scaler and its textures exist for the given sizes and the current upscale mode.
+    bool EnsureUpscaler(MTLPixelFormat format, uint32 inW, uint32 inH, uint32 outW, uint32 outH)
+        API_AVAILABLE(ios(16.0)) {
+        if (fxScaler != nil && fxScalerMode == upscaleMode && fxFormat == format && fxInWidth == inW &&
+            fxInHeight == inH && fxOutWidth == outW && fxOutHeight == outH) {
+            return true;
+        }
+        ReleaseUpscaler();
+
+        fxInput = NewPrivateTexture(format, inW, inH, MTLTextureUsageShaderRead, @"[Ymir-GCtx] MetalFX input");
+        fxOutput = NewPrivateTexture(format, outW, outH,
+                                     MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite,
+                                     @"[Ymir-GCtx] MetalFX output");
+        if (fxInput == nil || fxOutput == nil) {
+            ReleaseUpscaler();
+            return false;
+        }
+
+        if (upscaleMode == UpscaleMode::Temporal) {
+            MTLFXTemporalScalerDescriptor *desc = [MTLFXTemporalScalerDescriptor new];
+            desc.inputWidth = inW;
+            desc.inputHeight = inH;
+            desc.outputWidth = outW;
+            desc.outputHeight = outH;
+            desc.colorTextureFormat = format;
+            desc.depthTextureFormat = MTLPixelFormatDepth32Float;
+            desc.motionTextureFormat = MTLPixelFormatRG16Float;
+            desc.outputTextureFormat = format;
+            desc.autoExposureEnabled = NO;
+            fxScaler = [desc newTemporalScalerWithDevice:device];
+            if (fxScaler != nil) {
+                fxDepth = NewPrivateTexture(MTLPixelFormatDepth32Float, inW, inH,
+                                            MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead,
+                                            @"[Ymir-GCtx] MetalFX depth");
+                fxMotion = NewPrivateTexture(MTLPixelFormatRG16Float, inW, inH,
+                                             MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead,
+                                             @"[Ymir-GCtx] MetalFX motion");
+                if (fxDepth == nil || fxMotion == nil) {
+                    fxScaler = nil;
+                } else {
+                    fxScalerMode = UpscaleMode::Temporal;
+                    fxNeedsClear = true;
+                    fxResetHistory = true;
+                }
+            }
+        }
+        if (fxScaler == nil) {
+            // Spatial mode, or a fallback if the temporal scaler could not be created
+            MTLFXSpatialScalerDescriptor *desc = [MTLFXSpatialScalerDescriptor new];
+            desc.inputWidth = inW;
+            desc.inputHeight = inH;
+            desc.outputWidth = outW;
+            desc.outputHeight = outH;
+            desc.colorTextureFormat = format;
+            desc.outputTextureFormat = format;
+            desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+            fxScaler = [desc newSpatialScalerWithDevice:device];
+            fxScalerMode = UpscaleMode::Spatial;
+        }
+        if (fxScaler == nil) {
+            ReleaseUpscaler();
+            return false;
+        }
+
+        fxFormat = format;
+        fxInWidth = inW;
+        fxInHeight = inH;
+        fxOutWidth = outW;
+        fxOutHeight = outH;
+        return true;
+    }
+#endif
+
+    /// Encodes the upscaling of the given region of a texture into the command buffer.
+    /// Returns the texture with the upscaled image, or nil if it can't be upscaled.
+    id<MTLTexture> EncodeUpscale(id<MTLCommandBuffer> cmdBuf, id<MTLTexture> src, const FRect &srcRect,
+                                 uint32 factor) {
+#if YMIR_HAS_METALFX
+        if (@available(iOS 16.0, *)) {
+            const uint32 inW = (uint32)srcRect.w;
+            const uint32 inH = (uint32)srcRect.h;
+            if (inW == 0 || inH == 0 || srcRect.x < 0 || srcRect.y < 0 || srcRect.x + inW > src.width ||
+                srcRect.y + inH > src.height) {
+                return nil;
+            }
+            if (!EnsureUpscaler(src.pixelFormat, inW, inH, inW * factor, inH * factor)) {
+                // Unsupported on this device or for this texture format: stop trying
+                upscaleMode = UpscaleMode::Off;
+                return nil;
+            }
+
+            // Copy the frame so that the scaler gets a texture of exactly the frame's size
+            id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+            [blit copyFromTexture:src
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake((NSUInteger)srcRect.x, (NSUInteger)srcRect.y, 0)
+                       sourceSize:MTLSizeMake(inW, inH, 1)
+                        toTexture:fxInput
+                 destinationSlice:0
+                 destinationLevel:0
+                destinationOrigin:MTLOriginMake(0, 0, 0)];
+            [blit endEncoding];
+
+            if (fxScalerMode == UpscaleMode::Temporal) {
+                if (fxNeedsClear) {
+                    // The Saturn's video has no depth or motion information: use constant depth and zero motion
+                    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                    pass.colorAttachments[0].texture = fxMotion;
+                    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+                    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    pass.depthAttachment.texture = fxDepth;
+                    pass.depthAttachment.loadAction = MTLLoadActionClear;
+                    pass.depthAttachment.clearDepth = 1.0;
+                    pass.depthAttachment.storeAction = MTLStoreActionStore;
+                    [[cmdBuf renderCommandEncoderWithDescriptor:pass] endEncoding];
+                    fxNeedsClear = false;
+                }
+
+                id<MTLFXTemporalScaler> scaler = (id<MTLFXTemporalScaler>)fxScaler;
+                scaler.colorTexture = fxInput;
+                scaler.depthTexture = fxDepth;
+                scaler.motionTexture = fxMotion;
+                scaler.outputTexture = fxOutput;
+                scaler.inputContentWidth = inW;
+                scaler.inputContentHeight = inH;
+                scaler.jitterOffsetX = 0.0f;
+                scaler.jitterOffsetY = 0.0f;
+                scaler.preExposure = 1.0f;
+                scaler.reset = fxResetHistory;
+                fxResetHistory = NO;
+                [scaler encodeToCommandBuffer:cmdBuf];
+            } else {
+                id<MTLFXSpatialScaler> scaler = (id<MTLFXSpatialScaler>)fxScaler;
+                scaler.colorTexture = fxInput;
+                scaler.outputTexture = fxOutput;
+                scaler.inputContentWidth = inW;
+                scaler.inputContentHeight = inH;
+                [scaler encodeToCommandBuffer:cmdBuf];
+            }
+            return fxOutput;
+        }
+#endif
+        return nil;
+    }
 
     struct TextureInstance {
         Texture2DSpec spec;
@@ -787,6 +994,24 @@ struct MetalGraphicsContext::Impl {
             rttPassDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
 
             id<MTLCommandBuffer> rttCmdBuf = [cmdQueue commandBuffer];
+
+            // Optionally upscale the source with MetalFX first, then scale the result into the destination
+            id<MTLTexture> srcResource = srcTexture->resource;
+            FRect effSrcRect = srcRect;
+            float srcTexWidth = (float)srcTexture->spec.width;
+            float srcTexHeight = (float)srcTexture->spec.height;
+            bool useNearest = srcTexture->spec.filterMode == TextureFilterMode::Nearest;
+            if (upscaleMode != UpscaleMode::Off && srcRect.w >= 1.0f && srcRect.h >= 1.0f && dstRect.w > srcRect.w) {
+                const uint32 factor = std::clamp<uint32>((uint32)std::lround(dstRect.w / srcRect.w), 2u, 3u);
+                if (id<MTLTexture> upscaled = EncodeUpscale(rttCmdBuf, srcTexture->resource, srcRect, factor)) {
+                    srcResource = upscaled;
+                    effSrcRect = {.x = 0.0f, .y = 0.0f, .w = (float)upscaled.width, .h = (float)upscaled.height};
+                    srcTexWidth = (float)upscaled.width;
+                    srcTexHeight = (float)upscaled.height;
+                    useNearest = false;
+                }
+            }
+
             id<MTLRenderCommandEncoder> rttEncoder = [rttCmdBuf renderCommandEncoderWithDescriptor:rttPassDesc];
 
             [rttEncoder setRenderPipelineState:pipeline->pipelineState];
@@ -796,10 +1021,10 @@ struct MetalGraphicsContext::Impl {
             // render target size
             DrawTextureConstants consts{};
             consts.srcRect = {
-                srcRect.x / srcTexture->spec.width,
-                srcRect.y / srcTexture->spec.height,
-                srcRect.w / srcTexture->spec.width,
-                srcRect.h / srcTexture->spec.height,
+                effSrcRect.x / srcTexWidth,
+                effSrcRect.y / srcTexHeight,
+                effSrcRect.w / srcTexWidth,
+                effSrcRect.h / srcTexHeight,
             };
             consts.dstRect = {dstRect.x, dstRect.y, dstRect.w, dstRect.h};
             consts.renderTargetSize = {(float)dstTexture->spec.width, (float)dstTexture->spec.height};
@@ -807,10 +1032,8 @@ struct MetalGraphicsContext::Impl {
             consts.rotAngle = 0.0f;
 
             [rttEncoder setVertexBytes:&consts length:sizeof(consts) atIndex:0];
-            [rttEncoder setFragmentTexture:srcTexture->resource atIndex:0];
-            [rttEncoder setFragmentSamplerState:(srcTexture->spec.filterMode == TextureFilterMode::Nearest ? smpNearest
-                                                                                                           : smpLinear)
-                                        atIndex:0];
+            [rttEncoder setFragmentTexture:srcResource atIndex:0];
+            [rttEncoder setFragmentSamplerState:(useNearest ? smpNearest : smpLinear) atIndex:0];
 
             // Draw rectangle
             [rttEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
@@ -1066,6 +1289,20 @@ util::VoidResult<> MetalGraphicsContext::SetPresentMode(PresentMode mode) {
     }
 #endif
     return {};
+}
+
+bool MetalGraphicsContext::SupportsUpscaling() const {
+    return m_impl->SupportsUpscaling();
+}
+
+void MetalGraphicsContext::SetUpscaleMode(UpscaleMode mode) {
+    if (mode != UpscaleMode::Off && !m_impl->SupportsUpscaling()) {
+        mode = UpscaleMode::Off;
+    }
+    if (m_impl->upscaleMode != mode) {
+        m_impl->upscaleMode = mode;
+        m_impl->ReleaseUpscaler(); // the scaler is recreated on the next frame
+    }
 }
 
 util::ValueResult<PresentResult> MetalGraphicsContext::Present() {

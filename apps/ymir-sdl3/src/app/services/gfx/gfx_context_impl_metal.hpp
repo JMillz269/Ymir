@@ -56,6 +56,9 @@ public:
     util::VoidResult<> SetPresentMode(PresentMode mode) override;
     util::ValueResult<PresentResult> Present() override;
 
+    bool SupportsUpscaling() const override;
+    void SetUpscaleMode(UpscaleMode mode) override;
+
     /// @brief Retrieves a pointer to the `id<MTLDevice>` managed by this graphics context.
     /// @return a pointer to the context's Metal device instance
     void *GetDevice() const;

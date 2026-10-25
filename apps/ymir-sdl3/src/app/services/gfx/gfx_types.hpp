@@ -117,6 +117,13 @@ enum class PresentMode {
     NoSync,   ///< Presents frames without synchronization.
 };
 
+/// @brief Upscalers that can be applied to the emulated video output before it is displayed.
+enum class UpscaleMode {
+    Off,      ///< No upscaling beyond the usual texture filtering.
+    Spatial,  ///< Single-frame upscaling (MetalFX spatial scaler).
+    Temporal, ///< Upscaling that also uses previous frames (MetalFX temporal scaler).
+};
+
 /// @brief Possible outcomes of a frame presentation action.
 enum class PresentResult {
     /// @brief The frame was presented successfully.

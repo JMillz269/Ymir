@@ -1124,6 +1124,7 @@ void Settings::ResetToDefaults() {
     video.syncInFullscreenMode = true;
     video.useFullRefreshRateWithVideoSync = false;
     video.reduceLatency = true;
+    video.metalFXMode = 0;
     video.fullScreen = false;
     video.doubleClickToFullScreen = false;
     video.borderlessFullScreen = true;
@@ -1621,6 +1622,8 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblVideo, "SyncInFullscreenMode", video.syncInFullscreenMode);
         Parse(tblVideo, "UseFullRefreshRateWithVideoSync", video.useFullRefreshRateWithVideoSync);
         Parse(tblVideo, "ReduceLatency", video.reduceLatency);
+        Parse(tblVideo, "MetalFXMode", video.metalFXMode);
+        video.metalFXMode = std::clamp(video.metalFXMode, 0, 2);
         Parse(tblVideo, "FullScreen", video.fullScreen);
         Parse(tblVideo, "DoubleClickToFullScreen", video.doubleClickToFullScreen);
         if (auto tblFullScreenDisplay = tblVideo["FullScreenDisplay"]) {
@@ -2052,6 +2055,7 @@ SettingsSaveResult Settings::Save() {
             {"SyncInFullscreenMode", video.syncInFullscreenMode},
             {"UseFullRefreshRateWithVideoSync", video.useFullRefreshRateWithVideoSync},
             {"ReduceLatency", video.reduceLatency},
+            {"MetalFXMode", video.metalFXMode},
             {"FullScreen", video.fullScreen.Get()},
             {"DoubleClickToFullScreen", video.doubleClickToFullScreen},
             {"FullScreenDisplay", toml::table{{

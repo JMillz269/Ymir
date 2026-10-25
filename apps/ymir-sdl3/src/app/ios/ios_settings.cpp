@@ -2,6 +2,7 @@
 
 #include <app/events/emu_event_factory.hpp>
 #include <app/events/gui_event_factory.hpp>
+#include <app/services/graphics_service.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -94,6 +95,20 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
             [cfg](bool v) { cfg->video.swRenderer.threadedVDP2 = v; });
     addBool("video.threadedDeinterlacer", [cfg] { return cfg->video.swRenderer.threadedDeinterlacer.Get(); },
             [cfg](bool v) { cfg->video.swRenderer.threadedDeinterlacer = v; });
+    addInt(
+        "video.upscaling", [cfg] { return cfg->video.metalFXMode; },
+        [cfg, ctx](int v) {
+            cfg->video.metalFXMode = std::clamp(v, 0, 2);
+            if (auto *graphics = ctx->serviceLocator.Get<services::GraphicsService>()) {
+                graphics->GetGraphicsContext().SetUpscaleMode(static_cast<gfx::UpscaleMode>(cfg->video.metalFXMode));
+            }
+        });
+    tables->bools["video.upscalingSupported"] = {[ctx] {
+                                                     auto *graphics = ctx->serviceLocator.Get<services::GraphicsService>();
+                                                     return graphics != nullptr &&
+                                                            graphics->GetGraphicsContext().SupportsUpscaling();
+                                                 },
+                                                 nullptr};
     addBool("video.sync", [cfg] { return cfg->video.syncInFullscreenMode; },
             [cfg](bool v) { cfg->video.syncInFullscreenMode = v; });
     addBool("video.fullRefreshRate", [cfg] { return cfg->video.useFullRefreshRateWithVideoSync; },

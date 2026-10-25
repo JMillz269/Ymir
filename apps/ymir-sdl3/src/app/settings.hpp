@@ -477,6 +477,8 @@ struct Settings {
         bool useFullRefreshRateWithVideoSync;
         bool reduceLatency;
 
+        int metalFXMode; // 0=off, 1=spatial, 2=temporal (see gfx::UpscaleMode); iOS only
+
         util::Observable<bool> fullScreen;
         bool doubleClickToFullScreen;
 

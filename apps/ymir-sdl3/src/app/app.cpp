@@ -1460,6 +1460,7 @@ void App::RunEmulator() {
         m_context.EnqueueEvent(events::emu::HardReset());
         m_context.state.loadedDiscImagePath.clear();
     };
+    m_graphicsService.GetGraphicsContext().SetUpscaleMode(static_cast<gfx::UpscaleMode>(settings.video.metalFXMode));
     util::ScopeGuard sgClearIOSHost{[&] { app::ios::GetHost() = {}; }};
 
     // The native UI is presented on top of the emulator view once the first frames have been drawn

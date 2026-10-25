@@ -259,6 +259,19 @@ struct DisplaySettingsView: View {
             }
 
             Section {
+                Picker("MetalFX", selection: store.int("video.upscaling")) {
+                    Text("Off").tag(0)
+                    Text("Spatial").tag(1)
+                    Text("Temporal").tag(2)
+                }
+                .disabled(!YmirHost.boolValue(key: "video.upscalingSupported", default: false))
+            } header: {
+                Text("Upscaling")
+            } footer: {
+                Text("MetalFX upscales the game's image with the GPU. Spatial works on each frame on its own and looks cleaner and sharper than plain scaling. Temporal also blends in previous frames for extra stability, but the Saturn's 2D video has no motion data, so fast movement can show slight ghosting.")
+            }
+
+            Section {
                 Toggle("GPU Renderer", isOn: store.bool("video.hardwareAcceleration"))
             } header: {
                 Text("Renderer")

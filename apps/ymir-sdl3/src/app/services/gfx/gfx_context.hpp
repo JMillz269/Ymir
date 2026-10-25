@@ -171,6 +171,14 @@ public:
     /// @return nothing on success, an error message on failure
     virtual util::VoidResult<> SetPresentMode(PresentMode mode) = 0;
 
+    /// @brief Determines whether the backend can upscale the video output with a hardware upscaler.
+    virtual bool SupportsUpscaling() const {
+        return false;
+    }
+
+    /// @brief Selects the upscaler applied to the video output. Ignored if upscaling isn't supported.
+    virtual void SetUpscaleMode(UpscaleMode mode) {}
+
     /// @brief Presents the next frame.
     /// @return presentation result on success, an error message on failure.
     /// If failed, it's highly likely that the device was destroyed and needs to be reinitialized.
