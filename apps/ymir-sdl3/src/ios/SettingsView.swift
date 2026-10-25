@@ -362,6 +362,15 @@ struct ControlsSettingsView: View {
         Form {
             Section {
                 Toggle("On-Screen Controls", isOn: store.bool("touch.enabled", default: true))
+                Button {
+                    YmirShell.beginTouchEditing()
+                } label: {
+                    Label("Customize Layout…", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+                }
+                SettingSlider(title: "Size", value: store.float("touch.globalScale", default: 1), range: 0.5...1.6,
+                              format: percent)
+                SettingSlider(title: "Opacity", value: store.float("touch.opacity", default: 0.3), range: 0.1...1,
+                              format: percent)
             } footer: {
                 Text("MFi, Xbox, PlayStation and other Bluetooth controllers work automatically, using the default bindings. On-screen controls hide while a controller is connected. Press Select on a controller to open the menu.")
             }

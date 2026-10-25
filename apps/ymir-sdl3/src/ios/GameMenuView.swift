@@ -89,6 +89,12 @@ struct GameMenuView: View {
                     .onChange(of: touchControls) { value in
                         YmirHost.setBoolValue(value, key: "touch.enabled")
                     }
+
+                    Button {
+                        YmirShell.beginTouchEditing()
+                    } label: {
+                        Label("Customize Layout…", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+                    }
                 }
 
                 Section {

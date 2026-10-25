@@ -1448,11 +1448,8 @@ void App::RunEmulator() {
         m_context.EnqueueEvent(events::emu::HardReset());
         return {};
     };
-    app::ios::InstallSettingsAccessors(iosHost, m_context, settings,
-                                       {.getTouchControls = [&touchControls] { return touchControls.IsEnabled(); },
-                                        .setTouchControls = [&touchControls](bool enable) {
-                                            touchControls.SetEnabled(enable);
-                                        }});
+    touchControls.SetStoragePath(m_context.profile.GetPath(ProfilePath::PersistentState) / "touch_layout.cfg");
+    app::ios::InstallSettingsAccessors(iosHost, m_context, settings, {.touchControls = &touchControls});
     iosHost.quitGame = [this] {
         // Leaves the emulator idle (and silent) on the BIOS until another game is launched
         m_context.EnqueueEvent(events::emu::SetPaused(true));

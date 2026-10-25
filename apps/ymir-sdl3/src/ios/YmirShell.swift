@@ -35,6 +35,14 @@ final class YmirShell: NSObject {
     private static var afterMenuClosed: (() -> Void)?
     private static let menuState = MenuState()
 
+    // Touch control layout editing: the game stays visible and a small toolbar floats over it
+    private static var editorController: UIViewController?
+    private static var editorTopConstraint: NSLayoutConstraint?
+    private static var editorBottomConstraint: NSLayoutConstraint?
+    private static var editorAtTop = false
+    private static var resumeAfterEditing = false
+    private static var returnToLauncherAfterEditing = false
+
     @objc static func isNativeUIVisible() -> Bool {
         launcherController != nil || menuController != nil
     }
@@ -87,7 +95,8 @@ final class YmirShell: NSObject {
 
     /// Shows the in-game menu as a sheet.
     @objc static func showGameMenu() {
-        guard menuController == nil, launcherController == nil, let presenter = topViewController() else { return }
+        guard menuController == nil, launcherController == nil, editorController == nil,
+              let presenter = topViewController() else { return }
 
         menuState.keepPaused = YmirHost.paused
         if !YmirHost.paused {
@@ -150,6 +159,78 @@ final class YmirShell: NSObject {
         let action = afterMenuClosed
         afterMenuClosed = nil
         action?()
+    }
+
+    // MARK: Touch control editor
+
+    /// Closes the native UI and lets the player rearrange the on-screen controls on top of the game view.
+    static func beginTouchEditing() {
+        guard editorController == nil else { return }
+        if menuController != nil {
+            // Keep the game paused while arranging, then restore the state it had before the menu
+            resumeAfterEditing = !menuState.keepPaused
+            menuState.keepPaused = true
+            returnToLauncherAfterEditing = false
+            closeMenu { YmirShell.startTouchEditor() }
+        } else if launcherController != nil {
+            resumeAfterEditing = false
+            returnToLauncherAfterEditing = true
+            dismissLauncher { YmirShell.startTouchEditor() }
+        }
+    }
+
+    private static func startTouchEditor() {
+        guard editorController == nil, let root = YmirHost.gameWindow?.rootViewController else { return }
+        YmirHost.setBoolValue(true, key: "touch.editing")
+
+        let hosting = UIHostingController(rootView: TouchEditorBar())
+        hosting.sizingOptions = .intrinsicContentSize
+        hosting.view.backgroundColor = .clear
+        root.addChild(hosting)
+        root.view.addSubview(hosting.view)
+        hosting.view.translatesAutoresizingMaskIntoConstraints = false
+
+        let guide = root.view.safeAreaLayoutGuide
+        let top = hosting.view.topAnchor.constraint(equalTo: guide.topAnchor, constant: 6)
+        let bottom = hosting.view.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -6)
+        NSLayoutConstraint.activate([
+            hosting.view.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 8),
+            hosting.view.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -8),
+        ])
+        editorTopConstraint = top
+        editorBottomConstraint = bottom
+        top.isActive = editorAtTop
+        bottom.isActive = !editorAtTop
+        hosting.didMove(toParent: root)
+        editorController = hosting
+    }
+
+    /// Moves the editor toolbar between the top and the bottom of the screen, out of the way of the controls.
+    static func moveTouchEditorBar() {
+        editorAtTop.toggle()
+        editorTopConstraint?.isActive = editorAtTop
+        editorBottomConstraint?.isActive = !editorAtTop
+        UIView.animate(withDuration: 0.25) { editorController?.view.superview?.layoutIfNeeded() }
+    }
+
+    /// Saves the layout and brings back whatever was open before the editor.
+    static func endTouchEditing() {
+        guard let controller = editorController else { return }
+        YmirHost.setBoolValue(false, key: "touch.editing")
+        controller.willMove(toParent: nil)
+        controller.view.removeFromSuperview()
+        controller.removeFromParent()
+        editorController = nil
+        editorTopConstraint = nil
+        editorBottomConstraint = nil
+
+        if returnToLauncherAfterEditing {
+            returnToLauncherAfterEditing = false
+            showLauncher()
+        } else if resumeAfterEditing {
+            resumeAfterEditing = false
+            YmirHost.paused = false
+        }
     }
 
     /// Opens the in-game menu, or closes it when it is already open (the Select button of a controller does this).

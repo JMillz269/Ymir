@@ -3,6 +3,7 @@
 #include "host_interface.hpp"
 
 #include <app/settings.hpp>
+#include <app/input/touch_controls.hpp>
 #include <app/services/gfx/gfx_context.hpp>
 #include <app/shared_context.hpp>
 
@@ -12,8 +13,7 @@ namespace app::ios {
 
 /// @brief Things the settings table needs that live outside of Settings.
 struct SettingsHooks {
-    std::function<bool()> getTouchControls;
-    std::function<void(bool)> setTouchControls;
+    input::TouchControls *touchControls = nullptr;
 };
 
 /// @brief Applies the upscaler and picture filter settings to the graphics context.

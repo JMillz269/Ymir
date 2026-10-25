@@ -287,7 +287,23 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
              [cfg](float v) { cfg->input.gamepad.analogToDigitalSensitivity = std::clamp(v, 0.05f, 0.9f); });
 
     // -- On-screen controls --
-    tables->bools["touch.enabled"] = {hooks.getTouchControls, hooks.setTouchControls};
+    if (input::TouchControls *touch = hooks.touchControls) {
+        addBool("touch.enabled", [touch] { return touch->IsEnabled(); }, [touch](bool v) { touch->SetEnabled(v); });
+        addBool("touch.editing", [touch] { return touch->IsEditing(); }, [touch](bool v) { touch->SetEditing(v); });
+        addBool("touch.snap", [touch] { return touch->GetSnapToGrid(); }, [touch](bool v) { touch->SetSnapToGrid(v); });
+        addBool("touch.reset", [] { return false; }, [touch](bool v) {
+            if (v) {
+                touch->ResetLayout();
+            }
+        });
+        addInt("touch.selected", [touch] { return touch->SelectedElement(); }, [](int) {});
+        addBool("touch.hasSelection", [touch] { return touch->SelectedElement() >= 0; }, [](bool) {});
+        addFloat("touch.selectedScale", [touch] { return touch->GetSelectedScale(); },
+                 [touch](float v) { touch->SetSelectedScale(v); });
+        addFloat("touch.globalScale", [touch] { return touch->GetGlobalScale(); },
+                 [touch](float v) { touch->SetGlobalScale(v); });
+        addFloat("touch.opacity", [touch] { return touch->GetOpacity(); }, [touch](float v) { touch->SetOpacity(v); });
+    }
 
     host.getPath = [cfg](const std::string &key) -> std::string {
         if (key == "cartridge.romPath") {
