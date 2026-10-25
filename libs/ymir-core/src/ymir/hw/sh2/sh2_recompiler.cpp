@@ -227,7 +227,26 @@ SH2Recompiler::Kind SH2Recompiler::Classify(OpcodeType opcode) {
     case OpcodeType::CMP_PL:
     case OpcodeType::CMP_PZ:
     case OpcodeType::TST_R:
-    case OpcodeType::TST_I: return Kind::Inline;
+    case OpcodeType::TST_I:
+    case OpcodeType::MUL:
+    case OpcodeType::MULS:
+    case OpcodeType::MULU:
+    case OpcodeType::DMULS:
+    case OpcodeType::DMULU:
+    case OpcodeType::DIV0S:
+    case OpcodeType::DIV1:
+    case OpcodeType::CMP_STR:
+    case OpcodeType::LDC_GBR_R:
+    case OpcodeType::LDC_VBR_R:
+    case OpcodeType::LDS_MACH_R:
+    case OpcodeType::LDS_MACL_R:
+    case OpcodeType::LDS_PR_R:
+    case OpcodeType::STC_GBR_R:
+    case OpcodeType::STC_SR_R:
+    case OpcodeType::STC_VBR_R:
+    case OpcodeType::STS_MACH_R:
+    case OpcodeType::STS_MACL_R:
+    case OpcodeType::STS_PR_R: return Kind::Inline;
 
     // Loads and stores. Accesses to RAM and ROM are translated inline; anything else is left to the interpreter's handler
     case OpcodeType::MOVB_L:
@@ -261,7 +280,18 @@ SH2Recompiler::Kind SH2Recompiler::Classify(OpcodeType opcode) {
     case OpcodeType::MOVW_SG:
     case OpcodeType::MOVL_SG:
     case OpcodeType::MOVW_I:
-    case OpcodeType::MOVL_I: return Kind::Mem;
+    case OpcodeType::MOVL_I:
+    case OpcodeType::LDC_GBR_M:
+    case OpcodeType::LDC_VBR_M:
+    case OpcodeType::LDS_MACH_M:
+    case OpcodeType::LDS_MACL_M:
+    case OpcodeType::LDS_PR_M:
+    case OpcodeType::STC_GBR_M:
+    case OpcodeType::STC_SR_M:
+    case OpcodeType::STC_VBR_M:
+    case OpcodeType::STS_MACH_M:
+    case OpcodeType::STS_MACL_M:
+    case OpcodeType::STS_PR_M: return Kind::Mem;
 
     // Branches with a delay slot: the instruction after it is part of the same block
     case OpcodeType::BRA:
@@ -385,13 +415,14 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
 
     // Offsets of the CPU state that generated code reads and writes
     struct {
-        size_t R, PC, SR, GBR, PR, DelaySlot, DelaySlotTarget, MAC, WbReg, IntrPending, IntrAllow;
+        size_t R, PC, SR, GBR, VBR, PR, DelaySlot, DelaySlotTarget, MAC, WbReg, IntrPending, IntrAllow;
         uint8 WbNone;
         uint8 WbPR;
     } const L{offsetof(SH2, R),
               offsetof(SH2, PC),
               offsetof(SH2, SR),
               offsetof(SH2, GBR),
+              offsetof(SH2, VBR),
               offsetof(SH2, PR),
               offsetof(SH2, m_delaySlot),
               offsetof(SH2, m_delaySlotTarget),
@@ -687,8 +718,51 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         };
         const uint32 d4 = w & 0xF;
         const uint32 d8 = w & 0xFF;
+        // Control and system register transfers use a CPU register instead of Rn/Rm as the data, add cycles and keep
+        // interrupts from being serviced after the instruction
+        size_t specialOff = 0;
+        bool special = false;
+        uint32 extraCycles = 0;
+        int wbOverride = -1;
+        auto setSpecialLoad = [&](size_t off, uint32 extra, int wb) {
+            // lds.l/ldc.l @Rm+, reg (Rm is in bits 8-11)
+            special = true;
+            specialOff = off;
+            extraCycles = extra;
+            wbOverride = wb;
+            sizeLog2 = 2;
+            mode = Mode::RegPost;
+            baseReg = n;
+            setStall(n);
+        };
+        auto setSpecialStore = [&](size_t off, uint32 extra, bool alsoPR) {
+            // sts.l/stc.l reg, @-Rn
+            special = true;
+            specialOff = off;
+            extraCycles = extra;
+            load = false;
+            sizeLog2 = 2;
+            mode = Mode::RegPre;
+            baseReg = n;
+            if (alsoPR) {
+                setStall(n, L.WbPR);
+            } else {
+                setStall(n);
+            }
+        };
 
         switch (op) {
+        case OpcodeType::LDC_GBR_M: setSpecialLoad(L.GBR, 2, -1); break;
+        case OpcodeType::LDC_VBR_M: setSpecialLoad(L.VBR, 2, -1); break;
+        case OpcodeType::LDS_MACH_M: setSpecialLoad(L.MAC + 4, 0, -1); break;
+        case OpcodeType::LDS_MACL_M: setSpecialLoad(L.MAC, 0, -1); break;
+        case OpcodeType::LDS_PR_M: setSpecialLoad(L.PR, 0, L.WbPR); break;
+        case OpcodeType::STC_GBR_M: setSpecialStore(L.GBR, 2, false); break;
+        case OpcodeType::STC_SR_M: setSpecialStore(L.SR, 2, false); break;
+        case OpcodeType::STC_VBR_M: setSpecialStore(L.VBR, 2, false); break;
+        case OpcodeType::STS_MACH_M: setSpecialStore(L.MAC + 4, 0, false); break;
+        case OpcodeType::STS_MACL_M: setSpecialStore(L.MAC, 0, false); break;
+        case OpcodeType::STS_PR_M: setSpecialStore(L.PR, 0, true); break;
         case OpcodeType::MOVB_L: sizeLog2 = 0; mode = Mode::Reg; setStall(m); break;
         case OpcodeType::MOVW_L: sizeLog2 = 1; mode = Mode::Reg; setStall(m); break;
         case OpcodeType::MOVL_L: sizeLog2 = 2; mode = Mode::Reg; setStall(m); break;
@@ -788,6 +862,9 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         a.MovImm(Sz::W, 4, 1);
         a.Csel(Sz::X, 3, 4, 3, Cond::EQ);
         a.Add(Sz::X, kCycles, kCycles, 3);
+        if (extraCycles != 0) {
+            a.AddImm(Sz::X, kCycles, kCycles, extraCycles);
+        }
         if (numStall > 0) {
             if (knownWb >= 0) {
                 for (uint32 i = 0; i < numStall; ++i) {
@@ -819,13 +896,21 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 break;
             default: a.Rev(Sz::W, 8, 8); break;
             }
-            storeR(8, dataReg);
-            if (mode == Mode::RegPost && dataReg != baseReg) {
+            if (special) {
+                field.Store(2, 8, specialOff);
+            } else {
+                storeR(8, dataReg);
+            }
+            if (mode == Mode::RegPost && (special || dataReg != baseReg)) {
                 a.AddImm(Sz::W, 2, 1, size);
                 storeR(2, baseReg);
             }
         } else {
-            loadR(8, dataReg);
+            if (special) {
+                field.Load(2, 8, specialOff);
+            } else {
+                loadR(8, dataReg);
+            }
             switch (sizeLog2) {
             case 0: break;
             case 1: a.Rev16(Sz::W, 8, 8); break;
@@ -839,10 +924,14 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         }
 
         // 6. What the pipeline's writeback stage holds afterwards
-        const uint32 newWb = load ? dataReg : static_cast<uint32>(L.WbNone);
+        const uint32 newWb = special ? (wbOverride >= 0 ? static_cast<uint32>(wbOverride) : static_cast<uint32>(L.WbNone))
+                                     : (load ? dataReg : static_cast<uint32>(L.WbNone));
         a.MovImm(Sz::W, kTmpWb, newWb);
         field.Store(0, kTmpWb, L.WbReg);
         knownWb = static_cast<int>(newWb);
+        if (special) {
+            field.Store(0, ZR, L.IntrAllow);
+        }
         if (!load) {
             // A write into this block's own code: if instructions ahead of this one changed, leave the block
             const uint32 firstChecked = k + 1 + ((ipc & 2u) == 0 ? 1 : 0);
@@ -866,6 +955,9 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
         }
         a.Bind(slow.join);
+        if (special) {
+            allowSet = false;
+        }
         pcStale = k + 1 != count;
     };
 
@@ -957,7 +1049,25 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         case OpcodeType::CMP_GT:
         case OpcodeType::CMP_HI:
         case OpcodeType::CMP_HS:
-        case OpcodeType::TST_R: stall(m, n); break;
+        case OpcodeType::TST_R:
+        case OpcodeType::MUL:
+        case OpcodeType::MULS:
+        case OpcodeType::MULU:
+        case OpcodeType::DMULS:
+        case OpcodeType::DMULU:
+        case OpcodeType::DIV0S:
+        case OpcodeType::DIV1:
+        case OpcodeType::CMP_STR: stall(m, n); break;
+        // The register of control register transfers is in bits 8-11
+        case OpcodeType::LDC_GBR_R:
+        case OpcodeType::LDC_VBR_R:
+        case OpcodeType::LDS_MACH_R:
+        case OpcodeType::LDS_MACL_R:
+        case OpcodeType::STC_GBR_R:
+        case OpcodeType::STC_SR_R:
+        case OpcodeType::STC_VBR_R: stall(n); break;
+        case OpcodeType::LDS_PR_R:
+        case OpcodeType::STS_PR_R: stall(n, L.WbPR); break;
         case OpcodeType::MOV_I:
         case OpcodeType::MOVT:
         case OpcodeType::ADD_I:
@@ -988,7 +1098,32 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         }
 
         // The cycle for the instruction itself
-        a.AddImm(Sz::X, kCycles, kCycles, 1);
+        uint32 extraCycles = 0;
+        uint32 newWb = L.WbNone;
+        bool clearsAllow = false;
+        switch (insn.opcode) {
+        case OpcodeType::MUL:
+        case OpcodeType::DMULS:
+        case OpcodeType::DMULU: extraCycles = 2; break;
+        case OpcodeType::STS_MACH_R:
+        case OpcodeType::STS_MACL_R: newWb = n; break;
+        default: break;
+        }
+        switch (insn.opcode) {
+        case OpcodeType::LDC_GBR_R:
+        case OpcodeType::LDC_VBR_R:
+        case OpcodeType::LDS_MACH_R:
+        case OpcodeType::LDS_MACL_R:
+        case OpcodeType::LDS_PR_R:
+        case OpcodeType::STC_GBR_R:
+        case OpcodeType::STC_SR_R:
+        case OpcodeType::STC_VBR_R:
+        case OpcodeType::STS_MACH_R:
+        case OpcodeType::STS_MACL_R:
+        case OpcodeType::STS_PR_R: clearsAllow = true; break;
+        default: break;
+        }
+        a.AddImm(Sz::X, kCycles, kCycles, 1 + extraCycles);
         if (numStallRegs > 0) {
             if (knownWb >= 0) {
                 bool stalls = false;
@@ -1007,10 +1142,14 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 a.Cinc(Sz::X, kCycles, kCycles, Cond::EQ);
             }
         }
-        if (knownWb != L.WbNone) {
-            a.MovImm(Sz::W, kTmpWb, L.WbNone);
+        if (knownWb != static_cast<int>(newWb)) {
+            a.MovImm(Sz::W, kTmpWb, newWb);
             field.Store(0, kTmpWb, L.WbReg);
-            knownWb = L.WbNone;
+            knownWb = static_cast<int>(newWb);
+        }
+        if (clearsAllow) {
+            field.Store(0, ZR, L.IntrAllow);
+            allowSet = false;
         }
         prevWasHelper = false;
 
@@ -1349,6 +1488,113 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             a.Cset(Sz::W, kT2, Cond::EQ);
             writeT(kT2);
             break;
+        case OpcodeType::MUL:
+            loadR(kT0, m);
+            loadR(kT1, n);
+            a.Mul(Sz::W, kT0, kT0, kT1);
+            field.Store(2, kT0, L.MAC);
+            break;
+        case OpcodeType::MULS:
+            loadR(kT0, m);
+            loadR(kT1, n);
+            a.Sxth(Sz::W, kT0, kT0);
+            a.Sxth(Sz::W, kT1, kT1);
+            a.Mul(Sz::W, kT0, kT0, kT1);
+            field.Store(2, kT0, L.MAC);
+            break;
+        case OpcodeType::MULU:
+            loadR(kT0, m);
+            loadR(kT1, n);
+            a.Uxth(kT0, kT0);
+            a.Uxth(kT1, kT1);
+            a.Mul(Sz::W, kT0, kT0, kT1);
+            field.Store(2, kT0, L.MAC);
+            break;
+        case OpcodeType::DMULS:
+        case OpcodeType::DMULU:
+            loadR(kT0, m);
+            loadR(kT1, n);
+            if (insn.opcode == OpcodeType::DMULS) {
+                a.Smull(kT2, kT0, kT1);
+            } else {
+                a.Umull(kT2, kT0, kT1);
+            }
+            field.Store(3, kT2, L.MAC);
+            break;
+        case OpcodeType::DIV0S:
+            loadR(kT0, m);
+            loadR(kT1, n);
+            a.LsrImm(Sz::W, kT0, kT0, 31); // M
+            a.LsrImm(Sz::W, kT1, kT1, 31); // Q
+            a.Eor(Sz::W, kT2, kT0, kT1);   // T
+            a.Ldr(2, kT3, kThis, static_cast<uint32>(L.SR));
+            a.Bfi(Sz::W, kT3, kT0, 9, 1);
+            a.Bfi(Sz::W, kT3, kT1, 8, 1);
+            a.Bfi(Sz::W, kT3, kT2, 0, 1);
+            a.Str(2, kT3, kThis, static_cast<uint32>(L.SR));
+            break;
+        case OpcodeType::DIV1: {
+            // w1 = Rn, w2 = Rm, w3 = SR, w4 = old Q, w5 = M, w6 = T, w7 = new Q, w8 = value before the add/subtract
+            loadR(1, n);
+            if (m != n) {
+                loadR(2, m);
+            }
+            a.Ldr(2, 3, kThis, static_cast<uint32>(L.SR));
+            a.Ubfx(Sz::W, 4, 3, 8, 1);
+            a.Ubfx(Sz::W, 5, 3, 9, 1);
+            a.AndImm(Sz::W, 6, 3, 1);
+            a.LsrImm(Sz::W, 7, 1, 31);
+            a.Orr(Sz::W, 1, 6, 1, Shift::LSL, 1);
+            if (m == n) {
+                a.Mov(Sz::W, 2, 1); // the interpreter shifts Rn in place before reading Rm, which is the same register
+            }
+            a.Mov(Sz::W, 8, 1);
+            a.Sub(Sz::W, kT0, 1, 2);
+            a.Add(Sz::W, kT1, 1, 2);
+            a.Cmp(Sz::W, 4, 5);
+            a.Csel(Sz::W, 1, kT0, kT1, Cond::EQ);
+            a.Cmp(Sz::W, 1, 8);
+            a.Cset(Sz::W, kT0, Cond::LS);
+            a.Cset(Sz::W, kT1, Cond::CC);
+            a.Cset(Sz::W, kT2, Cond::CS);
+            a.Cset(Sz::W, kT3, Cond::HI);
+            a.CmpImm(Sz::W, 4, 0);
+            a.Csel(Sz::W, kT0, kT0, kT2, Cond::NE); // M = 1: old Q ? LS : HS
+            a.Csel(Sz::W, kT1, kT1, kT3, Cond::NE); // M = 0: old Q ? LO : HI
+            a.CmpImm(Sz::W, 5, 0);
+            a.Csel(Sz::W, kT0, kT0, kT1, Cond::NE);
+            a.Eor(Sz::W, 7, 7, kT0); // new Q
+            a.Cmp(Sz::W, 7, 5);
+            a.Cset(Sz::W, 6, Cond::EQ); // new T
+            a.Bfi(Sz::W, 3, 7, 8, 1);
+            a.Bfi(Sz::W, 3, 6, 0, 1);
+            a.Str(2, 3, kThis, static_cast<uint32>(L.SR));
+            storeR(1, n);
+            break;
+        }
+        case OpcodeType::CMP_STR:
+            loadR(kT0, m);
+            loadR(kT1, n);
+            a.Eor(Sz::W, kT0, kT0, kT1);
+            a.MovImm(Sz::W, kT2, 0x01010101u);
+            a.Sub(Sz::W, kT1, kT0, kT2);
+            a.Bic(Sz::W, kT1, kT1, kT0);
+            a.MovImm(Sz::W, kT2, 0x80808080u);
+            a.Tst(Sz::W, kT1, kT2);
+            a.Cset(Sz::W, kT2, Cond::NE);
+            writeT(kT2);
+            break;
+        case OpcodeType::LDC_GBR_R: loadR(kT0, n); field.Store(2, kT0, L.GBR); break;
+        case OpcodeType::LDC_VBR_R: loadR(kT0, n); field.Store(2, kT0, L.VBR); break;
+        case OpcodeType::LDS_MACH_R: loadR(kT0, n); field.Store(2, kT0, L.MAC + 4); break;
+        case OpcodeType::LDS_MACL_R: loadR(kT0, n); field.Store(2, kT0, L.MAC); break;
+        case OpcodeType::LDS_PR_R: loadR(kT0, n); field.Store(2, kT0, L.PR); break;
+        case OpcodeType::STC_GBR_R: field.Load(2, kT0, L.GBR); storeR(kT0, n); break;
+        case OpcodeType::STC_SR_R: field.Load(2, kT0, L.SR); storeR(kT0, n); break;
+        case OpcodeType::STC_VBR_R: field.Load(2, kT0, L.VBR); storeR(kT0, n); break;
+        case OpcodeType::STS_MACH_R: field.Load(2, kT0, L.MAC + 4); storeR(kT0, n); break;
+        case OpcodeType::STS_MACL_R: field.Load(2, kT0, L.MAC); storeR(kT0, n); break;
+        case OpcodeType::STS_PR_R: field.Load(2, kT0, L.PR); storeR(kT0, n); break;
         default: break;
         }
     }

@@ -249,6 +249,38 @@ def bisect(seed, maxb=260):
     print("  bisect: no divergence found")
 
 
+def stepwise(seed, steps=600):
+    """Runs the case one cycle at a time on both cores and reports the first instruction that makes them differ."""
+    rng = random.Random(seed)
+    code = gen_program(rng, rng.choice([16, 40, 90]))
+    blob = b"".join(w.to_bytes(2, "big") for w in code)
+    data = bytes(rng.getrandbits(8) for _ in range(0x8000))
+    st = make_state(rng)
+    interp = lib.t_create(0)
+    rec = Recomp()
+    for h in (interp, rec.h):
+        lib.t_set_mem(h, RAM_BASE_H + 0x1000, blob, len(blob))
+        lib.t_set_mem(h, RAM_BASE_H + 0x8000, data, len(data))
+        lib.t_set_mem(h, RAM_BASE_H + 0x400, bytes(0x400), 0x400)
+        write_state(h, st)
+    for n in range(steps):
+        before = read_state(interp)
+        hi, _ = get_ram(interp)
+        pc = before[16]
+        off = (pc & 0xFFFFF) if (pc >> 24) == 6 else None
+        op = int.from_bytes(hi[off:off + 2], "big") if off is not None and off + 2 <= len(hi) else None
+        ci = lib.t_advance(interp, 1, 0)
+        cr = lib.t_advance(rec.h, 1, 0)
+        si, sr = read_state(interp), read_state(rec.h)
+        if ci != cr or si != sr or get_ram(interp) != get_ram(rec.h):
+            diffs = [f"{NAMES[i]}: interp={si[i]:#x} rec={sr[i]:#x}" for i in range(29) if si[i] != sr[i]]
+            print(f"  stepwise: step {n} at pc={pc:#x} op={'?' if op is None else f'{op:04x}'} slot={before[26]} "
+                  f"wb={before[23]}; cycles {ci}/{cr}; " + "; ".join(diffs))
+            print(f"  before: R={[hex(x) for x in before[:16]]} SR={before[17]:#x} PR={before[20]:#x} GBR={before[18]:#x}")
+            return
+    print("  stepwise: no divergence")
+
+
 def bisect_from(snap, maxb):
     st, hi, lo = snap
     for budget in range(1, maxb + 1):
@@ -293,6 +325,8 @@ def run_case(seed, verbose=False):
     snap = None
     for step in range(rng.choice([6, 12])):
         budget = rng.choice([1, 2, 3, 7, 20, 64, 200])
+        if step == 0 and "FORCE_BUDGET" in os.environ:
+            budget = int(os.environ["FORCE_BUDGET"])
         if rng.random() < 0.15:
             ia = read_state(interp)
             ia[24] = 1
@@ -378,7 +412,9 @@ def main():
         if err:
             failures += 1
             print("FAIL", err)
-            if (seed0 + i) in SNAPS:
+            if os.environ.get("STEPWISE"):
+                stepwise(seed0 + i)
+            elif (seed0 + i) in SNAPS:
                 bisect_from(SNAPS[seed0 + i][0], SNAPS[seed0 + i][1])
             if extra and failures <= 3:
                 print("  code:", " ".join(f"{w:04x}" for w in extra[:40]))
