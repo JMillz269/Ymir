@@ -1363,7 +1363,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1P
                                                      const VDP1Regs &regs1, bool doubleDensity) {
     auto [x, y] = coord;
 
-    if constexpr (!deinterlace && !transparentMeshes) {
+    if constexpr (!transparentMeshes) {
         if (m_hrPass) [[unlikely]] {
             return VDP1PlotPixelHR(coord, pixelParams);
         }
@@ -1865,7 +1865,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1Cmd_Handle(uint32 cmdAddress, VDP1Com
     case DrawPolylinesAlt: [[fallthrough]];
     case DrawLine:
         drawCommand();
-        if constexpr (!deinterlace && !transparentMeshes) {
+        if constexpr (!transparentMeshes) {
             // Replay the command into the large framebuffer with scaled coordinates
             if (m_hrScale1 > 1 && VDP1HRShouldReplay()) {
                 m_hrPass = true;

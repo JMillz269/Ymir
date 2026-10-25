@@ -36,6 +36,7 @@ int main(int argc, char **argv) {
 
     config::Enhancements enh;
     enh.internalResolution = scale;
+    enh.deinterlace = std::getenv("HR_DEINTERLACE") != nullptr;
     r.ConfigureEnhancements(enh);
 
     r.SwCallbacks.FrameComplete = {nullptr, [](uint32 *fb, uint32 w, uint32 h, uint32 s, void *) {
