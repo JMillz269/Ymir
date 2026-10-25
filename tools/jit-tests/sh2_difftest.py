@@ -174,17 +174,20 @@ def gen_program(rng, n):
     """Random words biased toward instructions the recompiler translates."""
     words = []
     inline_share = rng.choice([0.3, 0.7, 0.95])
+    mac_share = 0.3 if rng.random() < 0.2 else 0.0
     while len(words) < n:
         w = rng.getrandbits(16)
+        if rng.random() < mac_share:
+            w = (rng.choice([0x400F, 0x000F]) | (rng.getrandbits(8) << 4))
         if lib.t_opcode_type(w, 0) == ILLEGAL:
             continue
         if w == 0x001B or (w & 0xFF00) == 0xC300:  # no SLEEP / TRAPA
             continue
-        kind = lib.t_kind(w)  # 0 inline, 1 memory, 2 helper, 3 delayed branch, 4 end after, 5 stop
+        kind = lib.t_kind(w)  # 0 inline, 1 memory, 2 mac, 3 cond branch, 4 helper, 5 delayed branch, 6 end after, 7 stop
         want_inline = rng.random() < inline_share
-        if want_inline and kind not in (0, 1):
+        if want_inline and kind not in (0, 1, 2):
             continue
-        if not want_inline and kind == 3 and rng.random() < 0.5:
+        if not want_inline and kind in (3, 5) and rng.random() < 0.5:
             continue
         # Keep branches local so that code loops and blocks are executed repeatedly
         top = w >> 12
@@ -214,8 +217,8 @@ def make_state(rng):
     st[18] = RAM_BASE_H + 0x9000
     st[19] = RAM_BASE_H + 0x400
     st[20] = CODE_ADDR + 2 * rng.randrange(0, 64)
-    st[21] = rng.getrandbits(32)
-    st[22] = rng.getrandbits(32)
+    st[21] = rng.choice([0, 1, 0xFFFFFFFF, 0x7FFF, 0xFFFF8000, rng.getrandbits(32)])
+    st[22] = rng.choice([0, 0x7FFFFFFF, 0x80000000, 0x7FFFFF00, 0xFFFFFFFF, rng.getrandbits(32)])
     st[23] = 0
     return st
 

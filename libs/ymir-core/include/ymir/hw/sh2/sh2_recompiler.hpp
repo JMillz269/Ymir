@@ -98,7 +98,7 @@ private:
         std::array<uint8, kMaxBlockBytes> bytes{};
     };
 
-    enum class Kind { Inline, Mem, CondBranch, Helper, DelayedBranch, EndAfter, Stop };
+    enum class Kind { Inline, Mem, Mac, CondBranch, Helper, DelayedBranch, EndAfter, Stop };
 
     static Kind Classify(OpcodeType opcode);
     static uint32 SlotFor(uint32 pc) {

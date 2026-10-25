@@ -310,6 +310,9 @@ SH2Recompiler::Kind SH2Recompiler::Classify(OpcodeType opcode) {
     case OpcodeType::STS_MACL_M:
     case OpcodeType::STS_PR_M: return Kind::Mem;
 
+    case OpcodeType::MACW:
+    case OpcodeType::MACL: return Kind::Mac;
+
     // Branches with a delay slot: the instruction after it is part of the same block
     case OpcodeType::BRA:
     case OpcodeType::BRAF:
@@ -530,7 +533,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     // Whether the block has loads or stores that are translated inline, and whether any of them writes
     bool hasMem = false;
     for (uint32 k = 0; k < count; ++k) {
-        hasMem = hasMem || insns[k].kind == Kind::Mem || insns[k].normalKind == Kind::Mem;
+        hasMem = hasMem || insns[k].kind == Kind::Mem || insns[k].kind == Kind::Mac || insns[k].normalKind == Kind::Mem;
     }
     const sys::SH2Bus::PageLayout pages = m_bus.GetPageLayout();
 
@@ -1094,6 +1097,143 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             allowSet = false;
         }
         pcStale = k + 1 != count && !delaySlot;
+    };
+
+    // MAC.W and MAC.L: two reads from RAM, a multiply and an accumulate, with the interpreter's quirks (the second
+    // address is read after the first register was advanced, saturation rules, one extra cycle)
+    auto EmitMac = [&](uint32 k, uint32 ipc, uint16 w, OpcodeType op) {
+        const uint32 n = (w >> 8) & 0xF;
+        const uint32 m = (w >> 4) & 0xF;
+        const bool isWord = op == OpcodeType::MACW;
+        const uint32 sizeLog2 = isWord ? 1 : 2;
+        const uint32 size = 1u << sizeLog2;
+
+        slowPaths.emplace_back();
+        SlowPath &slow = slowPaths.back();
+        slow.k = k;
+        slow.pc = ipc;
+        slow.w = w;
+        slow.delaySlot = false;
+
+        // Addresses: @Rn first, then @Rm, which is the advanced Rn if both are the same register
+        loadR(1, n);
+        if (m == n) {
+            a.AddImm(Sz::W, 2, 1, size);
+        } else {
+            loadR(2, m);
+        }
+        a.MovImm(Sz::X, 3, 0); // cycles
+        auto access = [&](Reg addr, Reg ptr) {
+            a.LsrImm(Sz::W, 4, addr, 29);
+            a.MovImm(Sz::W, 9, 0x23);
+            a.Lsrv(Sz::W, 9, 9, 4);
+            a.Tbz(9, 0, slow.entry);
+            a.AndImm(Sz::W, 5, addr, pages.addressMask & ~(size - 1));
+            a.LsrImm(Sz::W, 9, 5, pages.pageShift);
+            a.Add(Sz::X, 6, kPageTable, 9, Shift::LSL, pages.entryShift);
+            a.Ldr(3, ptr, 6, pages.offArray);
+            a.Cbz(Sz::X, ptr, slow.entry);
+            a.AndImm(Sz::W, 5, 5, (1u << pages.pageShift) - 1);
+            a.Add(Sz::X, ptr, ptr, 5);
+            a.Ldr(3, 9, 6, pages.offReadCycles[sizeLog2]);
+            a.CmpImm(Sz::W, 4, 0);
+            a.MovImm(Sz::W, 10, 1);
+            a.Csel(Sz::X, 9, 10, 9, Cond::EQ);
+            a.Add(Sz::X, 3, 3, 9);
+        };
+        access(2, 8);
+        // (the order of the two accesses doesn't matter for timing, but the first address is the one in w1)
+        access(1, 7);
+        // 7 = host pointer for @Rn (op2), 8 = host pointer for @Rm (op1)
+
+        a.Add(Sz::X, kCycles, kCycles, 3);
+        a.AddImm(Sz::X, kCycles, kCycles, 1);
+        addStall({m, n});
+
+        // Operands, sign extended
+        a.LdrReg(sizeLog2, 10, 7, ZR, Extend::LSL, false); // op2
+        a.LdrReg(sizeLog2, 11, 8, ZR, Extend::LSL, false); // op1
+        if (isWord) {
+            a.Rev16(Sz::W, 10, 10);
+            a.Rev16(Sz::W, 11, 11);
+            a.Sxth(Sz::W, 10, 10);
+            a.Sxth(Sz::W, 11, 11);
+        } else {
+            a.Rev(Sz::W, 10, 10);
+            a.Rev(Sz::W, 11, 11);
+        }
+
+        // Rn and Rm advance, Rn first
+        loadR(1, n);
+        a.AddImm(Sz::W, 1, 1, size);
+        storeR(1, n);
+        loadR(2, m);
+        a.AddImm(Sz::W, 2, 2, size);
+        storeR(2, m);
+
+        Label &noSat = labelPool.emplace_back();
+        Label &done = labelPool.emplace_back();
+        if (isWord) {
+            a.Mul(Sz::W, 12, 10, 11);
+            a.Sxtw(12, 12); // the product fits in 32 bits
+            a.Ldr(2, 13, kThis, static_cast<uint32>(L.SR));
+            Label &plain = labelPool.emplace_back();
+            a.Tbz(13, 1, plain);
+            // S = 1: 32-bit saturating accumulate into MACL
+            field.Load(2, 14, L.MAC);
+            a.Sxtw(14, 14);
+            a.Add(Sz::X, 14, 14, 12);
+            a.Sxtw(4, 14);
+            a.Cmp(Sz::X, 14, 4);
+            a.BCond(Cond::EQ, noSat);
+            a.AsrImm(Sz::X, 5, 14, 63);
+            a.MovImm(Sz::W, 4, 0x7FFFFFFFu);
+            a.Eor(Sz::W, 4, 4, 5);
+            field.Store(2, 4, L.MAC);
+            field.Load(2, 5, L.MAC + 4);
+            a.OrrImm(Sz::W, 5, 5, 1);
+            field.Store(2, 5, L.MAC + 4);
+            a.B(done);
+            a.Bind(noSat);
+            field.Store(2, 14, L.MAC);
+            a.B(done);
+            a.Bind(plain);
+            field.Load(3, 14, L.MAC);
+            a.Add(Sz::X, 14, 14, 12);
+            field.Store(3, 14, L.MAC);
+            a.Bind(done);
+        } else {
+            a.Smull(12, 10, 11);
+            field.Load(3, 14, L.MAC);
+            a.Add(Sz::X, 14, 14, 12);
+            a.Ldr(2, 13, kThis, static_cast<uint32>(L.SR));
+            Label &store = labelPool.emplace_back();
+            a.Tbz(13, 1, store);
+            // S = 1: saturate to 48 bits
+            a.MovImm(Sz::X, 4, 0x0000800000000000ull);
+            a.Sub(Sz::X, 4, 14, 4);
+            a.MovImm(Sz::X, 5, 0xFFFF000000000000ull);
+            a.Cmp(Sz::X, 4, 5);
+            a.BCond(Cond::CS, store);
+            a.Eor(Sz::W, 5, 10, 11);
+            a.MovImm(Sz::X, 14, 0x00007FFFFFFFFFFFull);
+            a.MovImm(Sz::X, 4, 0xFFFF800000000000ull);
+            a.CmpImm(Sz::W, 5, 0);
+            a.Csel(Sz::X, 14, 4, 14, Cond::LT);
+            a.Bind(store);
+            field.Store(3, 14, L.MAC);
+        }
+
+        a.MovImm(Sz::W, kTmpWb, L.WbNone);
+        field.Store(0, kTmpWb, L.WbReg);
+        knownWb = L.WbNone;
+        ++m_stats.inlineInstructions;
+        if (k + 1 == count) {
+            a.MovImm(Sz::W, kT0, ipc + 2);
+            a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
+        }
+        a.Bind(slow.join);
+        pcStale = k + 1 != count;
     };
 
     // Translates a register-only instruction into inline code, including its cycle accounting
@@ -1794,6 +1934,10 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
 
         if (insn.kind == Kind::Mem) {
             EmitMemory(k, insn.pc, w, insn.opcode, false);
+            continue;
+        }
+        if (insn.kind == Kind::Mac) {
+            EmitMac(k, insn.pc, w, insn.opcode);
             continue;
         }
         if (insn.kind == Kind::CondBranch || (insn.kind == Kind::DelayedBranch && insn.opcode != OpcodeType::RTE)) {
