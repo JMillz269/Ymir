@@ -16,7 +16,9 @@
 #include <ymir/util/type_traits_ex.hpp>
 #include <ymir/util/unreachable.hpp>
 
+#include <bit>
 #include <concepts>
+#include <cstddef>
 #include <type_traits>
 
 namespace ymir::sys {
@@ -281,6 +283,36 @@ public:
             return nullptr;
         }
         return &entry.array[address & kPageMask];
+    }
+
+    /// @brief Describes how bus pages are laid out in memory, for generated code that accesses array-backed pages
+    /// directly. The table stays valid for as long as the bus exists.
+    struct PageLayout {
+        const void *table;
+        uint32 addressMask;
+        uint32 pageShift;
+        uint32 entryShift; // log2 of the size of an entry
+        uint32 offArray;
+        uint32 offArrayWritable;
+        uint32 offReadCycles[3];  // 8, 16 and 32-bit accesses
+        uint32 offWriteCycles[3]; // 8, 16 and 32-bit accesses
+    };
+
+    [[nodiscard]] PageLayout GetPageLayout() const {
+        PageLayout l{};
+        l.table = m_pages.data();
+        l.addressMask = kAddressMask;
+        l.pageShift = pageGranularityBits;
+        l.entryShift = std::countr_zero(sizeof(MemoryPage));
+        l.offArray = offsetof(MemoryPage, array);
+        l.offArrayWritable = offsetof(MemoryPage, arrayWritable);
+        l.offReadCycles[0] = offsetof(MemoryPage, readCycles8);
+        l.offReadCycles[1] = offsetof(MemoryPage, readCycles16);
+        l.offReadCycles[2] = offsetof(MemoryPage, readCycles32);
+        l.offWriteCycles[0] = offsetof(MemoryPage, writeCycles8);
+        l.offWriteCycles[1] = offsetof(MemoryPage, writeCycles16);
+        l.offWriteCycles[2] = offsetof(MemoryPage, writeCycles32);
+        return l;
     }
 
     /// @brief Returns the number of bytes between the given address and the end of its bus page.

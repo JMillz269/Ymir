@@ -173,11 +173,11 @@ def gen_program(rng, n):
             continue
         if w == 0x001B or (w & 0xFF00) == 0xC300:  # no SLEEP / TRAPA
             continue
-        kind = lib.t_kind(w)
+        kind = lib.t_kind(w)  # 0 inline, 1 memory, 2 helper, 3 delayed branch, 4 end after, 5 stop
         want_inline = rng.random() < inline_share
-        if want_inline and kind != 0:
+        if want_inline and kind not in (0, 1):
             continue
-        if not want_inline and kind == 2 and rng.random() < 0.5:
+        if not want_inline and kind == 3 and rng.random() < 0.5:
             continue
         # Keep branches local so that code loops and blocks are executed repeatedly
         top = w >> 12
@@ -199,7 +199,8 @@ def make_state(rng):
         elif r < 0.62:
             st[i] = CODE_ADDR + rng.randrange(0, 160)  # stores may modify the code
         else:
-            st[i] = RAM_BASE_H + 0x8000 + rng.randrange(0, 0x4000) * (1 if rng.random() < 0.5 else 2)
+            base = rng.choice([RAM_BASE_H, RAM_BASE_H, 0x26000000, 0xA6000000, RAM_BASE_L, 0x20200000, 0x06100000])
+            st[i] = base + 0x8000 + rng.randrange(0, 0x4000) * (1 if rng.random() < 0.5 else 2)
     st[16] = CODE_ADDR
     st[17] = rng.getrandbits(32) & 0x000003F3  # M, Q, I3-0, S, T
     st[15] = RAM_BASE_H + 0x20000

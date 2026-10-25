@@ -91,10 +91,11 @@ private:
         uint32 pc = 1; // odd = empty slot
         uint32 byteLen = 0;
         BlockFn fn = nullptr; // null if no code could be generated for this PC
+        const uint8 *hostSrc = nullptr; // where the block's code lives in host memory when it was compiled
         std::array<uint8, kMaxBlockBytes> bytes{};
     };
 
-    enum class Kind { Inline, Helper, DelayedBranch, EndAfter, Stop };
+    enum class Kind { Inline, Mem, CondBranch, Helper, DelayedBranch, EndAfter, Stop };
 
     static Kind Classify(OpcodeType opcode);
     static uint32 SlotFor(uint32 pc) {
