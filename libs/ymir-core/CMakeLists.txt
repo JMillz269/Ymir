@@ -30,6 +30,9 @@ add_library(ymir-core
 
     include/ymir/hw/hw_defs.hpp
 
+    include/ymir/jit/arm64_assembler.hpp
+    include/ymir/jit/jit_memory.hpp
+
     include/ymir/hw/cart/cart_base.hpp
     include/ymir/hw/cart/cart_impl_bup.hpp
     include/ymir/hw/cart/cart_impl_dram.hpp
@@ -245,6 +248,8 @@ add_library(ymir-core
 
     src/ymir/core/configuration.cpp
     src/ymir/core/hash.cpp
+
+    src/ymir/jit/jit_memory.cpp
 
     src/ymir/db/cdb_rom_db.cpp
     src/ymir/db/game_db.cpp
