@@ -304,6 +304,27 @@ uint64 SH2Recompiler::StepThunk(SH2 *sh2, uint32 instr) {
         }
     }
     sh2->m_jitImpure = true;
+
+    // Loops that wait for a timer (the free-running timer and watchdog count the CPU's own cycles, which don't advance
+    // during a block) read the same value every time round and get the very same state back. Instead of running all
+    // of those identical iterations, each one that repeats the previous one claims the time of several.
+    bool pollRepeat = false;
+    if ((instr & 0xF00F) <= 0x6002 && (instr & 0xF000) == 0x6000 && IdleDetectionEnabled()) {
+        const uint32 addr = sh2->R[(instr >> 4) & 0xF];
+        if ((addr >= 0xFFFFFE10u && addr <= 0xFFFFFE19u) || (addr >= 0xFFFFFE80u && addr <= 0xFFFFFE8Fu)) {
+            SH2Recompiler *self = sh2->m_recompiler.get();
+            if (self != nullptr) {
+                const PollState now{sh2->R, sh2->PC, sh2->PR, sh2->GBR, sh2->VBR, sh2->SR.u32, sh2->MAC.u64};
+                pollRepeat = self->m_pollValid && now == self->m_pollState;
+                self->m_pollState = now;
+                self->m_pollValid = true;
+            }
+        }
+    }
+    if (pollRepeat) {
+        s_pollSkips.fetch_add(1, std::memory_order_relaxed);
+        return sh2->JitStep(static_cast<uint16>(instr)) + 24;
+    }
     return sh2->JitStep(static_cast<uint16>(instr));
 }
 

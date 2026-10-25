@@ -721,7 +721,8 @@ struct PerformanceSettingsView: View {
             + "may run faster, or may misbehave; turn it off if something looks wrong. It needs a JIT enabler "
             + "(StikDebug, StosDebug, ...) attached to Ymir, and the change applies to the running game immediately. "
             + "Skip Idle Waiting lets both processors run in longer steps while they are only waiting for something "
-            + "in RAM (no writes, no hardware access), which saves power but changes timing slightly."
+            + "in RAM (no writes, no hardware access), and moves loops that keep reading the SH-2's own timer along in time "
+            + "instead of running every identical iteration. This saves power but changes timing slightly."
     }
 
     private func refreshJIT() {

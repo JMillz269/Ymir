@@ -112,6 +112,10 @@ public:
     static bool IdleDetectionEnabled() {
         return s_idleDetect.load(std::memory_order_relaxed);
     }
+    /// @brief Number of times a loop that kept reading a timer register was moved on in time, for the statistics.
+    static uint64 PollSkips() {
+        return s_pollSkips.load(std::memory_order_relaxed);
+    }
     /// @brief Number of time slices spent waiting, for the statistics display.
     static uint64 IdleSlices() {
         return s_idleSlices.load(std::memory_order_relaxed);
@@ -145,6 +149,18 @@ private:
     friend class SH2;
     static inline std::atomic<bool> s_idleDetect{false};
     static inline std::atomic<uint64> s_idleSlices{0};
+    static inline std::atomic<uint64> s_pollSkips{0};
+
+    // The CPU state when the interpreter was last asked to read a timer register, to spot code that reads one over and
+    // over with nothing else changing
+    struct PollState {
+        std::array<uint32, 16> R;
+        uint32 PC, PR, GBR, VBR, SR;
+        uint64 MAC;
+        bool operator==(const PollState &) const = default;
+    };
+    PollState m_pollState{};
+    bool m_pollValid = false;
     static inline std::atomic<uint64> s_totalCycles{0};
     static inline std::atomic<uint64> s_coarseCycles{0};
 

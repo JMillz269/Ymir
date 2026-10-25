@@ -97,7 +97,10 @@ recompiled code without writing to memory, calling the interpreter (this include
 changing any register is waiting for something. While both processors are waiting, the emulator runs them in 512 cycle
 steps instead of 32, so they notice changes made by the other processor or by hardware up to 512 cycles later and the
 emulator loop's own work is done far less often. The count of slices spent waiting is shown with the recompiler's
-statistics. Loops that poll hardware registers are never treated as waiting.
+statistics. Loops that poll hardware registers are never treated as waiting, with one exception: a loop that keeps reading the
+SH-2's own free-running timer or watchdog (which count the CPU's cycles and so don't change while a block runs) and gets
+back exactly the same state each time round has each repeated iteration claim 24 extra cycles, so the identical iterations
+are not all run. This is the common way games wait for a time to pass; the statistics show the number of such skips.
 
 ## Known limitations
 
