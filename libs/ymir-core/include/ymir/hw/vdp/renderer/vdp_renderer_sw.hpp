@@ -31,6 +31,7 @@
 #include <span>
 #include <thread>
 #include <type_traits>
+#include <vector>
 
 namespace ymir::vdp {
 
@@ -38,9 +39,11 @@ namespace ymir::vdp {
 /// Framebuffer data is in little-endian XRGB8888 format.
 ///
 /// @param[in] fb a pointer to the framebuffer data
-/// @param[in] width the width of the framebuffer (in pixels)
-/// @param[in] height the height of the framebuffer (in pixels)
-using CBSoftwareFrameComplete = util::OptionalCallback<void(uint32 *fb, uint32 width, uint32 height)>;
+/// @param[in] width the width of the Saturn display (in pixels)
+/// @param[in] height the height of the Saturn display (in pixels)
+/// @param[in] scale the internal resolution multiplier; the framebuffer contains `(width * scale) x (height * scale)`
+/// pixels with no padding between rows. This is 1 when the frame was rendered at native resolution.
+using CBSoftwareFrameComplete = util::OptionalCallback<void(uint32 *fb, uint32 width, uint32 height, uint32 scale)>;
 
 /// @brief Callbacks specific to the software VDP renderer.
 struct SoftwareRendererCallbacks {
@@ -187,6 +190,52 @@ private:
     // Used when transparent meshes are enabled.
     // Indexing: [altFB][drawFB]
     alignas(16) std::array<std::array<SpriteFB, 2>, 2> m_meshFBRAM;
+
+    // -------------------------------------------------------------------------
+    // Internal resolution upscaling
+    //
+    // VDP1 draw commands are rasterized twice: once into the regular (native) framebuffer, which stays authoritative
+    // for CPU access and for video modes that cannot be upscaled, and once more with every coordinate multiplied by the
+    // scale factor into a larger 16-bit framebuffer (m_hrDraw). VDP2 layers are rendered at native resolution once per
+    // line; the final composition is repeated for each sub-pixel using the sprite layer read from the large
+    // framebuffer, and the results are interleaved into the output image.
+
+    static constexpr uint32 kHRMaxScale = 4;
+    static constexpr uint32 kHRFBWidth = 512;  // native 16bpp framebuffer width
+    static constexpr uint32 kHRFBHeight = 256; // native 16bpp framebuffer height
+    static constexpr uint32 kHROutMaxW = 352;  // widest display mode that can be upscaled
+    static constexpr uint32 kHROutMaxH = 256;  // tallest display mode that can be upscaled
+
+    // Requested scale; written by the emulator thread, latched by the render threads at frame boundaries.
+    std::atomic_uint32_t m_hrRequested{1};
+    bool m_hrAllocated = false;
+
+    // Scale latched by the VDP1 side. Owned by whichever context executes VDP1 commands.
+    uint32 m_hrScale1 = 1;
+    // True while a VDP1 command is being replayed into the large framebuffer.
+    bool m_hrPass = false;
+
+    // Large VDP1 framebuffers drawn by the VDP1 context. Pixels are host-endian RGB555+MSB.
+    // Each entry has m_hrDrawScale[i] as its scale, or 0 if the contents are stale.
+    std::array<std::vector<uint16>, 2> m_hrDraw;
+    std::array<uint32, 2> m_hrDrawScale{};
+
+    // Copies of the above published to VDP2 when VDP1 is threaded (otherwise m_hrDraw is read directly).
+    std::array<std::vector<uint16>, 2> m_hrShown;
+    std::array<std::atomic_uint32_t, 2> m_hrShownScale{};
+
+    // Per-frame VDP2 state: true if this frame is rendered and delivered at m_frameHRScale times the native size.
+    bool m_frameHR = false;
+    uint32 m_frameHRScale = 1;
+    uint32 m_frameHRW = 0;
+    uint32 m_frameHRH = 0;
+    std::vector<uint32> m_hrFramebuffer;
+
+    // Redirects VDP2ComposeLine output to a line buffer when non-null.
+    uint32 *m_composeOut = nullptr;
+
+    // Scratch sprite framebuffer used to decode upscaled sprite pixels through the regular sprite pipeline.
+    std::unique_ptr<SpriteFB> m_hrScratchFB;
 
     // -------------------------------------------------------------------------
     // Threading
@@ -685,6 +734,67 @@ private:
     // Erases the current VDP1 display framebuffer.
     template <bool countCycles>
     void VDP1DoEraseFramebuffer(uint64 cycles = ~0ull);
+
+    // -------------------------------------------------------------------------
+    // Internal resolution upscaling (VDP1 side)
+
+    struct VDP1PixelParams;
+
+    // Applies the requested internal resolution from the enhancements configuration.
+    void HRApplyConfig();
+
+    // Latches the requested scale for the VDP1 context. Called at frame boundaries.
+    void VDP1HRLatch();
+
+    // Determines if the given VDP1 mode can be rendered into the large framebuffer.
+    static bool HRSupportsTVMR(const VDP1RegTVMR &tvmr);
+
+    // Prepares the large draw framebuffer with the given index, resynchronizing it from the native framebuffer if
+    // necessary. Returns false if the large framebuffer cannot be used right now.
+    bool VDP1HRPrepare(uint8 fbIndex);
+
+    // Rebuilds the large draw framebuffer from the native one by pixel replication.
+    void VDP1HRResync(uint8 fbIndex);
+
+    // Publishes the large draw framebuffer to VDP2 when VDP1 is threaded.
+    void VDP1HRPublish(uint8 fbIndex);
+
+    // Mirrors a CPU write to the native framebuffer into the large one.
+    void VDP1HRCpuWrite(uint8 fbIndex, uint32 address);
+
+    // Returns true if draw commands should currently be replayed into the large framebuffer.
+    bool VDP1HRShouldReplay();
+
+    // Scales coordinates for the large framebuffer.
+    // Quads grow to cover the whole area of the native pixels they touch, lines stay one pixel thin.
+    void HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c, CoordS32 &d) const;
+    void HRScaleLine(CoordS32 &a, CoordS32 &b) const;
+
+    // Draws a pixel into the large framebuffer.
+    bool VDP1PlotPixelHR(CoordS32 coord, const VDP1PixelParams &pixelParams);
+
+    // Clip limits (inclusive) in the coordinate space of the current pass.
+    sint32 VDP1SysClipMaxX() const;
+    sint32 VDP1SysClipMaxY() const;
+
+    // Erases a span of a row in the large framebuffer.
+    void VDP1HREraseSpan(uint8 fbIndex, uint32 y, uint32 x0, uint32 x1, uint16 value);
+
+    // -------------------------------------------------------------------------
+    // Internal resolution upscaling (VDP2 side)
+
+    // Determines if the current frame can be rendered at a higher resolution.
+    void VDP2HRBeginFrame();
+
+    // Composes the line at high resolution. Returns false if the line must be composed at native resolution.
+    template <uint32 colorMode>
+    bool VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2);
+
+    // Replicates a native line into the high resolution output.
+    void VDP2HRReplicateLine(uint32 y);
+
+    // Produces the high resolution output for a line whose native composition has been completed.
+    void VDP2HRFinishLine(uint32 y, const VDP2Regs &regs2, uint32 colorMode);
 
 #define TPL_TRAITS template <bool deinterlace, bool transparentMeshes>
 #define TPL_LINE_TRAITS template <bool antiAlias, bool deinterlace, bool transparentMeshes>

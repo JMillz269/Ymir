@@ -288,18 +288,32 @@ struct SharedContext {
         }
 
         // Display framebuffers -- emu renders to one, GUI displays the other
-        using Framebuffer = std::array<uint32, ymir::vdp::kMaxResH * ymir::vdp::kMaxResV>;
+        // Frames rendered with an internal resolution multiplier are up to 352x256 pixels times that multiplier
+        static constexpr uint32 kMaxInternalScale = 4;
+        static constexpr size_t kFramebufferPixels =
+            std::max<size_t>(ymir::vdp::kMaxResH * ymir::vdp::kMaxResV, 352u * 256u * kMaxInternalScale * kMaxInternalScale);
+        using Framebuffer = std::array<uint32, kFramebufferPixels>;
         std::array<Framebuffer, 2> framebuffers;
+        std::array<uint32, 2> framebufferScales{1, 1}; // internal resolution multiplier of each framebuffer
         size_t currBackFramebuffer = 0;
         std::mutex mtxFramebuffer;
         bool updated = false;
 
+        // Internal resolution multiplier of the frame currently in the display framebuffer texture (GUI thread)
+        uint32 texScale = 1;
+
+        [[nodiscard]] uint32 DisplayFramebufferScale() const {
+            return framebufferScales[currBackFramebuffer ^ 1u];
+        }
+
         void CopyFramebufferToTexture(void *data, size_t pitch) const {
             auto pixelData = static_cast<uint32 *>(data);
-            SDL_Rect area{.x = 0, .y = 0, .w = (int)width, .h = (int)height};
+            const uint32 scale = DisplayFramebufferScale();
+            const uint32 w = width * scale;
+            const uint32 h = height * scale;
             const auto &fb = framebuffers[currBackFramebuffer ^ 1u];
-            for (uint32 y = 0; y < height; y++) {
-                std::copy_n(&fb[y * width], width, &pixelData[y * pitch / sizeof(uint32)]);
+            for (uint32 y = 0; y < h; y++) {
+                std::copy_n(&fb[size_t(y) * w], w, &pixelData[y * pitch / sizeof(uint32)]);
             }
         }
 

@@ -41,6 +41,22 @@ An on-screen Saturn control pad is drawn over the game: D-pad, A/B/C, X/Y/Z, L/R
 - **Settings > Controls > On-Screen Controls** turns the overlay off.
 - The overlay hides itself while a hardware controller is connected. MFi, Xbox, PlayStation and other controllers supported by iOS work through SDL's gamepad support and use the same default binds as on desktop.
 
+## Internal resolution
+
+**Settings > Display > Internal Resolution** draws VDP1 graphics (polygons, sprites, lines: the 3D models of most games)
+at 2x, 3x or 4x the Saturn's resolution. Every VDP1 command is drawn once at the normal size, which stays what the
+emulated CPU sees, and once more into a larger framebuffer with all coordinates multiplied; VDP2 then composes each
+screen line once per sub-pixel using the large sprite data, so layer priorities, transparency and shadows work as usual.
+The image reaches the screen at the larger size and is scaled to the display with whole-number steps.
+
+Limits: VDP2 backgrounds are tile and bitmap based and stay at their original sharpness; textures are sampled per large
+pixel, so they stay blocky when magnified. Frames in modes that can't be enlarged (high resolution, interlaced, 8-bit or
+rotated VDP1 framebuffers) and frames drawn with Transparent Meshes enabled are rendered at native size. The cost grows
+with the square of the scale, so 4x needs a lot more CPU than 2x.
+
+`tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer
+(`build.sh` builds it against a core build) to check the output and time frames.
+
 ## JIT (SH-2 recompiler)
 
 The core has an SH-2 recompiler that translates Saturn CPU code into ARM64 machine code. It is **off by default** and

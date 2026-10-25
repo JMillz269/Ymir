@@ -95,6 +95,9 @@ SoftwareVDPRenderer::Create(VDPState &state, const config::VDP2DebugRender &vdp2
 // Basics
 
 void SoftwareVDPRenderer::Reset(bool hard) {
+    m_hrDrawScale.fill(0);
+    m_hrShownScale[0].store(0);
+    m_hrShownScale[1].store(0);
     m_HRes = vdp::kDefaultResH;
     m_VRes = vdp::kDefaultResV;
     m_exclusiveMonitor = false;
@@ -140,6 +143,7 @@ void SoftwareVDPRenderer::Reset(bool hard) {
 
 void SoftwareVDPRenderer::UpdateEnhancements() {
     UpdateFunctionPointers();
+    HRApplyConfig();
 }
 
 // -----------------------------------------------------------------------------
@@ -153,6 +157,9 @@ void SoftwareVDPRenderer::EnableThreadedVDP1(bool enable) {
     devlog::debug<grp::swvdp1>("{} threaded VDP1 rendering", (enable ? "Enabling" : "Disabling"));
 
     m_threadedVDP1Rendering = enable;
+    m_hrDrawScale.fill(0);
+    m_hrShownScale[0].store(0);
+    m_hrShownScale[1].store(0);
     if (enable) {
         m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::PostLoadStateSync());
         m_VDP1RenderThread = std::thread{[&] { VDP1RenderThread(); }};
@@ -237,6 +244,9 @@ void SoftwareVDPRenderer::PreSaveStateSync() {
 }
 
 void SoftwareVDPRenderer::PostLoadStateSync() {
+    m_hrDrawScale.fill(0);
+    m_hrShownScale[0].store(0);
+    m_hrShownScale[1].store(0);
     for (uint32 address = 0; address < kVDP2CRAMSize; address += 2) {
         VDP2UpdateCRAMCache<uint16>(address);
     }
@@ -369,6 +379,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1WriteFBImpl(uint32 address, T value) 
         if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
             util::WriteBE<T>(&m_altFBRAM[m_state.fbIndex.draw][address & 0x3FFFF], value);
         }
+        VDP1HRCpuWrite(m_state.fbIndex.draw, address);
     }
 }
 
@@ -471,6 +482,8 @@ void SoftwareVDPRenderer::VDP1SwapFramebuffer() {
         m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::SwapBuffers());
         m_vdp1RenderingContext.swapBuffersSignal.Wait();
         m_vdp1RenderingContext.swapBuffersSignal.Reset();
+    } else {
+        VDP1HRLatch();
     }
     if (m_threadedVDP2Rendering) {
         m_vdp2RenderingContext.EnqueueEvent(VDP2RenderEvent::VDP1SwapFramebuffer());
@@ -569,7 +582,11 @@ void SoftwareVDPRenderer::VDP2EndFrame() {
         m_vdp2RenderingContext.renderFinishedSignal.Reset();
     }
     Callbacks.VDP2DrawFinished();
-    SwCallbacks.FrameComplete(m_framebuffer.data(), m_HRes, m_VRes);
+    if (m_frameHR && m_frameHRW == m_HRes && m_frameHRH == m_VRes) {
+        SwCallbacks.FrameComplete(m_hrFramebuffer.data(), m_HRes, m_VRes, m_frameHRScale);
+    } else {
+        SwCallbacks.FrameComplete(m_framebuffer.data(), m_HRes, m_VRes, 1);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -629,11 +646,14 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
                 }
                 const auto fbIndex = m_state.fbIndex.display;
                 m_state.mem1.FBRAM[fbIndex] = rctx.vdp1.mem.FBRAM[fbIndex];
+                VDP1HRPublish(fbIndex);
                 break;
             }
             case EvtType::SwapBuffers: {
                 const auto fbIndex = m_state.fbIndex.draw;
                 m_state.mem1.FBRAM[fbIndex] = rctx.vdp1.mem.FBRAM[fbIndex];
+                VDP1HRLatch();
+                VDP1HRPublish(fbIndex);
                 rctx.vdp1.regs.LatchEraseParameters();
                 rctx.swapBuffersSignal.Set();
                 break;
@@ -641,6 +661,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             case EvtType::EndDraw: {
                 const auto fbIndex = m_state.fbIndex.draw;
                 m_state.mem1.FBRAM[fbIndex] = rctx.vdp1.mem.FBRAM[fbIndex];
+                VDP1HRPublish(fbIndex);
                 break;
             }
             case EvtType::Command: (this->*m_fnVDP1HandleCommand)(event.command.address, event.command.control); break;
@@ -656,6 +677,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
                 if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
                     m_altFBRAM[fbIndex][event.write.address] = event.write.value;
                 }
+                VDP1HRCpuWrite(fbIndex, event.write.address);
                 break;
             }
             case EvtType::FBRAMWriteWord: {
@@ -665,6 +687,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
                 if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
                     util::WriteBE<uint16>(&m_altFBRAM[fbIndex][event.write.address], event.write.value);
                 }
+                VDP1HRCpuWrite(fbIndex, event.write.address);
                 break;
             }
             case EvtType::RegWrite: rctx.vdp1.regs.Write<false>(event.write.address, event.write.value); break;
@@ -673,6 +696,9 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             case EvtType::PostLoadStateSync:
                 rctx.vdp1.regs = m_state.regs1;
                 rctx.vdp1.mem = m_state.mem1;
+                m_hrDrawScale.fill(0);
+                m_hrShownScale[0].store(0);
+                m_hrShownScale[1].store(0);
                 rctx.postLoadSyncSignal.Set();
                 break;
 
@@ -932,6 +958,237 @@ FORCE_INLINE SpriteFB &SoftwareVDPRenderer::VDP1GetRendererFBRAM(bool altFB, uin
     }
 }
 
+// -----------------------------------------------------------------------------
+// VDP1 internal resolution upscaling
+
+void SoftwareVDPRenderer::HRApplyConfig() {
+    const uint32 scale = std::clamp<uint32>(m_enhancements.internalResolution, 1, kHRMaxScale);
+    if (scale > 1 && !m_hrAllocated) {
+        // Allocate once for the largest scale so the buffers never move while render threads use them
+        const size_t fbPixels = size_t(kHRFBWidth) * kHRFBHeight * kHRMaxScale * kHRMaxScale;
+        for (size_t i = 0; i < 2; i++) {
+            m_hrDraw[i].assign(fbPixels, 0);
+            m_hrShown[i].assign(fbPixels, 0);
+        }
+        m_hrFramebuffer.assign(size_t(kHROutMaxW) * kHROutMaxH * kHRMaxScale * kHRMaxScale, 0xFF000000);
+        m_hrScratchFB = std::make_unique<SpriteFB>();
+        m_hrScratchFB->fill(0);
+        m_hrAllocated = true;
+    }
+    m_hrRequested.store(scale, std::memory_order_release);
+}
+
+FORCE_INLINE void SoftwareVDPRenderer::VDP1HRLatch() {
+    m_hrScale1 = m_hrRequested.load(std::memory_order_acquire);
+}
+
+FORCE_INLINE bool SoftwareVDPRenderer::HRSupportsTVMR(const VDP1RegTVMR &tvmr) {
+    return !tvmr.hdtvEnable && !tvmr.fbRotEnable && !tvmr.pixel8Bits;
+}
+
+bool SoftwareVDPRenderer::VDP1HRPrepare(uint8 fbIndex) {
+    if (m_hrScale1 <= 1) {
+        return false;
+    }
+    if (!HRSupportsTVMR(VDP1GetRegs().tvmr)) {
+        m_hrDrawScale[fbIndex] = 0;
+        return false;
+    }
+    if (m_hrDrawScale[fbIndex] != m_hrScale1) {
+        VDP1HRResync(fbIndex);
+    }
+    return true;
+}
+
+void SoftwareVDPRenderer::VDP1HRResync(uint8 fbIndex) {
+    const uint32 s = m_hrScale1;
+    const SpriteFB &fb = VDP1GetRendererFBRAM(false, fbIndex);
+    uint16 *hr = m_hrDraw[fbIndex].data();
+    const size_t stride = size_t(kHRFBWidth) * s;
+    for (uint32 y = 0; y < kHRFBHeight; y++) {
+        uint16 *row = &hr[size_t(y) * s * stride];
+        for (uint32 x = 0; x < kHRFBWidth; x++) {
+            const uint16 value = util::ReadBE<uint16>(&fb[(y * kHRFBWidth + x) * sizeof(uint16)]);
+            for (uint32 k = 0; k < s; k++) {
+                row[x * s + k] = value;
+            }
+        }
+        for (uint32 r = 1; r < s; r++) {
+            std::copy_n(row, stride, row + r * stride);
+        }
+    }
+    m_hrDrawScale[fbIndex] = s;
+}
+
+void SoftwareVDPRenderer::VDP1HRPublish(uint8 fbIndex) {
+    if (!m_threadedVDP1Rendering) {
+        return;
+    }
+    const uint32 s = m_hrScale1;
+    if (s > 1 && m_hrDrawScale[fbIndex] == s) {
+        std::copy_n(m_hrDraw[fbIndex].data(), size_t(kHRFBWidth) * kHRFBHeight * s * s, m_hrShown[fbIndex].data());
+        m_hrShownScale[fbIndex].store(s, std::memory_order_release);
+    } else {
+        m_hrShownScale[fbIndex].store(0, std::memory_order_release);
+    }
+}
+
+void SoftwareVDPRenderer::VDP1HRCpuWrite(uint8 fbIndex, uint32 address) {
+    if (m_hrScale1 <= 1 || m_hrDrawScale[fbIndex] != m_hrScale1) {
+        return;
+    }
+    if (!HRSupportsTVMR(VDP1GetRegs().tvmr)) {
+        m_hrDrawScale[fbIndex] = 0;
+        return;
+    }
+    const uint32 s = m_hrScale1;
+    const SpriteFB &fb = VDP1GetRendererFBRAM(false, fbIndex);
+    const uint32 aligned = address & 0x3FFFE;
+    const uint16 value = util::ReadBE<uint16>(&fb[aligned]);
+    const uint32 index = aligned / sizeof(uint16);
+    const uint32 x = index % kHRFBWidth;
+    const uint32 y = index / kHRFBWidth;
+    const size_t stride = size_t(kHRFBWidth) * s;
+    uint16 *hr = m_hrDraw[fbIndex].data();
+    for (uint32 dy = 0; dy < s; dy++) {
+        std::fill_n(&hr[(size_t(y) * s + dy) * stride + size_t(x) * s], s, value);
+    }
+}
+
+bool SoftwareVDPRenderer::VDP1HRShouldReplay() {
+    if (m_VDP1doubleV != 0) {
+        return false;
+    }
+    if (VDP1GetRegs().dblInterlaceEnable) {
+        return false;
+    }
+    if (VDP2GetRegs().TVMD.LSMDn == InterlaceMode::DoubleDensity) {
+        return false;
+    }
+    return VDP1HRPrepare(m_state.fbIndex.draw);
+}
+
+void SoftwareVDPRenderer::HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c, CoordS32 &d) const {
+    // Native coordinates are inclusive pixel indices, so a quad covers its pixels' whole area. Scale each vertex
+    // and push it outwards by the part of a native pixel that lies beyond the vertex, proportionally to its position
+    // along each axis, so that axis-aligned quads cover exactly the scaled-up pixels and neighbors still tile.
+    const sint32 s = m_hrScale1;
+    CoordS32 *pts[4] = {&a, &b, &c, &d};
+    sint32 minX = a.x(), maxX = a.x(), minY = a.y(), maxY = a.y();
+    for (auto *p : pts) {
+        minX = std::min(minX, p->x());
+        maxX = std::max(maxX, p->x());
+        minY = std::min(minY, p->y());
+        maxY = std::max(maxY, p->y());
+    }
+    const sint32 spanX = maxX - minX;
+    const sint32 spanY = maxY - minY;
+    for (auto *p : pts) {
+        const sint32 ox = spanX == 0 ? (s - 1) / 2 : ((p->x() - minX) * (s - 1)) / spanX;
+        const sint32 oy = spanY == 0 ? (s - 1) / 2 : ((p->y() - minY) * (s - 1)) / spanY;
+        p->x() = p->x() * s + ox;
+        p->y() = p->y() * s + oy;
+    }
+}
+
+void SoftwareVDPRenderer::HRScaleLine(CoordS32 &a, CoordS32 &b) const {
+    // Lines stay one (large) pixel thin and go through the center of the native pixels
+    const sint32 s = m_hrScale1;
+    a.x() = a.x() * s + s / 2;
+    a.y() = a.y() * s + s / 2;
+    b.x() = b.x() * s + s / 2;
+    b.y() = b.y() * s + s / 2;
+}
+
+FORCE_INLINE sint32 SoftwareVDPRenderer::VDP1SysClipMaxX() const {
+    const auto &ctx = m_state.state1;
+    if (m_hrPass) [[unlikely]] {
+        return (static_cast<sint32>(ctx.sysClipH) + 1) * static_cast<sint32>(m_hrScale1) - 1;
+    }
+    return ctx.sysClipH;
+}
+
+FORCE_INLINE sint32 SoftwareVDPRenderer::VDP1SysClipMaxY() const {
+    const auto &ctx = m_state.state1;
+    if (m_hrPass) [[unlikely]] {
+        return (static_cast<sint32>(ctx.sysClipV) + 1) * static_cast<sint32>(m_hrScale1) - 1;
+    }
+    return (ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV;
+}
+
+bool SoftwareVDPRenderer::VDP1PlotPixelHR(CoordS32 coord, const VDP1PixelParams &pixelParams) {
+    auto [x, y] = coord;
+
+    if (VDP1IsPixelClipped<false>(coord, pixelParams.mode.userClippingEnable, pixelParams.mode.clippingMode)) {
+        return false;
+    }
+
+    const sint32 s = m_hrScale1;
+    if (pixelParams.mode.meshEnable && (((x / s) ^ (y / s)) & 1)) {
+        return true;
+    }
+
+    // The native framebuffer wraps around beyond its bounds; the large one just ignores such pixels
+    if (static_cast<uint32>(x) >= kHRFBWidth * s || static_cast<uint32>(y) >= kHRFBHeight * s) {
+        return true;
+    }
+
+    uint16 &pixel = m_hrDraw[m_state.fbIndex.draw][size_t(y) * kHRFBWidth * s + x];
+    if (pixelParams.mode.msbOn) {
+        pixel |= 0x8000;
+        return true;
+    }
+
+    Color555 srcColor{.u16 = pixelParams.color};
+    Color555 dstColor{.u16 = pixel};
+
+    if (pixelParams.mode.gouraudEnable) {
+        srcColor = pixelParams.gouraud.Blend(srcColor);
+    }
+
+    switch (pixelParams.mode.colorCalcBits) {
+    case 0: dstColor = srcColor; break;
+    case 1:
+        if (dstColor.msb) {
+            dstColor.r >>= 1u;
+            dstColor.g >>= 1u;
+            dstColor.b >>= 1u;
+        }
+        break;
+    case 2:
+        dstColor.r = srcColor.r >> 1u;
+        dstColor.g = srcColor.g >> 1u;
+        dstColor.b = srcColor.b >> 1u;
+        dstColor.msb = srcColor.msb;
+        break;
+    case 3:
+        if (dstColor.msb) {
+            dstColor.r = (srcColor.r + dstColor.r) >> 1u;
+            dstColor.g = (srcColor.g + dstColor.g) >> 1u;
+            dstColor.b = (srcColor.b + dstColor.b) >> 1u;
+        } else {
+            dstColor = srcColor;
+        }
+        break;
+    }
+    pixel = dstColor.u16;
+    return true;
+}
+
+void SoftwareVDPRenderer::VDP1HREraseSpan(uint8 fbIndex, uint32 y, uint32 x0, uint32 x1, uint16 value) {
+    if (x1 <= x0 || y >= kHRFBHeight) {
+        return;
+    }
+    const uint32 s = m_hrScale1;
+    const size_t stride = size_t(kHRFBWidth) * s;
+    x1 = std::min<uint32>(x1, kHRFBWidth);
+    uint16 *hr = m_hrDraw[fbIndex].data();
+    for (uint32 dy = 0; dy < s; dy++) {
+        std::fill(&hr[(size_t(y) * s + dy) * stride + size_t(x0) * s], &hr[(size_t(y) * s + dy) * stride + size_t(x1) * s],
+                  value);
+    }
+}
+
 template <bool countCycles>
 FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(uint64 cycles) {
     const VDP1Regs &regs1 = VDP1GetRegs();
@@ -969,6 +1226,9 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(uint64 cycles) {
 
     static constexpr uint64 kCyclesPerWrite = 1;
 
+    VDP1HRLatch();
+    const bool hr = !doubleDensity && fbOffsetShift == 9 && VDP1HRPrepare(fbIndex);
+
     for (uint32 y = y1; y <= y3; y++) {
         const uint32 fbOffset = y << fbOffsetShift;
         for (uint32 x = x1; x < x3; x++) {
@@ -990,9 +1250,15 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(uint64 cycles) {
                     cycles -= kCyclesPerWrite;
                 } else {
                     devlog::trace<grp::swvdp1>("Erase process ran out of cycles");
+                    if (hr) {
+                        VDP1HREraseSpan(fbIndex, y, x1, x + 1, regs1.eraseWriteValueLatch);
+                    }
                     return;
                 }
             }
+        }
+        if (hr) {
+            VDP1HREraseSpan(fbIndex, y, x1, x3, regs1.eraseWriteValueLatch);
         }
     }
 }
@@ -1019,6 +1285,11 @@ template <bool deinterlace>
 FORCE_INLINE bool SoftwareVDPRenderer::VDP1IsPixelUserClipped(CoordS32 coord) const {
     auto [x, y] = coord;
     const auto &ctx = m_state.state1;
+    if (m_hrPass) [[unlikely]] {
+        const sint32 s = m_hrScale1;
+        return x < static_cast<sint32>(ctx.userClipX0) * s || x > (static_cast<sint32>(ctx.userClipX1) + 1) * s - 1 ||
+               y < static_cast<sint32>(ctx.userClipY0) * s || y > (static_cast<sint32>(ctx.userClipY1) + 1) * s - 1;
+    }
     if (x < ctx.userClipX0 || x > ctx.userClipX1) {
         return true;
     }
@@ -1033,10 +1304,10 @@ template <bool deinterlace>
 FORCE_INLINE bool SoftwareVDPRenderer::VDP1IsPixelSystemClipped(CoordS32 coord) const {
     auto [x, y] = coord;
     const auto &ctx = m_state.state1;
-    if (x < 0 || x > ctx.sysClipH) {
+    if (x < 0 || x > VDP1SysClipMaxX()) {
         return true;
     }
-    if (y < 0 || y > ((ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV)) {
+    if (y < 0 || y > VDP1SysClipMaxY()) {
         return true;
     }
     return false;
@@ -1053,11 +1324,10 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1IsLineSystemClipped(CoordS32 coord1, 
     if (y1 < 0 && y2 < 0) {
         return true;
     }
-    if (x1 > ctx.sysClipH && x2 > ctx.sysClipH) {
+    if (x1 > VDP1SysClipMaxX() && x2 > VDP1SysClipMaxX()) {
         return true;
     }
-    if (y1 > ((ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV) &&
-        y2 > ((ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV)) {
+    if (y1 > VDP1SysClipMaxY() && y2 > VDP1SysClipMaxY()) {
         return true;
     }
     return false;
@@ -1077,13 +1347,12 @@ bool SoftwareVDPRenderer::VDP1IsQuadSystemClipped(CoordS32 coord1, CoordS32 coor
     if (y1 < 0 && y2 < 0 && y3 < 0 && y4 < 0) {
         return true;
     }
-    if (x1 > ctx.sysClipH && x2 > ctx.sysClipH && x3 > ctx.sysClipH && x4 > ctx.sysClipH) {
+    const sint32 maxX = VDP1SysClipMaxX();
+    const sint32 maxY = VDP1SysClipMaxY();
+    if (x1 > maxX && x2 > maxX && x3 > maxX && x4 > maxX) {
         return true;
     }
-    if (y1 > ((ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV) &&
-        y2 > ((ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV) &&
-        y3 > ((ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV) &&
-        y4 > ((ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV)) {
+    if (y1 > maxY && y2 > maxY && y3 > maxY && y4 > maxY) {
         return true;
     }
     return false;
@@ -1093,6 +1362,12 @@ template <bool deinterlace, bool transparentMeshes>
 FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1PixelParams &pixelParams,
                                                      const VDP1Regs &regs1, bool doubleDensity) {
     auto [x, y] = coord;
+
+    if constexpr (!deinterlace && !transparentMeshes) {
+        if (m_hrPass) [[unlikely]] {
+            return VDP1PlotPixelHR(coord, pixelParams);
+        }
+    }
 
     // Reject pixels outside of clipping area
     if (VDP1IsPixelClipped<deinterlace>(coord, pixelParams.mode.userClippingEnable, pixelParams.mode.clippingMode)) {
@@ -1208,7 +1483,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotLine(CoordS32 coord1, CoordS32 co
 
     LineStepper line{coord1, coord2, antiAlias};
     auto &ctx = m_state.state1;
-    const uint32 skipSteps = line.SystemClip(ctx.sysClipH, (ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV);
+    const uint32 skipSteps = line.SystemClip(VDP1SysClipMaxX(), VDP1SysClipMaxY());
 
     VDP1PixelParams pixelParams{
         .mode = lineParams.mode,
@@ -1266,7 +1541,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotTexturedLine(CoordS32 coord1, Coo
     const uint32 v = lineParams.texVStepper.Value();
 
     LineStepper line{coord1, coord2, true};
-    const uint32 skipSteps = line.SystemClip(ctx.sysClipH, (ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV);
+    const uint32 skipSteps = line.SystemClip(VDP1SysClipMaxX(), VDP1SysClipMaxY());
 
     VDP1PixelParams pixelParams{
         .mode = mode,
@@ -1563,18 +1838,42 @@ template <bool deinterlace, bool transparentMeshes>
 FORCE_INLINE void SoftwareVDPRenderer::VDP1Cmd_Handle(uint32 cmdAddress, VDP1Command::Control control) {
     using enum VDP1Command::CommandType;
 
-    switch (control.command) {
-    case DrawNormalSprite: VDP1Cmd_DrawNormalSprite<deinterlace, transparentMeshes>(cmdAddress, control); break;
-    case DrawScaledSprite: VDP1Cmd_DrawScaledSprite<deinterlace, transparentMeshes>(cmdAddress, control); break;
-    case DrawDistortedSprite: [[fallthrough]];
-    case DrawDistortedSpriteAlt:
-        VDP1Cmd_DrawDistortedSprite<deinterlace, transparentMeshes>(cmdAddress, control);
-        break;
+    auto drawCommand = [&] {
+        switch (control.command) {
+        case DrawNormalSprite: VDP1Cmd_DrawNormalSprite<deinterlace, transparentMeshes>(cmdAddress, control); break;
+        case DrawScaledSprite: VDP1Cmd_DrawScaledSprite<deinterlace, transparentMeshes>(cmdAddress, control); break;
+        case DrawDistortedSprite: [[fallthrough]];
+        case DrawDistortedSpriteAlt:
+            VDP1Cmd_DrawDistortedSprite<deinterlace, transparentMeshes>(cmdAddress, control);
+            break;
 
-    case DrawPolygon: VDP1Cmd_DrawPolygon<deinterlace, transparentMeshes>(cmdAddress); break;
+        case DrawPolygon: VDP1Cmd_DrawPolygon<deinterlace, transparentMeshes>(cmdAddress); break;
+        case DrawPolylines: [[fallthrough]];
+        case DrawPolylinesAlt: VDP1Cmd_DrawPolylines<deinterlace, transparentMeshes>(cmdAddress); break;
+        case DrawLine: VDP1Cmd_DrawLine<deinterlace, transparentMeshes>(cmdAddress); break;
+        default: break;
+        }
+    };
+
+    switch (control.command) {
+    case DrawNormalSprite: [[fallthrough]];
+    case DrawScaledSprite: [[fallthrough]];
+    case DrawDistortedSprite: [[fallthrough]];
+    case DrawDistortedSpriteAlt: [[fallthrough]];
+    case DrawPolygon: [[fallthrough]];
     case DrawPolylines: [[fallthrough]];
-    case DrawPolylinesAlt: VDP1Cmd_DrawPolylines<deinterlace, transparentMeshes>(cmdAddress); break;
-    case DrawLine: VDP1Cmd_DrawLine<deinterlace, transparentMeshes>(cmdAddress); break;
+    case DrawPolylinesAlt: [[fallthrough]];
+    case DrawLine:
+        drawCommand();
+        if constexpr (!deinterlace && !transparentMeshes) {
+            // Replay the command into the large framebuffer with scaled coordinates
+            if (m_hrScale1 > 1 && VDP1HRShouldReplay()) {
+                m_hrPass = true;
+                drawCommand();
+                m_hrPass = false;
+            }
+        }
+        break;
 
     case UserClipping: [[fallthrough]];
     case UserClippingAlt: VDP1Cmd_SetUserClipping(cmdAddress); break;
@@ -1603,10 +1902,13 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawNormalSprite(uint32 cmdAddress, VDP1Comman
     const sint32 doubleV = m_VDP1doubleV;
     const sint32 yAdd = deinterlace ? doubleV : 0;
 
-    const CoordS32 coordA{xa, ya << doubleV};
-    const CoordS32 coordB{xb, ya << doubleV};
-    const CoordS32 coordC{xb, (yb << doubleV) + yAdd};
-    const CoordS32 coordD{xa, (yb << doubleV) + yAdd};
+    CoordS32 coordA{xa, ya << doubleV};
+    CoordS32 coordB{xb, ya << doubleV};
+    CoordS32 coordC{xb, (yb << doubleV) + yAdd};
+    CoordS32 coordD{xa, (yb << doubleV) + yAdd};
+    if (m_hrPass) {
+        HRScaleQuad(coordA, coordB, coordC, coordD);
+    }
 
     devlog::trace<grp::swvdp1_cmd>("[{:05X}] Draw normal sprite: {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d}",
                                    cmdAddress, xa, ya, xb, ya, xb, yb, xa, yb);
@@ -1703,10 +2005,13 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawScaledSprite(uint32 cmdAddress, VDP1Comman
     const sint32 doubleV = m_VDP1doubleV;
     const sint32 yAdd = deinterlace ? doubleV : 0;
 
-    const CoordS32 coordA{qxa, qya << doubleV};
-    const CoordS32 coordB{qxb, qyb << doubleV};
-    const CoordS32 coordC{qxc, (qyc << doubleV) + yAdd};
-    const CoordS32 coordD{qxd, (qyd << doubleV) + yAdd};
+    CoordS32 coordA{qxa, qya << doubleV};
+    CoordS32 coordB{qxb, qyb << doubleV};
+    CoordS32 coordC{qxc, (qyc << doubleV) + yAdd};
+    CoordS32 coordD{qxd, (qyd << doubleV) + yAdd};
+    if (m_hrPass) {
+        HRScaleQuad(coordA, coordB, coordC, coordD);
+    }
 
     devlog::trace<grp::swvdp1_cmd>("[{:05X}] Draw scaled sprite: {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d}",
                                    cmdAddress, qxa, qya, qxb, qyb, qxc, qyc, qxd, qyd);
@@ -1738,10 +2043,13 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawDistortedSprite(uint32 cmdAddress, VDP1Com
     const sint32 yAddAB = deinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
     const sint32 yAddCD = deinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
 
-    const CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
-    const CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
-    const CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
-    const CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+    CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
+    CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
+    CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
+    CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+    if (m_hrPass) {
+        HRScaleQuad(coordA, coordB, coordC, coordD);
+    }
 
     devlog::trace<grp::swvdp1_cmd>(
         "[{:05X}] Draw distorted sprite: {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d}", cmdAddress, xa, ya, xb,
@@ -1776,10 +2084,13 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolygon(uint32 cmdAddress) {
     const sint32 yAddAB = deinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
     const sint32 yAddCD = deinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
 
-    const CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
-    const CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
-    const CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
-    const CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+    CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
+    CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
+    CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
+    CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+    if (m_hrPass) {
+        HRScaleQuad(coordA, coordB, coordC, coordD);
+    }
 
     devlog::trace<grp::swvdp1_cmd>("[{:05X}] Draw polygon: {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d}, color "
                                    "{:04X}, gouraud table {:05X}, CMDPMOD = {:04X}",
@@ -1890,10 +2201,14 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolylines(uint32 cmdAddress) {
     const sint32 yAddAB = deinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
     const sint32 yAddCD = deinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
 
-    const CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
-    const CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
-    const CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
-    const CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+    CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
+    CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
+    CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
+    CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+    if (m_hrPass) {
+        HRScaleLine(coordA, coordB);
+        HRScaleLine(coordC, coordD);
+    }
 
     devlog::trace<grp::swvdp1_cmd>(
         "[{:05X}] Draw polylines: {}x{} - {}x{} - {}x{} - {}x{}, color {:04X}, gouraud table {:05X}, CMDPMOD = {:04X}",
@@ -1960,8 +2275,11 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawLine(uint32 cmdAddress) {
     const uint32 gouraudTable = static_cast<uint32>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1C)) << 3u;
 
     const sint32 doubleV = m_VDP1doubleV;
-    const CoordS32 coordA{xa, ya << doubleV};
-    const CoordS32 coordB{xb, yb << doubleV};
+    CoordS32 coordA{xa, ya << doubleV};
+    CoordS32 coordB{xb, yb << doubleV};
+    if (m_hrPass) {
+        HRScaleLine(coordA, coordB);
+    }
 
     devlog::trace<grp::swvdp1_cmd>(
         "[{:05X}] Draw line: {}x{} - {}x{}, color {:04X}, gouraud table {:05X}, CMDPMOD = {:04X}", cmdAddress, xa, ya,
@@ -2062,6 +2380,7 @@ void SoftwareVDPRenderer::VDP2InitFrame() {
     VDP2InitNormalBG<1>(regs2);
     VDP2InitNormalBG<2>(regs2);
     VDP2InitNormalBG<3>(regs2);
+    VDP2HRBeginFrame();
 }
 
 template <uint32 index>
@@ -2549,6 +2868,197 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2FinishLine(uint32 y) {
     }
 }
 
+
+// -----------------------------------------------------------------------------
+// VDP2 internal resolution upscaling
+
+void SoftwareVDPRenderer::VDP2HRBeginFrame() {
+    m_frameHR = false;
+
+    const uint32 scale = m_hrRequested.load(std::memory_order_acquire);
+    if (scale <= 1 || !m_hrAllocated || m_enhancements.transparentMeshes) {
+        return;
+    }
+
+    const VDP2Regs &regs2 = VDP2GetRegs();
+    if (regs2.TVMD.IsInterlaced() || m_exclusiveMonitor || (regs2.TVMD.HRESOn & 0b110) != 0) {
+        return;
+    }
+    if (m_HRes > kHROutMaxW || m_VRes > kHROutMaxH) {
+        return;
+    }
+
+    m_frameHR = true;
+    m_frameHRScale = scale;
+    m_frameHRW = m_HRes;
+    m_frameHRH = m_VRes;
+}
+
+void SoftwareVDPRenderer::VDP2HRReplicateLine(uint32 y) {
+    const uint32 s = m_frameHRScale;
+    const uint32 w = m_HRes;
+    const size_t stride = size_t(w) * s;
+    const uint32 *src = &m_framebuffer[size_t(y) * w];
+    uint32 *dst = &m_hrFramebuffer[size_t(y) * s * stride];
+    for (uint32 x = 0; x < w; x++) {
+        for (uint32 k = 0; k < s; k++) {
+            dst[x * s + k] = src[x];
+        }
+    }
+    for (uint32 r = 1; r < s; r++) {
+        std::copy_n(dst, stride, dst + r * stride);
+    }
+}
+
+void SoftwareVDPRenderer::VDP2HRFinishLine(uint32 y, const VDP2Regs &regs2, uint32 colorMode) {
+    if (m_HRes != m_frameHRW || y >= m_frameHRH || y >= m_VRes) {
+        return;
+    }
+    VDP2HRReplicateLine(y);
+    switch (colorMode) {
+    case 0: VDP2HRComposeLine<0>(y, regs2); break;
+    case 1: VDP2HRComposeLine<1>(y, regs2); break;
+    default: VDP2HRComposeLine<2>(y, regs2); break;
+    }
+}
+
+template <uint32 colorMode>
+bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
+    const uint32 s = m_frameHRScale;
+    const uint32 w = m_HRes;
+    const VDP1RegTVMR &tvmr = VDP2GetVDP1TVMR();
+    if (!regs2.TVMD.DISP || !HRSupportsTVMR(tvmr)) {
+        return false;
+    }
+
+    // Find the large sprite framebuffer matching the displayed native framebuffer
+    const uint8 fbIndex = m_state.fbIndex.display;
+    const bool threaded1 = m_threadedVDP1Rendering;
+    const uint32 shownScale = threaded1 ? m_hrShownScale[fbIndex].load(std::memory_order_acquire) : m_hrDrawScale[fbIndex];
+    if (shownScale != s) {
+        return false;
+    }
+    const uint16 *hr = (threaded1 ? m_hrShown : m_hrDraw)[fbIndex].data();
+    const SpriteFB &nativeFB = m_state.mem1.FBRAM[fbIndex];
+    SpriteFB &scratch = *m_hrScratchFB;
+
+    const SpriteParams &params = regs2.spriteParams;
+    auto &layerOut = m_layerOutputs[0][0];
+    auto &layerAttrs = m_spriteLayerAttrs[0];
+
+    constexpr uint32 kMaxPlanes = kHRMaxScale * kHRMaxScale;
+    constexpr uint32 kW = kHROutMaxW;
+    std::array<std::array<uint16, kW>, kMaxPlanes> planeWords;
+    std::array<std::array<uint32, kW>, kMaxPlanes> planeOut;
+    std::array<int, kMaxPlanes> planeSource; // -1: native, otherwise index of the plane holding the result
+    std::array<bool, kW> differs;
+
+    // Native sprite layer state, restored when a pixel is unchanged and after all planes are done
+    std::array<Color888, kW> savedColor;
+    std::array<uint8, kW> savedPriority;
+    std::array<bool, kW> savedSpecialColorCalc;
+    std::array<uint8, kW> savedRatio;
+    std::array<bool, kW> savedShadow;
+    std::array<SpriteData::Special, kW> savedType;
+    bool saved = false;
+
+    const size_t hrStride = size_t(kHRFBWidth) * s;
+    const size_t outStride = size_t(w) * s;
+    const uint8 *nativeRow = &nativeFB[size_t(y) * kHRFBWidth * sizeof(uint16)];
+
+    for (uint32 sy = 0; sy < s; sy++) {
+        for (uint32 sx = 0; sx < s; sx++) {
+            const uint32 plane = sy * s + sx;
+            const uint16 *row = hr + (size_t(y) * s + sy) * hrStride + sx;
+            auto &words = planeWords[plane];
+
+            bool anyDiffers = false;
+            for (uint32 x = 0; x < w; x++) {
+                const uint16 word = row[size_t(x) * s];
+                words[x] = word;
+                const bool d = word != util::ReadBE<uint16>(&nativeRow[x * sizeof(uint16)]);
+                differs[x] = d;
+                anyDiffers |= d;
+            }
+            if (!anyDiffers) {
+                planeSource[plane] = -1;
+                continue;
+            }
+
+            // Reuse the result of an earlier plane with identical sprite data
+            int match = -2;
+            for (uint32 q = 0; q < plane; q++) {
+                if (planeSource[q] == static_cast<int>(q) && std::equal(words.begin(), words.begin() + w, planeWords[q].begin())) {
+                    match = static_cast<int>(q);
+                    break;
+                }
+            }
+            if (match >= 0) {
+                planeSource[plane] = match;
+                continue;
+            }
+
+            if (!saved) {
+                for (uint32 x = 0; x < w; x++) {
+                    savedColor[x] = layerOut.pixels.color[x];
+                    savedPriority[x] = layerOut.pixels.priority[x];
+                    savedSpecialColorCalc[x] = layerOut.pixels.specialColorCalc[x];
+                    savedRatio[x] = layerAttrs.colorCalcRatio[x];
+                    savedShadow[x] = layerAttrs.shadowOrWindow[x];
+                    savedType[x] = layerAttrs.specialType[x];
+                }
+                saved = true;
+            }
+
+            for (uint32 x = 0; x < w; x++) {
+                if (differs[x]) {
+                    util::WriteBE<uint16>(&scratch[x * sizeof(uint16)], words[x]);
+                    VDP2DrawSpritePixel<colorMode, false, false, false>(x, regs2, tvmr, params, scratch, x);
+                } else {
+                    layerOut.pixels.color[x] = savedColor[x];
+                    layerOut.pixels.priority[x] = savedPriority[x];
+                    layerOut.pixels.specialColorCalc[x] = savedSpecialColorCalc[x];
+                    layerAttrs.colorCalcRatio[x] = savedRatio[x];
+                    layerAttrs.shadowOrWindow[x] = savedShadow[x];
+                    layerAttrs.specialType[x] = savedType[x];
+                }
+            }
+
+            m_composeOut = planeOut[plane].data();
+            VDP2ComposeLine<false, false>(y, regs2, false);
+            m_composeOut = nullptr;
+            planeSource[plane] = static_cast<int>(plane);
+        }
+    }
+
+    // Write the results
+    for (uint32 sy = 0; sy < s; sy++) {
+        for (uint32 sx = 0; sx < s; sx++) {
+            const uint32 plane = sy * s + sx;
+            if (planeSource[plane] < 0) {
+                continue;
+            }
+            const uint32 *src = planeOut[planeSource[plane]].data();
+            uint32 *dst = &m_hrFramebuffer[(size_t(y) * s + sy) * outStride + sx];
+            for (uint32 x = 0; x < w; x++) {
+                dst[size_t(x) * s] = src[x];
+            }
+        }
+    }
+
+    if (saved) {
+        for (uint32 x = 0; x < w; x++) {
+            layerOut.pixels.color[x] = savedColor[x];
+            layerOut.pixels.priority[x] = savedPriority[x];
+            layerOut.pixels.specialColorCalc[x] = savedSpecialColorCalc[x];
+            layerAttrs.colorCalcRatio[x] = savedRatio[x];
+            layerAttrs.shadowOrWindow[x] = savedShadow[x];
+            layerAttrs.specialType[x] = savedType[x];
+        }
+    }
+    return true;
+}
+
 template <bool deinterlace, bool transparentMeshes>
 void SoftwareVDPRenderer::VDP2DrawLine(uint32 y, bool altField) {
     devlog::trace<grp::swvdp2_verbose>("Drawing line {} {} field", y, (altField ? "alt" : "main"));
@@ -2625,6 +3135,12 @@ void SoftwareVDPRenderer::VDP2DrawLine(uint32 y, bool altField) {
 
     // Compose image
     VDP2ComposeLine<deinterlace, transparentMeshes>(y, regs2, altField);
+
+    if constexpr (!transparentMeshes) {
+        if (m_frameHR && !altField) {
+            VDP2HRFinishLine(y, regs2, colorMode);
+        }
+    }
 }
 
 FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawLineColorAndBackScreens(uint32 y, const VDP2Regs &regs2) {
@@ -3834,7 +4350,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
         if (regs2.borderColorModeLatch) {
             color |= state2.lineBackLayerState.backColor.u32;
         }
-        std::fill_n(&m_framebuffer[y * m_HRes], m_HRes, color);
+        std::fill_n(m_composeOut != nullptr ? m_composeOut : &m_framebuffer[y * m_HRes], m_HRes, color);
         return;
     }
 
@@ -4048,7 +4564,8 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
         }
     }
 
-    const std::span<Color888> framebufferOutput(reinterpret_cast<Color888 *>(&m_framebuffer[y * m_HRes]), m_HRes);
+    const std::span<Color888> framebufferOutput(
+        reinterpret_cast<Color888 *>(m_composeOut != nullptr ? m_composeOut : &m_framebuffer[y * m_HRes]), m_HRes);
 
     const bool normalTVMode = regs2.TVMD.HRESOn < 2;
     const uint8 cramMode = regs2.vramControl.colorRAMMode;

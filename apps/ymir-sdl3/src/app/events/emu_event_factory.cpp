@@ -68,6 +68,13 @@ EmuEvent SetTransparentMeshes(bool enable) {
     });
 }
 
+EmuEvent SetInternalResolution(uint32 scale) {
+    return RunFunction([=](SharedContext &ctx) {
+        ctx.saturn.instance->VDP.ModifyEnhancements(
+            [&](vdp::config::Enhancements &enhancements) { enhancements.internalResolution = scale; });
+    });
+}
+
 EmuEvent UseNullVDPRenderer(util::Event &event) {
     return RunFunction([&event](SharedContext &ctx) {
         auto &vdp = ctx.saturn.instance->VDP;

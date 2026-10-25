@@ -347,6 +347,8 @@ int App::Run(const CommandLineOptions &options) {
             [&](bool value) { m_context.EnqueueEvent(events::emu::SetDeinterlace(value)); });
         videoSettings.enhancements.transparentMeshes.Observe(
             [&](bool value) { m_context.EnqueueEvent(events::emu::SetTransparentMeshes(value)); });
+        videoSettings.enhancements.internalResolution.Observe(
+            [&](uint32 value) { m_context.EnqueueEvent(events::emu::SetInternalResolution(value)); });
     }
 
     // Profile priority:
@@ -917,8 +919,8 @@ void App::RunEmulator() {
     // Software framebuffer texture
     auto swFbTextureResult = m_graphicsService.CreateTexture(
         {
-            .width = vdp::kMaxResH,
-            .height = vdp::kMaxResV,
+            .width = std::max<uint32>(vdp::kMaxResH, 352 * SharedContext::Screen::kMaxInternalScale),
+            .height = std::max<uint32>(vdp::kMaxResV, 256 * SharedContext::Screen::kMaxInternalScale),
             .format = gfx::PixelFormat::R8G8B8X8_UNORM,
             .access = gfx::TextureAccess::Streaming,
             .filterMode = gfx::TextureFilterMode::Nearest,
@@ -966,7 +968,10 @@ void App::RunEmulator() {
         const double dispScaleX = (double)targetWidth / dispWidth;
         const double dispScaleY = (double)targetHeight / dispHeight;
         const double dispScale = std::min(dispScaleX, dispScaleY);
-        const uint32 scale = std::max(1.0, ceil(dispScale));
+        // Frames rendered at a higher internal resolution are scaled into the display texture by a whole number of
+        // times their own size
+        const uint32 texScale = screen.texScale;
+        const uint32 scale = std::max(1.0, ceil(dispScale / texScale)) * texScale;
 
         assert(m_graphicsService.IsTextureHandleValid(dispTexture));
         assert(m_graphicsService.IsTextureHandleValid(swFbTexture));
@@ -999,7 +1004,10 @@ void App::RunEmulator() {
                 gfxCtx.ReleaseCurrentDisplayOutputTexture();
             }
         } else {
-            gfx::FRect srcRect{.x = 0.0f, .y = 0.0f, .w = (float)screen.width, .h = (float)screen.height};
+            gfx::FRect srcRect{.x = 0.0f,
+                               .y = 0.0f,
+                               .w = (float)screen.width * texScale,
+                               .h = (float)screen.height * texScale};
             m_graphicsService.RenderToTexture(swFbTexture, dispTexture, srcRect, dstRect);
         }
     };
@@ -1155,7 +1163,7 @@ void App::RunEmulator() {
 
         vdp.SetSoftwareRenderCallback({
             this,
-            [](uint32 *fb, uint32 width, uint32 height, void *ctx) {
+            [](uint32 *fb, uint32 width, uint32 height, uint32 fbScale, void *ctx) {
                 auto &app = *static_cast<App *>(ctx);
                 auto &sharedCtx = app.m_context;
                 auto &screen = sharedCtx.screen;
@@ -1170,7 +1178,9 @@ void App::RunEmulator() {
                 }
                 if (settings.video.reduceLatency || !screen.updated || screen.videoSync) {
                     std::unique_lock lock{screen.mtxFramebuffer};
-                    std::copy_n(fb, width * height, screen.framebuffers[screen.currBackFramebuffer].data());
+                    std::copy_n(fb, size_t(width) * fbScale * height * fbScale,
+                                screen.framebuffers[screen.currBackFramebuffer].data());
+                    screen.framebufferScales[screen.currBackFramebuffer] = fbScale;
                     screen.updated = true;
                     if (screen.videoSync) {
                         screen.frameReadyEvent.Set();
@@ -2193,7 +2203,10 @@ void App::RunEmulator() {
                     ss.fb.resize(screen.width * screen.height);
                 } else {
                     // The software renderer already outputs the frame in a compact vector
-                    ss.fb.resize(screen.width * screen.height);
+                    const uint32 fbScale = screen.DisplayFramebufferScale();
+                    ss.fbWidth = screen.width * fbScale;
+                    ss.fbHeight = screen.height * fbScale;
+                    ss.fb.resize(size_t(ss.fbWidth) * ss.fbHeight);
                     const auto &fb = screen.framebuffers[screen.currBackFramebuffer ^ 1u];
                     std::copy_n(fb.begin(), ss.fb.size(), ss.fb.begin());
                 }
@@ -2227,7 +2240,11 @@ void App::RunEmulator() {
                 screen.updated = false;
                 screen.currBackFramebuffer ^= 1u;
             }
-            const gfx::IRect area{.x = 0, .y = 0, .w = screen.width, .h = screen.height};
+            screen.texScale = screen.DisplayFramebufferScale();
+            const gfx::IRect area{.x = 0,
+                                  .y = 0,
+                                  .w = (int)(screen.width * screen.texScale),
+                                  .h = (int)(screen.height * screen.texScale)};
             m_graphicsService.UpdateTexture(
                 swFbTexture, &area, [&](void *data, size_t pitch) { screen.CopyFramebufferToTexture(data, pitch); });
         }

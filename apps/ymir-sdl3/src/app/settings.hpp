@@ -515,6 +515,7 @@ struct Settings {
         struct Enhancements {
             util::Observable<bool> deinterlace;
             util::Observable<bool> transparentMeshes;
+            util::Observable<uint32> internalResolution; // 1 = native
         } enhancements;
     } video;
 

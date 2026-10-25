@@ -25,12 +25,20 @@ struct Enhancements {
     /// with half-transparency on top of other graphics.
     bool transparentMeshes = false;
 
+    /// @brief Internal resolution multiplier (1 = native). Only honored by the software renderer.
+    /// VDP1 polygons, sprites and lines are rasterized into a framebuffer that is this many times larger in each
+    /// dimension, and the VDP2 composition is evaluated at that resolution. Values from 1 to 4 are supported.
+    /// Video modes that cannot be upscaled (8-bit or rotated framebuffers, double-density interlace, high
+    /// resolution) are rendered at native resolution.
+    uint32 internalResolution = 1;
+
     /// @brief Determines if any enhancement is enabled:
     /// - `deinterlace` is set to `true`
     /// - `transparentMeshes` is set to `true`
+    /// - `internalResolution` is greater than 1
     /// @return `true` if any enhancement is active, `false` otherwise
     bool AnyEnabled() const {
-        return deinterlace || transparentMeshes;
+        return deinterlace || transparentMeshes || internalResolution > 1;
     }
 };
 
