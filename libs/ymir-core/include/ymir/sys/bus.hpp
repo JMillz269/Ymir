@@ -267,6 +267,27 @@ public:
         }
     }
 
+    /// @brief Retrieves a pointer to the host memory backing the given address, if the address is mapped to an array.
+    ///
+    /// The pointer is valid up to the end of the bus page that contains the address; use `PageBytesLeft` to find out
+    /// how many bytes can be accessed. The data is stored in the same byte order as the array's contents.
+    ///
+    /// @param[in] address the address to look up
+    /// @return a pointer to the byte for the address, or `nullptr` if the address is not backed by an array
+    [[nodiscard]] const uint8 *GetArrayPointer(uint32 address) const {
+        address &= kAddressMask;
+        const MemoryPage &entry = m_pages[address >> pageGranularityBits];
+        if (entry.array == nullptr) {
+            return nullptr;
+        }
+        return &entry.array[address & kPageMask];
+    }
+
+    /// @brief Returns the number of bytes between the given address and the end of its bus page.
+    [[nodiscard]] static constexpr uint32 PageBytesLeft(uint32 address) {
+        return kPageSize - (address & kPageMask);
+    }
+
     /// @brief Determines if the given access is blocked.
     /// @param[in] address the address to check
     /// @param[in] size the number of bytes to be accessed

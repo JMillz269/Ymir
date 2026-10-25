@@ -39,6 +39,8 @@ namespace ymir::jit {
 
 namespace {
 
+    bool g_testingMode = false;
+
 #if YMIR_JIT_IOS_DEVICE
     constexpr unsigned kCsOpsStatus = 0;
     constexpr unsigned kCsDebugged = 0x10000000;
@@ -117,10 +119,14 @@ std::string JitStatus::Message() const {
     return {};
 }
 
+void SetJitTestingMode(bool enable) {
+    g_testingMode = enable;
+}
+
 JitStatus ProbeJit() {
     JitStatus status{};
 #if !YMIR_JIT_ARCH_SUPPORTED
-    status.reason = JitStatus::Reason::UnsupportedArchitecture;
+    status.reason = g_testingMode ? JitStatus::Reason::Available : JitStatus::Reason::UnsupportedArchitecture;
 #elif YMIR_JIT_IOS_DEVICE
     status.txmDevice = DeviceHasTXM();
     status.processDebugged = ProcessIsDebugged();
@@ -157,6 +163,17 @@ bool JitMemory::Initialize(size_t size) {
     size = RoundUp(size, std::max<size_t>(PageSize(), 16384));
 
 #if !YMIR_JIT_ARCH_SUPPORTED
+    if (g_testingMode) {
+    #if defined(__APPLE__) || defined(__unix__)
+        void *memory = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (memory != MAP_FAILED) {
+            m_exec = m_write = static_cast<uint8 *>(memory);
+            m_size = size;
+            m_mode = Mode::Rwx;
+            return true;
+        }
+    #endif
+    }
     return false;
 #elif YMIR_JIT_IOS_DEVICE
     if (m_status.txmDevice) {

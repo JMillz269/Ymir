@@ -64,6 +64,13 @@ struct Configuration {
         /// Enabling this option incurs a small performance penalty and purges all SH-2 caches.
         util::Observable<bool> emulateSH2Cache = false;
 
+        /// @brief Runs the SH-2 CPUs with the dynamic recompiler (JIT) instead of the interpreter.
+        ///
+        /// Requires an AArch64 host that allows executable memory (on iOS, a JIT enabler attached to the process). It
+        /// is ignored, and the interpreter is used, when it isn't available, when SH-2 cache emulation is on and while
+        /// debug tracing is enabled.
+        util::Observable<bool> useSH2Recompiler = false;
+
         /// @brief SH-2 clock factor ratio.
         ///
         /// Adjusts the cycle rate of the SH-2 CPUs, which may reduce internal slowdowns and lag in CPU-heavy games.

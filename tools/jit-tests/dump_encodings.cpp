@@ -150,6 +150,11 @@ int main() {
         Case(std::string("cset w1, ") + c.name, [&](Assembler &a) { a.Cset(Sz::W, 1, c.cond); });
     }
 
+    Case("cinc w1, w2, eq", [](Assembler &a) { a.Cinc(Sz::W, 1, 2, Cond::EQ); });
+    Case("cinc x1, x2, ne", [](Assembler &a) { a.Cinc(Sz::X, 1, 2, Cond::NE); });
+    Case("ccmp w1, #5, #4, ne", [](Assembler &a) { a.CcmpImm(Sz::W, 1, 5, 4, Cond::NE); });
+    Case("ccmp x1, #31, #0, eq", [](Assembler &a) { a.CcmpImm(Sz::X, 1, 31, 0, Cond::EQ); });
+
     // -- Loads and stores --
     Case("ldrb w1, [x2, #5]", [](Assembler &a) { a.Ldr(0, 1, 2, 5); });
     Case("ldrh w1, [x2, #6]", [](Assembler &a) { a.Ldr(1, 1, 2, 6); });

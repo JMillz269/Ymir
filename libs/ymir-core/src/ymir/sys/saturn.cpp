@@ -149,6 +149,8 @@ Saturn::Saturn()
 
     masterSH2.BindEmulateCacheOption(m_emulateSH2Caches);
     slaveSH2.BindEmulateCacheOption(m_emulateSH2Caches);
+    masterSH2.BindRecompilerOption(m_useSH2Recompiler);
+    slaveSH2.BindRecompilerOption(m_useSH2Recompiler);
 
     ConfigureAccessCycles(false);
 
@@ -160,6 +162,7 @@ Saturn::Saturn()
         [&](const std::vector<core::config::sys::Region> &regions) { UpdatePreferredRegionOrder(regions); });
     configuration.system.debugTracing.Observe([&](bool enabled) { UpdateDebugTracing(enabled); });
     configuration.system.emulateSH2Cache.Observe([&](bool enabled) { UpdateSH2CacheEmulation(enabled); });
+    configuration.system.useSH2Recompiler.Observe([&](bool enabled) { m_useSH2Recompiler = enabled; });
     configuration.system.sh2ClockFactor.Observe([&](Ratio factor) { UpdateSH2ClockFactor(factor); });
     configuration.system.videoStandard.Observe(
         [&](core::config::sys::VideoStandard videoStandard) { UpdateVideoStandard(videoStandard); });

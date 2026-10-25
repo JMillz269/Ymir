@@ -43,6 +43,12 @@ struct JitStatus {
     std::string Message() const;
 };
 
+/// @brief Lets JitMemory hand out read+write+execute memory on any architecture and operating system that supports it.
+///
+/// Meant for tests that execute generated AArch64 code in a CPU emulator on another architecture. Never enable it in
+/// the emulator itself.
+void SetJitTestingMode(bool enable);
+
 /// @brief Checks the platform and process state without allocating anything.
 JitStatus ProbeJit();
 

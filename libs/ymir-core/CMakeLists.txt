@@ -93,6 +93,7 @@ add_library(ymir-core
     include/ymir/hw/sh1/sh1_wdt.hpp
 
     include/ymir/hw/sh2/sh2.hpp
+    include/ymir/hw/sh2/sh2_recompiler.hpp
     include/ymir/hw/sh2/sh2_bsc.hpp
     include/ymir/hw/sh2/sh2_cache.hpp
     include/ymir/hw/sh2/sh2_decode.hpp
@@ -294,6 +295,7 @@ add_library(ymir-core
     #src/ymir/hw/sh1/sh1_disasm.cpp
 
     src/ymir/hw/sh2/sh2.cpp
+    src/ymir/hw/sh2/sh2_recompiler.cpp
     src/ymir/hw/sh2/sh2_decode.cpp
     src/ymir/hw/sh2/sh2_disasm.cpp
 

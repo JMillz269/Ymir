@@ -426,6 +426,9 @@ private:
     /// @brief Whether to emulate SH2 caches.
     bool m_emulateSH2Caches = false;
 
+    /// @brief Whether to run the SH2s with the dynamic recompiler.
+    bool m_useSH2Recompiler = false;
+
 public:
     // -------------------------------------------------------------------------
     // Components
