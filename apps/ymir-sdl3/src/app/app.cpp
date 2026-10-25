@@ -458,6 +458,8 @@ int App::Run(const CommandLineOptions &options) {
 #if YMIR_PLATFORM_IOS
     // iOS apps are always full screen; this also makes the main menu bar auto-hide so it doesn't cover the game
     settings.video.fullScreen = true;
+    // There is no Metal implementation of the GPU (hardware) VDP renderer; it would only show a blank screen
+    settings.video.useHardwareAcceleration = false;
 #endif
     util::ScopeGuard sgSaveSettings{[&] {
         if (auto result = settings.Save(); !result) {
@@ -3565,10 +3567,18 @@ void App::RunEmulator() {
                 std::swap(scaledWidth, scaledHeight);
             }
 
-            // Stretch to the whole display regardless of the aspect ratio
+            // Stretch to the whole display regardless of the aspect ratio. In portrait the picture takes the full width
+            // but only part of the height, so that it still looks like a screen, and sits at the top of the display
+            bool stretchedInPortrait = false;
             if (videoSettings.forceStretch && !fitWindowToScreen) {
                 scaledWidth = ww;
                 scaledHeight = wh;
+                if (ww < wh) {
+                    const double naturalHeight = (double)ww * baseHeight / std::max(1.0, baseWidth);
+                    const double t = std::clamp((double)videoSettings.portraitStretchHeight, 0.0, 1.0);
+                    scaledHeight = (int)std::min((double)wh, naturalHeight + t * ((double)wh - naturalHeight));
+                    stretchedInPortrait = true;
+                }
             }
 
             // Render framebuffer to display texture
@@ -3596,6 +3606,18 @@ void App::RunEmulator() {
                                .y = floorf(slackY * 0.5f + menuBarHeight),
                                .w = (float)scaledWidth,
                                .h = (float)scaledHeight};
+            if (stretchedInPortrait) {
+                // Keep clear of the notch/Dynamic Island
+                SDL_Rect safeArea{};
+                float safeTop = 0.0f;
+                if (SDL_GetWindowSafeArea(screen.window, &safeArea)) {
+                    safeTop = (float)safeArea.y;
+#if defined(__APPLE__)
+                    safeTop *= SDL_GetWindowPixelDensity(screen.window);
+#endif
+                }
+                dstRect.y = floorf(safeTop + menuBarHeight);
+            }
             m_graphicsService.DrawTextureRotated(dispTexture, srcRect, dstRect, rotAngle);
 
             screen.scale = scale;

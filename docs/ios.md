@@ -25,7 +25,7 @@ The iOS app has a native SwiftUI interface (sources in `apps/ymir-sdl3/src/ios`)
 
 - **Games** lists the disc images found in the Ymir folder (`.cue`, `.chd`, `.iso`, `.ccd`, `.mds`). The emulator stays idle until you tap a game. Swipe or long-press a game to delete it. The **+** button imports games or a BIOS with the system document picker and opens the Ymir folder in the Files app. Long-press a game to set its artwork (from Photos, Files or a Google Images search where you touch and hold the image you want) or to rename it; the name only changes in the app. Artwork is stored in `covers`, and a `.png` or `.jpg` named like the disc image next to it is used too.
 - **Settings** replaces the menu bar and the desktop settings window with native pages: Display, Audio, Controls (peripherals, deadzones), Emulation (speed, rewind), System & Region, Cartridge, CD Drive, Performance & Accuracy and Interface, plus BIOS import. The only thing not available is editing individual button and hotkey bindings; controllers use the default bindings.
-- **Settings > Display > Stretch to Fill Screen** fills the whole display with the game picture, ignoring the aspect ratio and integer scaling.
+- **Settings > Display > Stretch to Fill Screen** fills the whole display with the game picture, ignoring the aspect ratio and integer scaling. In portrait the picture fills the width and sits at the top, reaching down the screen as far as the *Portrait Height* slider says.
 - **Settings > Display > MetalFX** upscales the picture with the GPU: *Spatial* works frame by frame, *Temporal* also reuses previous frames (the Saturn has no motion vectors, so it supplies none and fast movement can ghost slightly).
 - **Settings > Display > Picture Filters** adds *Sharp Pixels* (crisp pixel edges), *Sharpening*, *Scanlines* and an *Aperture Grille* (CRT look). They are applied after MetalFX in a custom Metal shader.
 - On iOS 26 and later the tab bar and the buttons use Liquid Glass; older systems get translucent materials.
@@ -51,3 +51,5 @@ The emulator core is an interpreter. It does not generate machine code at runtim
 - Update checks are disabled. Rebuild from the workflow to update.
 - The Metal backend only handles presentation; VDP rendering runs on the CPU, as on macOS.
 - This port has not been run on a device by its author at the time of writing; expect rough edges and report them.
+
+- There is no Metal version of Ymir's GPU (hardware) VDP renderer, so graphics are always rendered on the CPU (multithreaded).

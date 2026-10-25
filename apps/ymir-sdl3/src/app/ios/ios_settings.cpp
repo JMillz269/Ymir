@@ -71,6 +71,8 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
     };
     addBool("video.forceIntegerScaling", [cfg] { return cfg->video.forceIntegerScaling; },
             [cfg](bool v) { cfg->video.forceIntegerScaling = v; });
+    addFloat("video.portraitStretch", [cfg] { return cfg->video.portraitStretchHeight; },
+             [cfg](float v) { cfg->video.portraitStretchHeight = std::clamp(v, 0.0f, 1.0f); });
     addBool("video.forceStretch", [cfg] { return cfg->video.forceStretch; },
             [cfg](bool v) { cfg->video.forceStretch = v; });
     addBool("video.forceAspectRatio", [cfg] { return cfg->video.forceAspectRatio; },
@@ -98,8 +100,6 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
         });
     addInt("video.rotation", [cfg] { return static_cast<int>(cfg->video.rotation); },
            [cfg](int v) { cfg->video.rotation = static_cast<Settings::Video::DisplayRotation>(std::clamp(v, 0, 3)); });
-    addBool("video.hardwareAcceleration", [cfg] { return cfg->video.useHardwareAcceleration.Get(); },
-            [cfg](bool v) { cfg->video.useHardwareAcceleration = v; });
     addBool("video.deinterlace", [cfg] { return cfg->video.enhancements.deinterlace.Get(); },
             [cfg](bool v) { cfg->video.enhancements.deinterlace = v; });
     addBool("video.transparentMeshes", [cfg] { return cfg->video.enhancements.transparentMeshes.Get(); },

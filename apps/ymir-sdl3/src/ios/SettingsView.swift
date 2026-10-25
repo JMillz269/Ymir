@@ -242,6 +242,9 @@ struct DisplaySettingsView: View {
         Form {
             Section("Scaling") {
                 Toggle("Stretch to Fill Screen", isOn: store.bool("video.forceStretch"))
+                SettingSlider(title: "Portrait Height", value: store.float("video.portraitStretch", default: 0.3),
+                              range: 0...1, format: percent)
+                    .disabled(!YmirHost.boolValue(key: "video.forceStretch", default: false))
                 Toggle("Integer Scaling", isOn: store.bool("video.forceIntegerScaling"))
                     .disabled(YmirHost.boolValue(key: "video.forceStretch", default: false))
                 Toggle("Force Aspect Ratio", isOn: store.bool("video.forceAspectRatio", default: true))
@@ -283,14 +286,6 @@ struct DisplaySettingsView: View {
                 Text("Picture Filters")
             } footer: {
                 Text("Sharp Pixels keeps every game pixel crisp and only smooths its edges, which looks better than plain smooth scaling. Sharpening adds crispness after upscaling. Scanlines and the aperture grille imitate a CRT TV; they look best on a high resolution screen like yours.")
-            }
-
-            Section {
-                Toggle("GPU Renderer", isOn: store.bool("video.hardwareAcceleration"))
-            } header: {
-                Text("Renderer")
-            } footer: {
-                Text("Renders the Saturn's graphics on the GPU instead of the CPU. Experimental.")
             }
 
             Section {
