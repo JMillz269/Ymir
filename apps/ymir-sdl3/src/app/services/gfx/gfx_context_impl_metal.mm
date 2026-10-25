@@ -73,6 +73,91 @@ struct Vertex {
     Float2 uv;
 };
 
+// Constants of the post-processing shader below. Must match the layout of Params in the shader source.
+struct alignas(16) PostConstants {
+    Float4 srcRect; // normalized
+    Float4 dstRect; // pixels
+    Float2 renderTargetSize;
+    Float2 contentSize; // size of the source region, in texels
+    float sharpness;
+    float scanlines;
+    float mask;
+    float sharpK; // > 0 enables sharp pixel scaling; the number of destination pixels per source pixel
+};
+
+static const char *kPostProcessShaderSource = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct Params {
+    float4 srcRect;
+    float4 dstRect;
+    float2 rtSize;
+    float2 contentSize;
+    float sharpness;
+    float scanlines;
+    float mask;
+    float sharpK;
+};
+
+struct VOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex VOut ymir_post_vs(uint vid [[vertex_id]], constant Params &p [[buffer(0)]]) {
+    float2 corner = float2(float(vid & 1u), float(vid >> 1));
+    float2 px = p.dstRect.xy + corner * p.dstRect.zw;
+    VOut o;
+    o.position = float4(px.x / p.rtSize.x * 2.0 - 1.0, 1.0 - px.y / p.rtSize.y * 2.0, 0.0, 1.0);
+    o.uv = p.srcRect.xy + corner * p.srcRect.zw;
+    return o;
+}
+
+fragment float4 ymir_post_fs(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]],
+                             constant Params &p [[buffer(0)]]) {
+    float2 uv = in.uv;
+    float2 srcPos = (uv - p.srcRect.xy) / p.srcRect.zw; // 0..1 across the source region
+
+    if (p.sharpK > 0.0) {
+        // Keep the middle of every source pixel flat and only blend across the border to the next one
+        float2 pos = srcPos * p.contentSize;
+        float2 base = floor(pos);
+        float2 f = clamp((fract(pos) - 0.5) * p.sharpK + 0.5, 0.0, 1.0);
+        uv = p.srcRect.xy + ((base + f) / p.contentSize) * p.srcRect.zw;
+    }
+
+    float3 c = tex.sample(smp, uv).rgb;
+
+    if (p.sharpness > 0.0) {
+        float2 texel = 1.0 / float2(tex.get_width(), tex.get_height());
+        float3 blur = tex.sample(smp, uv + float2(texel.x, 0.0)).rgb + tex.sample(smp, uv - float2(texel.x, 0.0)).rgb +
+                      tex.sample(smp, uv + float2(0.0, texel.y)).rgb + tex.sample(smp, uv - float2(0.0, texel.y)).rgb;
+        blur *= 0.25;
+        c = clamp(c + (c - blur) * p.sharpness * 2.0, 0.0, 1.0);
+    }
+
+    if (p.scanlines > 0.0) {
+        // Bright in the middle of each source row, darker toward the gap between rows
+        float y = fract(srcPos.y * p.contentSize.y);
+        float beam = 1.0 - pow(abs(y * 2.0 - 1.0), 3.0);
+        float w = mix(1.0, 0.25 + 0.75 * beam, p.scanlines);
+        c *= w * mix(1.0, 1.2, p.scanlines); // brighten a little to make up for the dark gaps
+    }
+
+    if (p.mask > 0.0) {
+        // Aperture grille: red, green and blue stripes, three pixels per triad
+        uint col = uint(in.position.x) % 3u;
+        const float dim = 0.55;
+        float3 stripe = float3(col == 0u ? 1.0 : dim, col == 1u ? 1.0 : dim, col == 2u ? 1.0 : dim);
+        stripe /= (1.0 + 2.0 * dim) / 3.0; // keep the overall brightness
+        c = mix(c, c * stripe, p.mask);
+    }
+
+    return float4(clamp(c, 0.0, 1.0), 1.0);
+}
+)MSL";
+
 struct alignas(16) DrawTextureConstants {
     Float4 srcRect;
     Float4 dstRect;
@@ -149,6 +234,46 @@ struct MetalGraphicsContext::Impl {
     MTLScissorRect scissorRect{};
 
     PresentMode presentMode = PresentMode::VSync;
+
+    // -- Post processing filters --
+
+    PostProcessParams postProcess;
+    id<MTLLibrary> postLibrary = nil;
+    bool postLibraryFailed = false;
+    std::unordered_map<MTLPixelFormat, id<MTLRenderPipelineState>> postPipelines;
+
+    id<MTLRenderPipelineState> GetPostPipeline(MTLPixelFormat format) {
+        auto it = postPipelines.find(format);
+        if (it != postPipelines.end()) {
+            return it->second;
+        }
+        if (postLibraryFailed) {
+            return nil;
+        }
+        if (postLibrary == nil) {
+            NSError *error = nil;
+            postLibrary = [device newLibraryWithSource:[NSString stringWithUTF8String:kPostProcessShaderSource]
+                                               options:nil
+                                                 error:&error];
+            if (postLibrary == nil) {
+                postLibraryFailed = true;
+                return nil;
+            }
+        }
+        MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
+        desc.label = @"[Ymir-GCtx] Post-process pipeline";
+        desc.vertexFunction = [postLibrary newFunctionWithName:@"ymir_post_vs"];
+        desc.fragmentFunction = [postLibrary newFunctionWithName:@"ymir_post_fs"];
+        desc.colorAttachments[0].pixelFormat = format;
+        NSError *error = nil;
+        id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (pso == nil) {
+            postLibraryFailed = true;
+            return nil;
+        }
+        postPipelines[format] = pso;
+        return pso;
+    }
 
     // -- MetalFX upscaling --
 
@@ -1014,6 +1139,35 @@ struct MetalGraphicsContext::Impl {
 
             id<MTLRenderCommandEncoder> rttEncoder = [rttCmdBuf renderCommandEncoderWithDescriptor:rttPassDesc];
 
+            // Use the filtering shader if any filter is on and it could be built
+            id<MTLRenderPipelineState> postPipeline =
+                postProcess.AnyActive() ? GetPostPipeline(dstTexture->resource.pixelFormat) : nil;
+            if (postPipeline != nil) {
+                PostConstants post{};
+                post.srcRect = {effSrcRect.x / srcTexWidth, effSrcRect.y / srcTexHeight, effSrcRect.w / srcTexWidth,
+                                effSrcRect.h / srcTexHeight};
+                post.dstRect = {dstRect.x, dstRect.y, dstRect.w, dstRect.h};
+                post.renderTargetSize = {(float)dstTexture->spec.width, (float)dstTexture->spec.height};
+                post.contentSize = {effSrcRect.w, effSrcRect.h};
+                post.sharpness = std::clamp(postProcess.sharpness, 0.0f, 1.0f);
+                post.scanlines = std::clamp(postProcess.scanlines, 0.0f, 1.0f);
+                post.mask = std::clamp(postProcess.mask, 0.0f, 1.0f);
+                post.sharpK = postProcess.sharpPixels ? std::max(1.0f, dstRect.w / std::max(effSrcRect.w, 1.0f)) : 0.0f;
+
+                [rttEncoder setRenderPipelineState:postPipeline];
+                [rttEncoder setVertexBytes:&post length:sizeof(post) atIndex:0];
+                [rttEncoder setFragmentBytes:&post length:sizeof(post) atIndex:0];
+                [rttEncoder setFragmentTexture:srcResource atIndex:0];
+                // Sharp pixel scaling needs bilinear filtering to blend the borders
+                [rttEncoder setFragmentSamplerState:((useNearest && !postProcess.sharpPixels) ? smpNearest : smpLinear)
+                                            atIndex:0];
+                [rttEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                [rttEncoder endEncoding];
+                [rttCmdBuf commit];
+                [rttCmdBuf waitUntilCompleted];
+                return {};
+            }
+
             [rttEncoder setRenderPipelineState:pipeline->pipelineState];
             [rttEncoder setVertexBuffer:vertexBuffer offset:0 atIndex:17];
 
@@ -1289,6 +1443,10 @@ util::VoidResult<> MetalGraphicsContext::SetPresentMode(PresentMode mode) {
     }
 #endif
     return {};
+}
+
+void MetalGraphicsContext::SetPostProcess(const PostProcessParams &params) {
+    m_impl->postProcess = params;
 }
 
 bool MetalGraphicsContext::SupportsUpscaling() const {

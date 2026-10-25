@@ -479,6 +479,12 @@ struct Settings {
 
         int metalFXMode; // 0=off, 1=spatial, 2=temporal (see gfx::UpscaleMode); iOS only
 
+        // Picture filters (Metal backend)
+        float sharpness;
+        float scanlines;
+        float maskStrength;
+        bool sharpPixels;
+
         util::Observable<bool> fullScreen;
         bool doubleClickToFullScreen;
 

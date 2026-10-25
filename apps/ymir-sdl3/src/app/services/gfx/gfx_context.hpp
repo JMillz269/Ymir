@@ -176,6 +176,9 @@ public:
         return false;
     }
 
+    /// @brief Sets the filters applied when the video output is scaled for display. Ignored if unsupported.
+    virtual void SetPostProcess(const PostProcessParams &params) {}
+
     /// @brief Selects the upscaler applied to the video output. Ignored if upscaling isn't supported.
     virtual void SetUpscaleMode(UpscaleMode mode) {}
 

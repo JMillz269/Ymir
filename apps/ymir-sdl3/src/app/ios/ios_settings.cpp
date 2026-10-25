@@ -28,6 +28,14 @@ namespace {
 
 } // namespace
 
+void ApplyVideoFilters(gfx::IGraphicsContext &graphics, const Settings &settings) {
+    graphics.SetUpscaleMode(static_cast<gfx::UpscaleMode>(std::clamp(settings.video.metalFXMode, 0, 2)));
+    graphics.SetPostProcess({.sharpness = settings.video.sharpness,
+                             .scanlines = settings.video.scanlines,
+                             .mask = settings.video.maskStrength,
+                             .sharpPixels = settings.video.sharpPixels});
+}
+
 void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Settings &settings, SettingsHooks hooks) {
     using namespace ymir;
 
@@ -56,6 +64,11 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
     };
 
     // -- Video --
+    auto applyFilters = [ctx, cfg] {
+        if (auto *graphics = ctx->serviceLocator.Get<services::GraphicsService>()) {
+            ApplyVideoFilters(graphics->GetGraphicsContext(), *cfg);
+        }
+    };
     addBool("video.forceIntegerScaling", [cfg] { return cfg->video.forceIntegerScaling; },
             [cfg](bool v) { cfg->video.forceIntegerScaling = v; });
     addBool("video.forceAspectRatio", [cfg] { return cfg->video.forceAspectRatio; },
@@ -97,12 +110,30 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
             [cfg](bool v) { cfg->video.swRenderer.threadedDeinterlacer = v; });
     addInt(
         "video.upscaling", [cfg] { return cfg->video.metalFXMode; },
-        [cfg, ctx](int v) {
+        [cfg, applyFilters](int v) {
             cfg->video.metalFXMode = std::clamp(v, 0, 2);
-            if (auto *graphics = ctx->serviceLocator.Get<services::GraphicsService>()) {
-                graphics->GetGraphicsContext().SetUpscaleMode(static_cast<gfx::UpscaleMode>(cfg->video.metalFXMode));
-            }
+            applyFilters();
         });
+    addFloat("video.sharpness", [cfg] { return cfg->video.sharpness; },
+             [cfg, applyFilters](float v) {
+                 cfg->video.sharpness = std::clamp(v, 0.0f, 1.0f);
+                 applyFilters();
+             });
+    addFloat("video.scanlines", [cfg] { return cfg->video.scanlines; },
+             [cfg, applyFilters](float v) {
+                 cfg->video.scanlines = std::clamp(v, 0.0f, 1.0f);
+                 applyFilters();
+             });
+    addFloat("video.mask", [cfg] { return cfg->video.maskStrength; },
+             [cfg, applyFilters](float v) {
+                 cfg->video.maskStrength = std::clamp(v, 0.0f, 1.0f);
+                 applyFilters();
+             });
+    addBool("video.sharpPixels", [cfg] { return cfg->video.sharpPixels; },
+            [cfg, applyFilters](bool v) {
+                cfg->video.sharpPixels = v;
+                applyFilters();
+            });
     tables->bools["video.upscalingSupported"] = {[ctx] {
                                                      auto *graphics = ctx->serviceLocator.Get<services::GraphicsService>();
                                                      return graphics != nullptr &&

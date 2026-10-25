@@ -3,6 +3,7 @@
 #include "host_interface.hpp"
 
 #include <app/settings.hpp>
+#include <app/services/gfx/gfx_context.hpp>
 #include <app/shared_context.hpp>
 
 #include <functional>
@@ -14,6 +15,9 @@ struct SettingsHooks {
     std::function<bool()> getTouchControls;
     std::function<void(bool)> setTouchControls;
 };
+
+/// @brief Applies the upscaler and picture filter settings to the graphics context.
+void ApplyVideoFilters(gfx::IGraphicsContext &graphics, const Settings &settings);
 
 /// @brief Fills in the getBool/setBool/getInt/setInt/getFloat/setFloat callbacks of the host interface.
 ///

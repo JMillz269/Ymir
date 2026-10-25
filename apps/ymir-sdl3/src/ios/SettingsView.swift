@@ -272,6 +272,17 @@ struct DisplaySettingsView: View {
             }
 
             Section {
+                Toggle("Sharp Pixels", isOn: store.bool("video.sharpPixels"))
+                SettingSlider(title: "Sharpening", value: store.float("video.sharpness"), range: 0...1, format: percent)
+                SettingSlider(title: "Scanlines", value: store.float("video.scanlines"), range: 0...1, format: percent)
+                SettingSlider(title: "Aperture Grille", value: store.float("video.mask"), range: 0...1, format: percent)
+            } header: {
+                Text("Picture Filters")
+            } footer: {
+                Text("Sharp Pixels keeps every game pixel crisp and only smooths its edges, which looks better than plain smooth scaling. Sharpening adds crispness after upscaling. Scanlines and the aperture grille imitate a CRT TV; they look best on a high resolution screen like yours.")
+            }
+
+            Section {
                 Toggle("GPU Renderer", isOn: store.bool("video.hardwareAcceleration"))
             } header: {
                 Text("Renderer")

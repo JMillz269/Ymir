@@ -1125,6 +1125,10 @@ void Settings::ResetToDefaults() {
     video.useFullRefreshRateWithVideoSync = false;
     video.reduceLatency = true;
     video.metalFXMode = 0;
+    video.sharpness = 0.0f;
+    video.scanlines = 0.0f;
+    video.maskStrength = 0.0f;
+    video.sharpPixels = false;
     video.fullScreen = false;
     video.doubleClickToFullScreen = false;
     video.borderlessFullScreen = true;
@@ -1624,6 +1628,13 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblVideo, "ReduceLatency", video.reduceLatency);
         Parse(tblVideo, "MetalFXMode", video.metalFXMode);
         video.metalFXMode = std::clamp(video.metalFXMode, 0, 2);
+        Parse(tblVideo, "Sharpness", video.sharpness);
+        Parse(tblVideo, "Scanlines", video.scanlines);
+        Parse(tblVideo, "MaskStrength", video.maskStrength);
+        Parse(tblVideo, "SharpPixels", video.sharpPixels);
+        video.sharpness = std::clamp(video.sharpness, 0.0f, 1.0f);
+        video.scanlines = std::clamp(video.scanlines, 0.0f, 1.0f);
+        video.maskStrength = std::clamp(video.maskStrength, 0.0f, 1.0f);
         Parse(tblVideo, "FullScreen", video.fullScreen);
         Parse(tblVideo, "DoubleClickToFullScreen", video.doubleClickToFullScreen);
         if (auto tblFullScreenDisplay = tblVideo["FullScreenDisplay"]) {
@@ -2056,6 +2067,10 @@ SettingsSaveResult Settings::Save() {
             {"UseFullRefreshRateWithVideoSync", video.useFullRefreshRateWithVideoSync},
             {"ReduceLatency", video.reduceLatency},
             {"MetalFXMode", video.metalFXMode},
+            {"Sharpness", video.sharpness},
+            {"Scanlines", video.scanlines},
+            {"MaskStrength", video.maskStrength},
+            {"SharpPixels", video.sharpPixels},
             {"FullScreen", video.fullScreen.Get()},
             {"DoubleClickToFullScreen", video.doubleClickToFullScreen},
             {"FullScreenDisplay", toml::table{{

@@ -124,6 +124,18 @@ enum class UpscaleMode {
     Temporal, ///< Upscaling that also uses previous frames (MetalFX temporal scaler).
 };
 
+/// @brief Filters applied to the emulated video output when it is scaled for display.
+struct PostProcessParams {
+    float sharpness = 0.0f; ///< Sharpening amount, 0.0 to 1.0.
+    float scanlines = 0.0f; ///< CRT scanline strength, 0.0 to 1.0.
+    float mask = 0.0f;      ///< CRT aperture grille strength, 0.0 to 1.0.
+    bool sharpPixels = false; ///< Scale with crisp pixel edges and smoothing only along the borders between pixels.
+
+    bool AnyActive() const {
+        return sharpness > 0.0f || scanlines > 0.0f || mask > 0.0f || sharpPixels;
+    }
+};
+
 /// @brief Possible outcomes of a frame presentation action.
 enum class PresentResult {
     /// @brief The frame was presented successfully.
