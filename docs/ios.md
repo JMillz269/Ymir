@@ -37,7 +37,7 @@ Import a BIOS first (Games tab banner or Settings > System). Files can also be c
 An on-screen Saturn control pad is drawn over the game: D-pad, A/B/C, X/Y/Z, L/R, Start and a Menu button. It is mapped to the default port 1 Control Pad binds, so it works out of the box. Fingers can slide between buttons and multi-touch works.
 
 - The **Menu** button on screen, or **Select/Back** on a controller, opens the in-game menu: resume, pause, fast forward, reset, disc tray, save states, screenshots, settings, a way back to the game library and **Close Game**. The game is paused while the menu is open.
-- **Customize Layout…** (in the in-game menu, or Settings > Controls) lets you drag every control anywhere, tap one to resize it, snap controls to a grid, change the size of all controls and their opacity, or reset. Portrait and landscape have separate layouts, saved in `state/touch_layout.cfg`.
+- **Customize Layout…** (in the in-game menu, or Settings > Controls) lets you drag every control anywhere, drag and resize the game screen itself, tap one to resize it, snap controls to a grid, change the size of all controls and their opacity, or reset. Portrait and landscape have separate layouts, saved in `state/touch_layout.cfg`.
 - **Settings > Controls > On-Screen Controls** turns the overlay off.
 - The overlay hides itself while a hardware controller is connected. MFi, Xbox, PlayStation and other controllers supported by iOS work through SDL's gamepad support and use the same default binds as on desktop.
 

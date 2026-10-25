@@ -37,7 +37,7 @@ struct TouchEditorBar: View {
             }
 
             sizeRow(
-                title: selected >= 0 ? "Selected" : "Tap a control",
+                title: selected >= 0 ? "Selected" : "Tap a control or the screen",
                 value: store.float("touch.selectedScale", default: 1),
                 range: 0.4...2.5
             )
@@ -63,7 +63,7 @@ struct TouchEditorBar: View {
         HStack(spacing: 12) {
             Text(title)
                 .font(.footnote)
-                .frame(width: 92, alignment: .leading)
+                .frame(width: 150, alignment: .leading)
             Slider(value: value, in: range)
             Text(String(format: "%.0f%%", value.wrappedValue * 100))
                 .font(.footnote.monospacedDigit())

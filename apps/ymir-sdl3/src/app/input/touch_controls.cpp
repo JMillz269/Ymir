@@ -93,6 +93,7 @@ void TouchControls::ComputeLayout(SDL_Window *window, ImVec2 displaySize) {
     const float safeH = std::max(1.0f, bottom - top);
     const float unit = std::min(safeW, safeH);
     m_safeRect = {left, top, right, bottom};
+    m_displaySize = displaySize;
     m_gridSize = unit / 16.0f;
 
     // Default layout, which also gives the base size of every control
@@ -171,6 +172,9 @@ void TouchControls::ComputeLayout(SDL_Window *window, ImVec2 displaySize) {
 }
 
 ImVec2 TouchControls::ElementCenter(int element) const {
+    if (element == kScreenElement) {
+        return {m_screenRect.x + m_screenRect.z * 0.5f, m_screenRect.y + m_screenRect.w * 0.5f};
+    }
     return element == ElDPad ? m_layout.dpadCenter : m_layout.centers[A + element - 1];
 }
 
@@ -201,6 +205,10 @@ void TouchControls::ProcessEditingFingerEvent(const SDL_Event &evt, ImVec2 pos) 
             break; // one finger moves a control at a time
         }
         m_selected = HitTestElement(pos);
+        if (m_selected < 0 && pos.x >= m_screenRect.x && pos.x <= m_screenRect.x + m_screenRect.z &&
+            pos.y >= m_screenRect.y && pos.y <= m_screenRect.y + m_screenRect.w) {
+            m_selected = kScreenElement; // controls are on top of the game screen
+        }
         if (m_selected >= 0) {
             const ImVec2 center = ElementCenter(m_selected);
             m_dragOffset = {center.x - pos.x, center.y - pos.y};
@@ -219,9 +227,17 @@ void TouchControls::ProcessEditingFingerEvent(const SDL_Event &evt, ImVec2 pos) 
                 cx = std::clamp(cx, left, right);
                 cy = std::clamp(cy, top, bottom);
             }
-            Placement &pl = m_placements[m_orientation][m_selected];
-            pl.x = (cx - left) / std::max(1.0f, right - left);
-            pl.y = (cy - top) / std::max(1.0f, bottom - top);
+            if (m_selected == kScreenElement) {
+                // The game screen is positioned relative to the whole window rather than the safe area
+                ScreenPlacement &sp = m_screenPlacements[m_orientation];
+                sp.custom = true;
+                sp.x = std::clamp(cx / std::max(1.0f, m_displaySize.x), 0.0f, 1.0f);
+                sp.y = std::clamp(cy / std::max(1.0f, m_displaySize.y), 0.0f, 1.0f);
+            } else {
+                Placement &pl = m_placements[m_orientation][m_selected];
+                pl.x = (cx - left) / std::max(1.0f, right - left);
+                pl.y = (cy - top) / std::max(1.0f, bottom - top);
+            }
             MarkDirty();
         }
         break;
@@ -256,11 +272,25 @@ void TouchControls::SetEditing(bool editing) {
 }
 
 float TouchControls::GetSelectedScale() const {
+    if (m_selected == kScreenElement) {
+        return m_screenPlacements[m_orientation].scale;
+    }
     return m_selected >= 0 ? m_placements[m_orientation][m_selected].scale : 1.0f;
 }
 
 void TouchControls::SetSelectedScale(float scale) {
-    if (m_selected >= 0) {
+    if (m_selected == kScreenElement) {
+        ScreenPlacement &sp = m_screenPlacements[m_orientation];
+        sp.scale = std::clamp(scale, 0.3f, 3.0f);
+        // Resizing keeps the current position, whether the screen was moved or not
+        if (!sp.custom) {
+            sp.custom = true;
+            const ImVec2 center = ElementCenter(kScreenElement);
+            sp.x = std::clamp(center.x / std::max(1.0f, m_displaySize.x), 0.0f, 1.0f);
+            sp.y = std::clamp(center.y / std::max(1.0f, m_displaySize.y), 0.0f, 1.0f);
+        }
+        MarkDirty();
+    } else if (m_selected >= 0) {
         m_placements[m_orientation][m_selected].scale = std::clamp(scale, 0.4f, 2.5f);
         MarkDirty();
     }
@@ -281,7 +311,20 @@ void TouchControls::SetSnapToGrid(bool snap) {
     MarkDirty();
 }
 
+std::optional<TouchControls::ScreenOverride> TouchControls::GetScreenOverride() const {
+    const ScreenPlacement &sp = m_screenPlacements[m_orientation];
+    if (!sp.custom) {
+        return std::nullopt;
+    }
+    return ScreenOverride{sp.x, sp.y, sp.scale};
+}
+
+void TouchControls::SetScreenRect(ImVec2 pos, ImVec2 size) {
+    m_screenRect = {pos.x, pos.y, size.x, size.y};
+}
+
 void TouchControls::ResetLayout() {
+    m_screenPlacements[m_orientation] = {};
     // Placements are rebuilt from the defaults on the next layout computation
     m_placementsReady[m_orientation] = false;
     m_globalScale = 1.0f;
@@ -325,6 +368,16 @@ void TouchControls::Load() {
             if (ss >> v) {
                 m_snapToGrid = v != 0;
             }
+        } else if (key == "s") {
+            int orientation, custom;
+            ScreenPlacement sp;
+            if ((ss >> orientation >> custom >> sp.x >> sp.y >> sp.scale) && orientation >= 0 && orientation < 2) {
+                sp.custom = custom != 0;
+                sp.x = std::clamp(sp.x, 0.0f, 1.0f);
+                sp.y = std::clamp(sp.y, 0.0f, 1.0f);
+                sp.scale = std::clamp(sp.scale, 0.3f, 3.0f);
+                m_screenPlacements[orientation] = sp;
+            }
         } else if (key == "p") {
             int orientation, element;
             Placement pl;
@@ -354,6 +407,10 @@ void TouchControls::Save() {
     out << "scale " << m_globalScale << "\n";
     out << "alpha " << m_opacity << "\n";
     out << "snap " << (m_snapToGrid ? 1 : 0) << "\n";
+    for (int o = 0; o < 2; ++o) {
+        const ScreenPlacement &sp = m_screenPlacements[o];
+        out << "s " << o << " " << (sp.custom ? 1 : 0) << " " << sp.x << " " << sp.y << " " << sp.scale << "\n";
+    }
     for (int o = 0; o < 2; ++o) {
         if (!m_placementsReady[o]) {
             continue;
@@ -478,6 +535,19 @@ void TouchControls::Draw(ImDrawList *drawList, std::optional<ImTextureID> atlas)
         }
         drawList->AddRect({m_safeRect.x, m_safeRect.y}, {m_safeRect.z, m_safeRect.w}, IM_COL32(255, 255, 255, 70), 0.0f,
                           0, 1.5f);
+
+        // The game screen can be moved and resized too
+        if (m_screenRect.z > 1.0f && m_screenRect.w > 1.0f) {
+            const ImVec2 p0{m_screenRect.x, m_screenRect.y};
+            const ImVec2 p1{m_screenRect.x + m_screenRect.z, m_screenRect.y + m_screenRect.w};
+            if (m_selected == kScreenElement) {
+                drawList->AddRectFilled(p0, p1, selectedFill);
+                drawList->AddRect(p0, p1, selectedOutline, 0.0f, 0, 3.0f);
+            } else {
+                drawList->AddRect(p0, p1, IM_COL32(255, 255, 255, 110), 0.0f, 0, 1.5f);
+            }
+            drawList->AddText({p0.x + 8.0f, p0.y + 6.0f}, IM_COL32(255, 255, 255, 170), "GAME SCREEN");
+        }
     }
 
     const int alpha = (int)std::clamp(m_opacity * 255.0f, 0.0f, 255.0f);

@@ -3587,6 +3587,15 @@ void App::RunEmulator() {
                 }
             }
 
+#if YMIR_PLATFORM_IOS
+            // The player may have resized and moved the game screen in the layout editor
+            const std::optional<input::TouchControls::ScreenOverride> screenOverride = touchControls.GetScreenOverride();
+            if (screenOverride) {
+                scaledWidth = std::max(32, (int)std::lround(scaledWidth * screenOverride->scale));
+                scaledHeight = std::max(32, (int)std::lround(scaledHeight * screenOverride->scale));
+            }
+#endif
+
             // Render framebuffer to display texture
             renderDispTexture(scaledWidth, scaledHeight);
 
@@ -3624,7 +3633,26 @@ void App::RunEmulator() {
                 }
                 dstRect.y = floorf(safeTop + menuBarHeight);
             }
+#if YMIR_PLATFORM_IOS
+            if (screenOverride) {
+                dstRect.x = floorf(screenOverride->centerX * (float)ww - dstRect.w * 0.5f);
+                dstRect.y = floorf(screenOverride->centerY * (float)wh + menuBarHeight - dstRect.h * 0.5f);
+            }
+#endif
             m_graphicsService.DrawTextureRotated(dispTexture, srcRect, dstRect, rotAngle);
+
+#if YMIR_PLATFORM_IOS
+            {
+                // The editor works in the same units as touch input
+                float density = 1.0f;
+    #if defined(__APPLE__)
+                density = SDL_GetWindowPixelDensity(screen.window);
+    #endif
+                density = std::max(density, 0.01f);
+                touchControls.SetScreenRect({dstRect.x / density, dstRect.y / density},
+                                            {dstRect.w / density, dstRect.h / density});
+            }
+#endif
 
             screen.scale = scale;
             screen.dCenterX = dstRect.x + dstRect.w * 0.5f;

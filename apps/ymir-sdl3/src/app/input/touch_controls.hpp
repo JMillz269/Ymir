@@ -68,8 +68,20 @@ public:
     }
     void SetSnapToGrid(bool snap);
 
-    /// @brief Restores the default placement and sizes of the controls in the current orientation.
+    /// @brief Restores the default placement and sizes of the controls and of the game screen in the current
+    /// orientation.
     void ResetLayout();
+
+    /// @brief Where the player moved the game screen to, if they did, in the current orientation.
+    struct ScreenOverride {
+        float centerX; ///< center of the screen, from 0 to 1 across the window
+        float centerY;
+        float scale; ///< size multiplier relative to the normal size
+    };
+    std::optional<ScreenOverride> GetScreenOverride() const;
+
+    /// @brief Tells the editor where the game screen is drawn, so that it can be selected and moved.
+    void SetScreenRect(ImVec2 pos, ImVec2 size);
 
     /// @brief Set by the main menu while a hardware gamepad is connected to avoid a ghost player 0.
     void SetHardwareGamepadPresent(bool present);
@@ -139,6 +151,16 @@ private:
 
     using Placements = std::array<Placement, ElCount>;
 
+    // The game screen is selected and edited like an element, with this index
+    static constexpr int kScreenElement = ElCount;
+
+    struct ScreenPlacement {
+        bool custom = false;
+        float x = 0.5f; // center, relative to the window
+        float y = 0.5f;
+        float scale = 1.0f;
+    };
+
     struct Layout {
         ImVec2 dpadCenter;
         float dpadRadius;
@@ -179,6 +201,9 @@ private:
     bool m_dragging = false;
     ImVec2 m_dragOffset{};
     ImVec4 m_safeRect{}; // left, top, right, bottom
+    ImVec2 m_displaySize{};
+    std::array<ScreenPlacement, 2> m_screenPlacements{};
+    ImVec4 m_screenRect{}; // x, y, width, height of the game screen as drawn
     float m_gridSize = 0.0f;
     bool m_dirty = false;
     std::chrono::steady_clock::time_point m_dirtyTime;
