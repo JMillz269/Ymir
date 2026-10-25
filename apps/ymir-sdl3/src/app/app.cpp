@@ -2243,8 +2243,8 @@ void App::RunEmulator() {
             screen.texScale = screen.DisplayFramebufferScale();
             const gfx::IRect area{.x = 0,
                                   .y = 0,
-                                  .w = (int)(screen.width * screen.texScale),
-                                  .h = (int)(screen.height * screen.texScale)};
+                                  .w = screen.width * screen.texScale,
+                                  .h = screen.height * screen.texScale};
             m_graphicsService.UpdateTexture(
                 swFbTexture, &area, [&](void *data, size_t pitch) { screen.CopyFramebufferToTexture(data, pitch); });
         }
