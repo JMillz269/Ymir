@@ -151,6 +151,7 @@ SH2Recompiler::SH2Recompiler(SH2 &sh2, sys::SH2Bus &bus)
         }
     }
     m_chunkOffset = offset;
+    m_optionsGeneration = g_optionsGeneration.load(std::memory_order_relaxed);
     m_chunkSize = g_chunkSize;
     {
         const size_t bytes = (sizeof(Block) * kBlockTableSize + 4095) & ~size_t{4095};
