@@ -78,6 +78,21 @@ public:
     /// @brief Retrieves the memory holding this recompiler's block table. For tests.
     void GetBlockTableRegion(void **base, size_t *size) const;
 
+    /// @brief Totals over every recompiler in the process, for showing in the user interface.
+    struct GlobalStats {
+        uint64 blocksCompiled = 0;
+        uint64 cacheFlushes = 0;
+        uint64 bytesGenerated = 0;
+        uint64 instructionsTranslated = 0;
+        uint64 compileNanoseconds = 0;
+        uint64 slowestCompileNanoseconds = 0;
+    };
+    static GlobalStats GetGlobalStats();
+
+    /// @brief Turns optimizations on or off for every recompiler; generated code is discarded and compiled again.
+    /// Meant for finding out which one is responsible when something is slow or wrong.
+    static void SetOptions(bool registerCache, bool blockLinking);
+
     struct Stats {
         uint64 blocksCompiled = 0;
         uint64 blocksExecuted = 0;
@@ -93,9 +108,9 @@ public:
     }
 
 private:
-    static constexpr uint32 kMaxInstructions = 64;
+    static constexpr uint32 kMaxInstructions = 32;
     // (rounded up to 16 bytes: blocks are compared in chunks of 16 when one block jumps to another)
-    static constexpr uint32 kMaxBlockBytes = ((kMaxInstructions + 1) * 2 + 15) & ~15u;
+    static constexpr uint32 kMaxBlockBytes = ((kMaxInstructions + 1) * 2 + 2 + 15) & ~15u;
     static constexpr uint32 kBlockTableSize = 8192;
 
     struct Block {
@@ -123,6 +138,7 @@ private:
     }
 
     void Compile(Block &block, uint32 pc, const uint8 *src, uint32 bytesAvailable);
+    void CompileBlock(Block &block, uint32 pc, const uint8 *src, uint32 bytesAvailable);
 
     SH2 &m_sh2;
     sys::SH2Bus &m_bus;
@@ -134,6 +150,7 @@ private:
     size_t m_chunkUsed = 0;
 
     // The longword the interpreter would have prefetched when a block was left right after a write to its own code
+    uint32 m_optionsGeneration = 0;
     bool m_prefetchValid = false;
     uint32 m_prefetch = 0;
     uint32 m_prefetchPc = 0; // the PC the longword is meant for

@@ -602,6 +602,7 @@ struct PerformanceSettingsView: View {
     @ObservedObject private var store = SettingStore.shared
     @State private var jitAvailable = YmirHost.jitAvailable
     @State private var jitStatus = YmirHost.jitStatus
+    @State private var jitReport = YmirHost.jitReport
 
     var body: some View {
         Form {
@@ -634,6 +635,18 @@ struct PerformanceSettingsView: View {
                     Text(jitStatus)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+                if jitAvailable && store.bool("system.useRecompiler").wrappedValue {
+                    Text(jitReport)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+                            jitReport = YmirHost.jitReport
+                        }
+                }
+                if jitAvailable && store.bool("system.useRecompiler").wrappedValue {
+                    Toggle("Keep Registers in CPU Registers", isOn: store.bool("system.jitRegisterCache", default: true))
+                    Toggle("Link Blocks Directly", isOn: store.bool("system.jitBlockLinking", default: true))
                 }
                 if !jitAvailable {
                     Button {

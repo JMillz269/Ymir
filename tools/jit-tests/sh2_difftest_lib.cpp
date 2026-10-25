@@ -234,6 +234,16 @@ void t_block_table(void *handle, uint64 *base, uint64 *size) {
     *size = sz;
 }
 
+void t_global_stats(uint64 *out) {
+    const auto g = sh2::SH2Recompiler::GetGlobalStats();
+    out[0] = g.blocksCompiled;
+    out[1] = g.cacheFlushes;
+    out[2] = g.bytesGenerated;
+    out[3] = g.instructionsTranslated;
+    out[4] = g.compileNanoseconds;
+    out[5] = g.slowestCompileNanoseconds;
+}
+
 void t_pool_region(uint64 *base, uint64 *size) {
     uint8 *b = nullptr;
     size_t sz = 0;

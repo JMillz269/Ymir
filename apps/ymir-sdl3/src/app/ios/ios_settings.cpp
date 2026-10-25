@@ -1,5 +1,7 @@
 #include "ios_settings.hpp"
 
+#include <ymir/hw/sh2/sh2_recompiler.hpp>
+
 #include <app/events/emu_event_factory.hpp>
 #include <app/events/gui_event_factory.hpp>
 #include <app/services/graphics_service.hpp>
@@ -179,6 +181,16 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
             });
     addBool("system.useRecompiler", [cfg] { return cfg->system.useSH2Recompiler.Get(); },
             [cfg](bool v) { cfg->system.useSH2Recompiler = v; });
+    addBool("system.jitRegisterCache", [cfg] { return cfg->system.jitRegisterCache; },
+            [cfg](bool v) {
+                cfg->system.jitRegisterCache = v;
+                ymir::sh2::SH2Recompiler::SetOptions(cfg->system.jitRegisterCache, cfg->system.jitBlockLinking);
+            });
+    addBool("system.jitBlockLinking", [cfg] { return cfg->system.jitBlockLinking; },
+            [cfg](bool v) {
+                cfg->system.jitBlockLinking = v;
+                ymir::sh2::SH2Recompiler::SetOptions(cfg->system.jitRegisterCache, cfg->system.jitBlockLinking);
+            });
     addInt("system.sh2ClockFactor", [cfg] { return static_cast<int>(cfg->system.sh2ClockFactor.Get()); },
            [cfg](int v) {
                cfg->system.sh2ClockFactor =

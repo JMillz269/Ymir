@@ -6,6 +6,8 @@
 #include <ymir/jit/jit_memory.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <bit>
 #include <cstddef>
 #include <cstdio>
@@ -28,11 +30,27 @@ namespace {
 
     // Executable memory is shared by every recompiler in the process. On iOS with TXM only one region can ever be
     // prepared, so each recompiler takes a chunk of a single pool instead of creating its own.
+    // On iOS with TXM the pool can only be prepared once per process, so its size has to be one that is known to work.
     constexpr size_t kPoolSize = 64u * 1024u * 1024u;
-    constexpr size_t kChunkSize = 16u * 1024u * 1024u;
+    constexpr size_t kBigPoolSize = 256u * 1024u * 1024u;
+
+    std::atomic<uint64> g_statBlocks{0}, g_statFlushes{0}, g_statBytes{0}, g_statInstructions{0}, g_statCompileNs{0},
+        g_statSlowestNs{0};
+
+    // Optimizations that can be switched off; changing them bumps the generation, which makes every recompiler discard
+    // its code. The environment variables are for experiments.
+    std::atomic<bool> g_registerCache{std::getenv("YMIR_JIT_NOCACHE") == nullptr};
+    std::atomic<bool> g_blockLinking{std::getenv("YMIR_JIT_NOCHAIN") == nullptr};
+    std::atomic<uint32> g_optionsGeneration{1};
+    uint32 CacheMinUses() {
+        static const uint32 value =
+            std::getenv("YMIR_JIT_CACHEMIN") ? static_cast<uint32>(std::atoi(std::getenv("YMIR_JIT_CACHEMIN"))) : 6u;
+        return value;
+    }
 
     std::mutex g_poolMutex;
     jit::JitMemory g_pool;
+    size_t g_chunkSize = 0;
     std::vector<size_t> g_freeChunks; // chunks returned by destroyed recompilers
 
     // Words reserved for assembling a block before it is copied into executable memory
@@ -112,21 +130,28 @@ SH2Recompiler::SH2Recompiler(SH2 &sh2, sys::SH2Bus &bus)
     : m_sh2(sh2)
     , m_bus(bus) {
     std::lock_guard lock{g_poolMutex};
-    if (!g_pool.IsInitialized() && !g_pool.Initialize(kPoolSize)) {
-        return;
+    if (!g_pool.IsInitialized()) {
+        const bool txm = jit::ProbeJit().txmDevice;
+        if (!txm && g_pool.Initialize(kBigPoolSize)) {
+            // plenty of room
+        } else if (!g_pool.Initialize(kPoolSize)) {
+            return;
+        }
+        // Master and slave SH-2 get half each (a little less, so that both fit)
+        g_chunkSize = (g_pool.Capacity() / 2 - 64u * 1024u) & ~size_t{0xFFFF};
     }
     size_t offset;
     if (!g_freeChunks.empty()) {
         offset = g_freeChunks.back();
         g_freeChunks.pop_back();
     } else {
-        offset = g_pool.Allocate(kChunkSize);
+        offset = g_pool.Allocate(g_chunkSize);
         if (offset == SIZE_MAX) {
             return;
         }
     }
     m_chunkOffset = offset;
-    m_chunkSize = kChunkSize;
+    m_chunkSize = g_chunkSize;
     {
         const size_t bytes = (sizeof(Block) * kBlockTableSize + 4095) & ~size_t{4095};
         Block *table = static_cast<Block *>(std::aligned_alloc(4096, bytes));
@@ -162,6 +187,19 @@ void SH2Recompiler::Flush() {
     }
     m_chunkUsed = 0;
     ++m_stats.cacheFlushes;
+    g_statFlushes.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SH2Recompiler::SetOptions(bool registerCache, bool blockLinking) {
+    if (g_registerCache.exchange(registerCache) != registerCache | g_blockLinking.exchange(blockLinking) != blockLinking) {
+        g_optionsGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+SH2Recompiler::GlobalStats SH2Recompiler::GetGlobalStats() {
+    return {g_statBlocks.load(std::memory_order_relaxed), g_statFlushes.load(std::memory_order_relaxed),
+            g_statBytes.load(std::memory_order_relaxed), g_statInstructions.load(std::memory_order_relaxed),
+            g_statCompileNs.load(std::memory_order_relaxed), g_statSlowestNs.load(std::memory_order_relaxed)};
 }
 
 void SH2Recompiler::GetBlockTableRegion(void **base, size_t *size) const {
@@ -182,19 +220,21 @@ uint64 SH2Recompiler::StepThunk(SH2 *sh2, uint32 instr) {
 uint64 SH2Recompiler::CodeUnchangedThunk(SH2 *sh2, uint32 blockPc, uint32 offset, uint32 storePc) {
     SH2Recompiler *self = sh2->m_recompiler.get();
     const Block &block = self->m_blocks[SlotFor(blockPc)];
-    if (block.pc != blockPc || offset > block.byteLen) {
+    if (block.pc != blockPc) {
         return 0;
     }
     const uint8 *src = self->m_bus.GetArrayPointer(blockPc);
     if (src == nullptr) {
         return 0;
     }
-    const bool unchanged = std::memcmp(src + offset, block.bytes.data() + offset, block.byteLen - offset) == 0;
+    const bool unchanged =
+        offset >= block.byteLen || std::memcmp(src + offset, block.bytes.data() + offset, block.byteLen - offset) == 0;
 
     // If the write came from an instruction at an aligned address, the interpreter has already fetched the longword it
     // belongs to, so the instruction after it stays the old one even if that is what was overwritten. Remember it for
     // when the block is left there.
-    if (storePc != 0xFFFFFFFFu && (storePc & 3u) == 0 && storePc >= blockPc && storePc - blockPc + 4 <= block.byteLen) {
+    const uint32 knownLen = block.paddedLen != 0 ? block.paddedLen : block.byteLen;
+    if (storePc != 0xFFFFFFFFu && (storePc & 3u) == 0 && storePc >= blockPc && storePc - blockPc + 4 <= knownLen) {
         const uint32 pairOffset = storePc - blockPc + 2;
         if (std::memcmp(src + pairOffset, block.bytes.data() + pairOffset, 2) != 0) {
             const uint8 *b = block.bytes.data() + (storePc - blockPc);
@@ -366,6 +406,11 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
         return 0;
     }
 
+    if (m_optionsGeneration != g_optionsGeneration.load(std::memory_order_relaxed)) {
+        m_optionsGeneration = g_optionsGeneration.load(std::memory_order_relaxed);
+        Flush();
+    }
+
     const uint32 pc = m_sh2.PC;
     if ((pc & 1u) != 0) {
         return 0;
@@ -411,6 +456,16 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
 }
 
 void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 bytesAvailable) {
+    const auto started = std::chrono::steady_clock::now();
+    CompileBlock(block, pc, src, bytesAvailable);
+    const uint64 ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count();
+    g_statCompileNs.fetch_add(ns, std::memory_order_relaxed);
+    uint64 slowest = g_statSlowestNs.load(std::memory_order_relaxed);
+    while (ns > slowest && !g_statSlowestNs.compare_exchange_weak(slowest, ns, std::memory_order_relaxed)) {
+    }
+}
+
+void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint32 bytesAvailable) {
     struct Insn {
         uint16 word;
         OpcodeType opcode;
@@ -438,6 +493,13 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     bool done = false;
     const uint32 maxBytes = std::min<uint32>(bytesAvailable, kMaxInstructions * 2);
     for (uint32 offset = 0; offset + 2 <= maxBytes && !done; offset += 2) {
+        // Code that already has a block of its own is not translated again: this block ends here and continues in it
+        if (offset > 0 && !inDelaySlot) {
+            const Block &existing = m_blocks[SlotFor(pc + offset)];
+            if (existing.pc == pc + offset && existing.fn != nullptr) {
+                break;
+            }
+        }
         const uint16 word = static_cast<uint16>((src[offset] << 8) | src[offset + 1]);
         Insn insn{.word = word, .opcode = OpcodeType::Illegal, .kind = Kind::Helper, .pc = pc + offset};
         if (inDelaySlot) {
@@ -475,7 +537,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         block.byteLen = std::min<uint32>(block.byteLen, bytesAvailable);
         std::memcpy(block.bytes.data(), src, block.byteLen);
         // Other blocks that jump straight into this one compare it in chunks of 16 bytes
-        const uint32 padded = (block.byteLen + 15) & ~15u;
+        const uint32 padded = (block.byteLen + 2 + 15) & ~15u; // (at least the instruction after the block)
         if (padded <= bytesAvailable) {
             std::memcpy(block.bytes.data() + block.byteLen, src + block.byteLen, padded - block.byteLen);
             block.paddedLen = padded;
@@ -691,7 +753,9 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             // The interpreter fetches whole longwords: an instruction at an aligned address has already fetched the
             // word after it, so changes to that one are not noticed
             const uint32 firstChecked = hasLoop ? 0 : k + 1 + ((ipc & 2u) == 0 ? 1 : 0);
-            if ((hasLoop || firstChecked < count) && (mem.first.write || mem.second.write)) {
+            // (a store at the end of the block can still rewrite the instruction after it, which the interpreter has fetched)
+            const bool pairBeyondBlock = (ipc & 2u) == 0 && k + 1 == count;
+            if ((hasLoop || firstChecked < count || pairBeyondBlock) && (mem.first.write || mem.second.write)) {
                 a.Mov(Sz::X, X0, kThis);
                 a.MovImm(Sz::W, X1, pc);
                 a.MovImm(Sz::W, X2, firstChecked * 2);
@@ -724,7 +788,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     // need no extra bookkeeping qualify: an aligned instruction in the same bus page. Returns false (emitting nothing)
     // if the target doesn't qualify. The PC must already be stored if `pcStored`.
     auto emitChain = [&](uint32 targetPc, bool pcStored, bool checkIntr) -> bool {
-        if (hasLoadSr || (targetPc & 3u) != 0 || (targetPc >> 16) != (pc >> 16) || targetPc == pc) {
+        if (!g_blockLinking.load(std::memory_order_relaxed) || hasLoadSr || (targetPc & 3u) != 0 || (targetPc >> 16) != (pc >> 16) || targetPc == pc) {
             return false;
         }
         Label *failLabel = &epilogue;
@@ -1218,7 +1282,8 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         if (!load) {
             // A write into this block's own code: if instructions ahead of this one changed, leave the block
             const uint32 firstChecked = hasLoop ? 0 : k + 1 + ((ipc & 2u) == 0 ? 1 : 0);
-            if (hasLoop || firstChecked < count) {
+            const bool pairBeyondBlock = (ipc & 2u) == 0 && k + 1 == count;
+            if (hasLoop || firstChecked < count || pairBeyondBlock) {
                 codeChecks.emplace_back();
                 CodeCheck &check = codeChecks.back();
                 check.pcNext = ipc + 2;
@@ -1228,7 +1293,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 a.Add(Sz::X, 2, 7, 5, Shift::LSL, 0);
                 a.Sub(Sz::X, 2, 2, kCodeBase);
                 a.AddImm(Sz::X, 2, 2, size - 1);
-                a.CmpImm(Sz::X, 2, count * 2 + size - 1);
+                a.CmpImm(Sz::X, 2, count * 2 + 2 + size - 1);
                 a.BCond(Cond::CC, check.entry);
                 a.Bind(check.back);
             }
@@ -2246,11 +2311,11 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     for (uint32 hostReg = kFirstCached; hostReg <= kLastCached; ++hostReg) {
         uint32 best = 16;
         for (uint32 r = 0; r < 16; ++r) {
-            if (cacheHost[r] < 0 && useCount[r] >= 2 && (best == 16 || useCount[r] > useCount[best])) {
+            if (cacheHost[r] < 0 && useCount[r] >= (hasLoop ? std::max<uint32>(CacheMinUses() / 2, 2u) : CacheMinUses()) && (best == 16 || useCount[r] > useCount[best])) {
                 best = r;
             }
         }
-        if (best == 16) {
+        if (best == 16 || !g_registerCache.load(std::memory_order_relaxed)) {
             break;
         }
         cacheHost[best] = static_cast<sint32>(hostReg);
@@ -2281,6 +2346,9 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         block.chainEntry = g_pool.ExecPtr(offset) + chainWord * sizeof(uint32);
     }
     ++m_stats.blocksCompiled;
+    g_statBlocks.fetch_add(1, std::memory_order_relaxed);
+    g_statBytes.fetch_add(sizeBytes, std::memory_order_relaxed);
+    g_statInstructions.fetch_add(count, std::memory_order_relaxed);
 }
 
 } // namespace ymir::sh2

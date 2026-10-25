@@ -22,6 +22,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Re-evaluated on every access: it changes once a JIT enabler attaches to the app.
 @property(class, nonatomic, readonly) BOOL jitAvailable;
 @property(class, nonatomic, readonly) NSString *jitStatus;
+/// Counters of the recompiler (blocks compiled, cache flushes, ...), for diagnosing slowdowns.
+@property(class, nonatomic, readonly) NSString *jitReport;
 
 @property(class, nonatomic) BOOL paused;
 @property(class, nonatomic) BOOL fastForward;

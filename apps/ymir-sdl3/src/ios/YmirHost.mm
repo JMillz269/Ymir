@@ -2,6 +2,7 @@
 
 #include <app/ios/host_interface.hpp>
 
+#include <ymir/hw/sh2/sh2_recompiler.hpp>
 #include <ymir/jit/jit_memory.hpp>
 
 #include <string>
@@ -61,6 +62,14 @@ static NSString *ToNSString(const std::filesystem::path &path) {
 
 + (NSString *)jitStatus {
     return ToNSString(ymir::jit::ProbeJit().Message());
+}
+
++ (NSString *)jitReport {
+    const auto g = ymir::sh2::SH2Recompiler::GetGlobalStats();
+    const double avgMicros = g.blocksCompiled > 0 ? static_cast<double>(g.compileNanoseconds) / g.blocksCompiled / 1000.0 : 0.0;
+    return [NSString stringWithFormat:@"%llu blocks compiled (%.1f MB), %llu cache flushes, compile time %.0f µs average / %.1f ms slowest",
+                                      g.blocksCompiled, g.bytesGenerated / 1048576.0, g.cacheFlushes, avgMicros,
+                                      g.slowestCompileNanoseconds / 1.0e6];
 }
 
 + (NSString *)documentsPath {

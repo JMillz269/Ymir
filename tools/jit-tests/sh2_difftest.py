@@ -46,6 +46,7 @@ lib.t_check_thunk.restype = u64
 lib.t_check_thunk.argtypes = [vp, u32, u32, u32]
 lib.t_pool_region.argtypes = [C.POINTER(u64), C.POINTER(u64)]
 lib.t_stats.argtypes = [vp, C.POINTER(u64)]
+lib.t_global_stats.argtypes = [C.POINTER(u64)]
 lib.t_block_table.argtypes = [vp, C.POINTER(u64), C.POINTER(u64)]
 lib.t_opcode_type.restype = u32
 lib.t_opcode_type.argtypes = [u32, u32]
@@ -457,6 +458,9 @@ def directed():
     rewrite = [0x7301, 0x2201, 0xA042, 0x0009] + [0x0009] * 66
     rewrite += [0x7402, 0x4510, 0x8BB6, 0x0009, 0x0009]
     check("a block rewrites the block it jumps to", rewrite, {0: 0x7405, 2: CODE_ADDR + 0x8C, 5: 40}, budget=900)
+    # A store at an aligned address rewrites the instruction right after itself, which the CPU has already fetched
+    check("store to the next instruction (stale prefetch)",
+          [0x18C0, 0xE305, 0x0009, 0x0009], {8: CODE_ADDR, 12: 0x00090009}, budget=20)
     # Backward branch loop that runs many times
     check("counted loop", [0xE30A, 0x4310, 0x8FFE, 0x0009, 0x0009], {}, budget=200)
     return ok
@@ -491,6 +495,10 @@ def main():
     print(f"{iters - failures}/{iters} cases matched")
     print("recompiler stats: compiled=%d executed=%d rejected=%d invalidations=%d flushes=%d inline=%d helper=%d chain=%d" %
           tuple(tot))
+    g = (u64 * 4)()
+    lib.t_global_stats(g)
+    print(f"code size: {g[2] / max(g[3], 1):.0f} bytes of ARM64 per SH-2 instruction translated, "
+          f"{g[2] / max(g[0], 1):.0f} bytes per block, {g[1]} cache flushes")
     sys.exit(1 if failures else 0)
 
 

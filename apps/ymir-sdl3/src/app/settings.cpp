@@ -1,3 +1,4 @@
+#include <ymir/hw/sh2/sh2_recompiler.hpp>
 #include "settings.hpp"
 
 #include <app/shared_context.hpp>
@@ -1060,6 +1061,8 @@ void Settings::ResetToDefaults() {
 
     system.emulateSH2Cache = false;
     system.useSH2Recompiler = false;
+    system.jitRegisterCache = true;
+    system.jitBlockLinking = true;
     system.sh2ClockFactor = config_defaults::system::kDefaultSH2ClockFactor;
 
     system.ipl.overrideImage = false;
@@ -1298,6 +1301,9 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblSystem, "PreferredRegionOrder", system.preferredRegionOrder);
         Parse(tblSystem, "EmulateSH2Cache", system.emulateSH2Cache);
         Parse(tblSystem, "UseSH2Recompiler", system.useSH2Recompiler);
+        Parse(tblSystem, "JitRegisterCache", system.jitRegisterCache);
+        Parse(tblSystem, "JitBlockLinking", system.jitBlockLinking);
+        ymir::sh2::SH2Recompiler::SetOptions(system.jitRegisterCache, system.jitBlockLinking);
         Parse(tblSystem, "SH2ClockFactor", system.sh2ClockFactor, kDefaultSH2ClockFactor, kMinSH2ClockFactor,
               kMaxSH2ClockFactor);
         Parse(tblSystem, "InternalBackupRAMImagePath", system.internalBackupRAMImagePath);
@@ -1945,6 +1951,8 @@ SettingsSaveResult Settings::Save() {
             {"PreferredRegionOrder", ToTOML(system.preferredRegionOrder.Get())},
             {"EmulateSH2Cache", system.emulateSH2Cache},
             {"UseSH2Recompiler", system.useSH2Recompiler.Get()},
+            {"JitRegisterCache", system.jitRegisterCache},
+            {"JitBlockLinking", system.jitBlockLinking},
             {"SH2ClockFactor", system.sh2ClockFactor.Get()},
             {"InternalBackupRAMImagePath", Proximate(ProfilePath::PersistentState, system.internalBackupRAMImagePath).native()},
             {"InternalBackupRAMPerGame", system.internalBackupRAMPerGame},
