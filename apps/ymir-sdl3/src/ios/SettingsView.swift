@@ -298,7 +298,7 @@ struct DisplaySettingsView: View {
             } header: {
                 Text("Resolution")
             } footer: {
-                Text("Draws the game's 3D models, sprites and lines at several times the Saturn's own resolution, so their edges are smooth and detailed instead of blocky. Backgrounds drawn by the Saturn's second video chip stay at their original sharpness. Higher values need much more processing power. Modes that can't be enlarged (high resolution screens, interlaced video, 8-bit or rotated sprite buffers) are drawn at native resolution, and so is everything when Transparent Meshes is on.")
+                Text("Draws the game's 3D models, sprites and lines at several times the Saturn's own resolution, so their edges are smooth and detailed instead of blocky. Backgrounds drawn by the Saturn's second video chip stay at their original sharpness. Higher values need much more processing power. Modes that can't be enlarged (high resolution screens, interlaced video, 8-bit or rotated sprite buffers) are drawn at native resolution.")
             }
 
             Section {

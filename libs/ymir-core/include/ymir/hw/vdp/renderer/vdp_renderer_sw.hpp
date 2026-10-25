@@ -212,6 +212,9 @@ private:
 
     // Scale latched by the VDP1 side. Owned by whichever context executes VDP1 commands.
     uint32 m_hrScale1 = 1;
+    // Scale plus kHRMeshKey if the transparent mesh layer is also drawn; identifies what the large buffers contain
+    uint32 m_hrKey1 = 1;
+    static constexpr uint32 kHRMeshKey = 0x100;
     // True while a VDP1 command is being replayed into the large framebuffer.
     bool m_hrPass = false;
 
@@ -222,6 +225,9 @@ private:
 
     // Copies of the above published to VDP2 when VDP1 is threaded (otherwise m_hrDraw is read directly).
     std::array<std::vector<uint16>, 2> m_hrShown;
+    // Large transparent mesh framebuffers (same roles as above), used when transparent meshes are enabled
+    std::array<std::vector<uint16>, 2> m_hrMesh;
+    std::array<std::vector<uint16>, 2> m_hrMeshShown;
     std::array<std::atomic_uint32_t, 2> m_hrShownScale{};
 
     // Per-frame VDP2 state: true if this frame is rendered and delivered at m_frameHRScale times the native size.
@@ -236,6 +242,7 @@ private:
 
     // Scratch sprite framebuffer used to decode upscaled sprite pixels through the regular sprite pipeline.
     std::unique_ptr<SpriteFB> m_hrScratchFB;
+    std::unique_ptr<SpriteFB> m_hrScratchMeshFB;
 
     // -------------------------------------------------------------------------
     // Threading
@@ -771,6 +778,7 @@ private:
     void HRScaleLine(CoordS32 &a, CoordS32 &b) const;
 
     // Draws a pixel into the large framebuffer.
+    template <bool transparentMeshes>
     bool VDP1PlotPixelHR(CoordS32 coord, const VDP1PixelParams &pixelParams);
 
     // Clip limits (inclusive) in the coordinate space of the current pass.
@@ -787,13 +795,14 @@ private:
     void VDP2HRBeginFrame();
 
     // Composes the line at high resolution. Returns false if the line must be composed at native resolution.
-    template <uint32 colorMode>
+    template <bool transparentMeshes, uint32 colorMode>
     bool VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2);
 
     // Replicates a native line into the high resolution output.
     void VDP2HRReplicateLine(uint32 y);
 
     // Produces the high resolution output for a line whose native composition has been completed.
+    template <bool transparentMeshes>
     void VDP2HRFinishLine(uint32 y, const VDP2Regs &regs2, uint32 colorMode);
 
 #define TPL_TRAITS template <bool deinterlace, bool transparentMeshes>

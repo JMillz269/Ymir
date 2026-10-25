@@ -51,7 +51,7 @@ The image reaches the screen at the larger size and is scaled to the display wit
 
 Limits: VDP2 backgrounds are tile and bitmap based and stay at their original sharpness; textures are sampled per large
 pixel, so they stay blocky when magnified. Frames in modes that can't be enlarged (high resolution, interlaced, 8-bit or
-rotated VDP1 framebuffers) and frames drawn with Transparent Meshes enabled are rendered at native size. The cost grows
+rotated VDP1 framebuffers) are rendered at native size. Transparent Meshes works together with it: the mesh layer is kept at the larger size too. The cost grows
 with the square of the scale, so 4x needs a lot more CPU than 2x.
 
 `tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer

@@ -969,10 +969,14 @@ void SoftwareVDPRenderer::HRApplyConfig() {
         for (size_t i = 0; i < 2; i++) {
             m_hrDraw[i].assign(fbPixels, 0);
             m_hrShown[i].assign(fbPixels, 0);
+            m_hrMesh[i].assign(fbPixels, 0);
+            m_hrMeshShown[i].assign(fbPixels, 0);
         }
         m_hrFramebuffer.assign(size_t(kHROutMaxW) * kHROutMaxH * kHRMaxScale * kHRMaxScale, 0xFF000000);
         m_hrScratchFB = std::make_unique<SpriteFB>();
         m_hrScratchFB->fill(0);
+        m_hrScratchMeshFB = std::make_unique<SpriteFB>();
+        m_hrScratchMeshFB->fill(0);
         m_hrAllocated = true;
     }
     m_hrRequested.store(scale, std::memory_order_release);
@@ -980,6 +984,7 @@ void SoftwareVDPRenderer::HRApplyConfig() {
 
 FORCE_INLINE void SoftwareVDPRenderer::VDP1HRLatch() {
     m_hrScale1 = m_hrRequested.load(std::memory_order_acquire);
+    m_hrKey1 = m_hrScale1 | (m_enhancements.transparentMeshes ? kHRMeshKey : 0u);
 }
 
 FORCE_INLINE bool SoftwareVDPRenderer::HRSupportsTVMR(const VDP1RegTVMR &tvmr) {
@@ -994,7 +999,7 @@ bool SoftwareVDPRenderer::VDP1HRPrepare(uint8 fbIndex) {
         m_hrDrawScale[fbIndex] = 0;
         return false;
     }
-    if (m_hrDrawScale[fbIndex] != m_hrScale1) {
+    if (m_hrDrawScale[fbIndex] != m_hrKey1) {
         VDP1HRResync(fbIndex);
     }
     return true;
@@ -1002,22 +1007,26 @@ bool SoftwareVDPRenderer::VDP1HRPrepare(uint8 fbIndex) {
 
 void SoftwareVDPRenderer::VDP1HRResync(uint8 fbIndex) {
     const uint32 s = m_hrScale1;
-    const SpriteFB &fb = VDP1GetRendererFBRAM(false, fbIndex);
-    uint16 *hr = m_hrDraw[fbIndex].data();
     const size_t stride = size_t(kHRFBWidth) * s;
-    for (uint32 y = 0; y < kHRFBHeight; y++) {
-        uint16 *row = &hr[size_t(y) * s * stride];
-        for (uint32 x = 0; x < kHRFBWidth; x++) {
-            const uint16 value = util::ReadBE<uint16>(&fb[(y * kHRFBWidth + x) * sizeof(uint16)]);
-            for (uint32 k = 0; k < s; k++) {
-                row[x * s + k] = value;
+    auto upscale = [&](const SpriteFB &fb, uint16 *hr) {
+        for (uint32 y = 0; y < kHRFBHeight; y++) {
+            uint16 *row = &hr[size_t(y) * s * stride];
+            for (uint32 x = 0; x < kHRFBWidth; x++) {
+                const uint16 value = util::ReadBE<uint16>(&fb[(y * kHRFBWidth + x) * sizeof(uint16)]);
+                for (uint32 k = 0; k < s; k++) {
+                    row[x * s + k] = value;
+                }
+            }
+            for (uint32 r = 1; r < s; r++) {
+                std::copy_n(row, stride, row + r * stride);
             }
         }
-        for (uint32 r = 1; r < s; r++) {
-            std::copy_n(row, stride, row + r * stride);
-        }
+    };
+    upscale(VDP1GetRendererFBRAM(false, fbIndex), m_hrDraw[fbIndex].data());
+    if (m_hrKey1 & kHRMeshKey) {
+        upscale(m_meshFBRAM[0][fbIndex], m_hrMesh[fbIndex].data());
     }
-    m_hrDrawScale[fbIndex] = s;
+    m_hrDrawScale[fbIndex] = m_hrKey1;
 }
 
 void SoftwareVDPRenderer::VDP1HRPublish(uint8 fbIndex) {
@@ -1025,16 +1034,20 @@ void SoftwareVDPRenderer::VDP1HRPublish(uint8 fbIndex) {
         return;
     }
     const uint32 s = m_hrScale1;
-    if (s > 1 && m_hrDrawScale[fbIndex] == s) {
-        std::copy_n(m_hrDraw[fbIndex].data(), size_t(kHRFBWidth) * kHRFBHeight * s * s, m_hrShown[fbIndex].data());
-        m_hrShownScale[fbIndex].store(s, std::memory_order_release);
+    if (s > 1 && m_hrDrawScale[fbIndex] == m_hrKey1) {
+        const size_t count = size_t(kHRFBWidth) * kHRFBHeight * s * s;
+        std::copy_n(m_hrDraw[fbIndex].data(), count, m_hrShown[fbIndex].data());
+        if (m_hrKey1 & kHRMeshKey) {
+            std::copy_n(m_hrMesh[fbIndex].data(), count, m_hrMeshShown[fbIndex].data());
+        }
+        m_hrShownScale[fbIndex].store(m_hrKey1, std::memory_order_release);
     } else {
         m_hrShownScale[fbIndex].store(0, std::memory_order_release);
     }
 }
 
 void SoftwareVDPRenderer::VDP1HRCpuWrite(uint8 fbIndex, uint32 address) {
-    if (m_hrScale1 <= 1 || m_hrDrawScale[fbIndex] != m_hrScale1) {
+    if (m_hrScale1 <= 1 || m_hrDrawScale[fbIndex] != m_hrKey1) {
         return;
     }
     if (!HRSupportsTVMR(VDP1GetRegs().tvmr)) {
@@ -1116,6 +1129,7 @@ FORCE_INLINE sint32 SoftwareVDPRenderer::VDP1SysClipMaxY() const {
     return (ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV;
 }
 
+template <bool transparentMeshes>
 bool SoftwareVDPRenderer::VDP1PlotPixelHR(CoordS32 coord, const VDP1PixelParams &pixelParams) {
     auto [x, y] = coord;
 
@@ -1124,8 +1138,10 @@ bool SoftwareVDPRenderer::VDP1PlotPixelHR(CoordS32 coord, const VDP1PixelParams 
     }
 
     const sint32 s = m_hrScale1;
-    if (pixelParams.mode.meshEnable && (((x / s) ^ (y / s)) & 1)) {
-        return true;
+    if constexpr (!transparentMeshes) {
+        if (pixelParams.mode.meshEnable && (((x / s) ^ (y / s)) & 1)) {
+            return true;
+        }
     }
 
     // The native framebuffer wraps around beyond its bounds; the large one just ignores such pixels
@@ -1133,7 +1149,8 @@ bool SoftwareVDPRenderer::VDP1PlotPixelHR(CoordS32 coord, const VDP1PixelParams 
         return true;
     }
 
-    uint16 &pixel = m_hrDraw[m_state.fbIndex.draw][size_t(y) * kHRFBWidth * s + x];
+    const size_t offset = size_t(y) * kHRFBWidth * s + x;
+    uint16 &pixel = m_hrDraw[m_state.fbIndex.draw][offset];
     if (pixelParams.mode.msbOn) {
         pixel |= 0x8000;
         return true;
@@ -1171,7 +1188,17 @@ bool SoftwareVDPRenderer::VDP1PlotPixelHR(CoordS32 coord, const VDP1PixelParams 
         }
         break;
     }
-    pixel = dstColor.u16;
+    if constexpr (transparentMeshes) {
+        uint16 &meshPixel = m_hrMesh[m_state.fbIndex.draw][offset];
+        if (pixelParams.mode.meshEnable) {
+            meshPixel = dstColor.u16;
+        } else {
+            pixel = dstColor.u16;
+            meshPixel = 0;
+        }
+    } else {
+        pixel = dstColor.u16;
+    }
     return true;
 }
 
@@ -1183,9 +1210,14 @@ void SoftwareVDPRenderer::VDP1HREraseSpan(uint8 fbIndex, uint32 y, uint32 x0, ui
     const size_t stride = size_t(kHRFBWidth) * s;
     x1 = std::min<uint32>(x1, kHRFBWidth);
     uint16 *hr = m_hrDraw[fbIndex].data();
+    uint16 *mesh = m_hrMesh[fbIndex].data();
     for (uint32 dy = 0; dy < s; dy++) {
-        std::fill(&hr[(size_t(y) * s + dy) * stride + size_t(x0) * s], &hr[(size_t(y) * s + dy) * stride + size_t(x1) * s],
-                  value);
+        const size_t begin = (size_t(y) * s + dy) * stride + size_t(x0) * s;
+        const size_t end = (size_t(y) * s + dy) * stride + size_t(x1) * s;
+        std::fill(&hr[begin], &hr[end], value);
+        if (m_hrKey1 & kHRMeshKey) {
+            std::fill(&mesh[begin], &mesh[end], uint16(0));
+        }
     }
 }
 
@@ -1363,10 +1395,8 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1P
                                                      const VDP1Regs &regs1, bool doubleDensity) {
     auto [x, y] = coord;
 
-    if constexpr (!transparentMeshes) {
-        if (m_hrPass) [[unlikely]] {
-            return VDP1PlotPixelHR(coord, pixelParams);
-        }
+    if (m_hrPass) [[unlikely]] {
+        return VDP1PlotPixelHR<transparentMeshes>(coord, pixelParams);
     }
 
     // Reject pixels outside of clipping area
@@ -1865,13 +1895,11 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1Cmd_Handle(uint32 cmdAddress, VDP1Com
     case DrawPolylinesAlt: [[fallthrough]];
     case DrawLine:
         drawCommand();
-        if constexpr (!transparentMeshes) {
-            // Replay the command into the large framebuffer with scaled coordinates
-            if (m_hrScale1 > 1 && VDP1HRShouldReplay()) {
-                m_hrPass = true;
-                drawCommand();
-                m_hrPass = false;
-            }
+        // Replay the command into the large framebuffer with scaled coordinates
+        if (m_hrScale1 > 1 && ((m_hrKey1 & kHRMeshKey) != 0) == transparentMeshes && VDP1HRShouldReplay()) {
+            m_hrPass = true;
+            drawCommand();
+            m_hrPass = false;
         }
         break;
 
@@ -2876,7 +2904,7 @@ void SoftwareVDPRenderer::VDP2HRBeginFrame() {
     m_frameHR = false;
 
     const uint32 scale = m_hrRequested.load(std::memory_order_acquire);
-    if (scale <= 1 || !m_hrAllocated || m_enhancements.transparentMeshes) {
+    if (scale <= 1 || !m_hrAllocated) {
         return;
     }
 
@@ -2910,19 +2938,20 @@ void SoftwareVDPRenderer::VDP2HRReplicateLine(uint32 y) {
     }
 }
 
+template <bool transparentMeshes>
 void SoftwareVDPRenderer::VDP2HRFinishLine(uint32 y, const VDP2Regs &regs2, uint32 colorMode) {
     if (m_HRes != m_frameHRW || y >= m_frameHRH || y >= m_VRes) {
         return;
     }
     VDP2HRReplicateLine(y);
     switch (colorMode) {
-    case 0: VDP2HRComposeLine<0>(y, regs2); break;
-    case 1: VDP2HRComposeLine<1>(y, regs2); break;
-    default: VDP2HRComposeLine<2>(y, regs2); break;
+    case 0: VDP2HRComposeLine<transparentMeshes, 0>(y, regs2); break;
+    case 1: VDP2HRComposeLine<transparentMeshes, 1>(y, regs2); break;
+    default: VDP2HRComposeLine<transparentMeshes, 2>(y, regs2); break;
     }
 }
 
-template <uint32 colorMode>
+template <bool transparentMeshes, uint32 colorMode>
 bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
     const uint32 s = m_frameHRScale;
     const uint32 w = m_HRes;
@@ -2931,52 +2960,87 @@ bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
         return false;
     }
 
-    // Find the large sprite framebuffer matching the displayed native framebuffer
+    // Find the large sprite framebuffers matching the displayed native framebuffer
     const uint8 fbIndex = m_state.fbIndex.display;
     const bool threaded1 = m_threadedVDP1Rendering;
-    const uint32 shownScale = threaded1 ? m_hrShownScale[fbIndex].load(std::memory_order_acquire) : m_hrDrawScale[fbIndex];
-    if (shownScale != s) {
+    const uint32 shownKey =
+        threaded1 ? m_hrShownScale[fbIndex].load(std::memory_order_acquire) : m_hrDrawScale[fbIndex];
+    if (shownKey != (s | (transparentMeshes ? kHRMeshKey : 0u))) {
         return false;
     }
     const uint16 *hr = (threaded1 ? m_hrShown : m_hrDraw)[fbIndex].data();
+    [[maybe_unused]] const uint16 *hrMesh = (threaded1 ? m_hrMeshShown : m_hrMesh)[fbIndex].data();
     const SpriteFB &nativeFB = m_state.mem1.FBRAM[fbIndex];
     SpriteFB &scratch = *m_hrScratchFB;
+    [[maybe_unused]] SpriteFB &meshScratch = *m_hrScratchMeshFB;
 
     const SpriteParams &params = regs2.spriteParams;
     auto &layerOut = m_layerOutputs[0][0];
     auto &layerAttrs = m_spriteLayerAttrs[0];
+    [[maybe_unused]] auto &meshLayerOut = m_meshLayerOutput[0];
+    [[maybe_unused]] auto &meshLayerAttrs = m_meshLayerAttrs[0];
 
     constexpr uint32 kMaxPlanes = kHRMaxScale * kHRMaxScale;
     constexpr uint32 kW = kHROutMaxW;
     std::array<std::array<uint16, kW>, kMaxPlanes> planeWords;
+    std::array<std::array<uint16, kW>, transparentMeshes ? kMaxPlanes : 1> planeMeshWords;
     std::array<std::array<uint32, kW>, kMaxPlanes> planeOut;
     std::array<int, kMaxPlanes> planeSource; // -1: native, otherwise index of the plane holding the result
     std::array<bool, kW> differs;
 
     // Native sprite layer state, restored when a pixel is unchanged and after all planes are done
-    std::array<Color888, kW> savedColor;
-    std::array<uint8, kW> savedPriority;
-    std::array<bool, kW> savedSpecialColorCalc;
-    std::array<uint8, kW> savedRatio;
-    std::array<bool, kW> savedShadow;
-    std::array<SpriteData::Special, kW> savedType;
+    struct Saved {
+        std::array<Color888, kW> color;
+        std::array<uint8, kW> priority;
+        std::array<bool, kW> specialColorCalc;
+        std::array<uint8, kW> ratio;
+        std::array<bool, kW> shadow;
+        std::array<SpriteData::Special, kW> type;
+    };
+    auto save = [&](Saved &dst, auto &out, auto &attrs) {
+        for (uint32 x = 0; x < w; x++) {
+            dst.color[x] = out.pixels.color[x];
+            dst.priority[x] = out.pixels.priority[x];
+            dst.specialColorCalc[x] = out.pixels.specialColorCalc[x];
+            dst.ratio[x] = attrs.colorCalcRatio[x];
+            dst.shadow[x] = attrs.shadowOrWindow[x];
+            dst.type[x] = attrs.specialType[x];
+        }
+    };
+    auto restore = [&](const Saved &src, uint32 x, auto &out, auto &attrs) {
+        out.pixels.color[x] = src.color[x];
+        out.pixels.priority[x] = src.priority[x];
+        out.pixels.specialColorCalc[x] = src.specialColorCalc[x];
+        attrs.colorCalcRatio[x] = src.ratio[x];
+        attrs.shadowOrWindow[x] = src.shadow[x];
+        attrs.specialType[x] = src.type[x];
+    };
+    Saved savedSprite;
+    [[maybe_unused]] Saved savedMesh;
     bool saved = false;
 
     const size_t hrStride = size_t(kHRFBWidth) * s;
     const size_t outStride = size_t(w) * s;
     const uint8 *nativeRow = &nativeFB[size_t(y) * kHRFBWidth * sizeof(uint16)];
+    [[maybe_unused]] const uint8 *nativeMeshRow = &m_meshFBRAM[0][fbIndex][size_t(y) * kHRFBWidth * sizeof(uint16)];
 
     for (uint32 sy = 0; sy < s; sy++) {
         for (uint32 sx = 0; sx < s; sx++) {
             const uint32 plane = sy * s + sx;
-            const uint16 *row = hr + (size_t(y) * s + sy) * hrStride + sx;
+            const size_t rowOffset = (size_t(y) * s + sy) * hrStride + sx;
+            const uint16 *row = hr + rowOffset;
             auto &words = planeWords[plane];
 
             bool anyDiffers = false;
             for (uint32 x = 0; x < w; x++) {
                 const uint16 word = row[size_t(x) * s];
                 words[x] = word;
-                const bool d = word != util::ReadBE<uint16>(&nativeRow[x * sizeof(uint16)]);
+                bool d = word != util::ReadBE<uint16>(&nativeRow[x * sizeof(uint16)]);
+                if constexpr (transparentMeshes) {
+                    const uint16 meshWord = hrMesh[rowOffset + size_t(x) * s];
+                    planeMeshWords[plane][x] = meshWord;
+                    d |= meshWord != util::ReadBE<uint16>(&nativeMeshRow[x * sizeof(uint16)]);
+                }
                 differs[x] = d;
                 anyDiffers |= d;
             }
@@ -2988,10 +3052,18 @@ bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
             // Reuse the result of an earlier plane with identical sprite data
             int match = -2;
             for (uint32 q = 0; q < plane; q++) {
-                if (planeSource[q] == static_cast<int>(q) && std::equal(words.begin(), words.begin() + w, planeWords[q].begin())) {
-                    match = static_cast<int>(q);
-                    break;
+                if (planeSource[q] != static_cast<int>(q) ||
+                    !std::equal(words.begin(), words.begin() + w, planeWords[q].begin())) {
+                    continue;
                 }
+                if constexpr (transparentMeshes) {
+                    if (!std::equal(planeMeshWords[plane].begin(), planeMeshWords[plane].begin() + w,
+                                    planeMeshWords[q].begin())) {
+                        continue;
+                    }
+                }
+                match = static_cast<int>(q);
+                break;
             }
             if (match >= 0) {
                 planeSource[plane] = match;
@@ -2999,13 +3071,9 @@ bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
             }
 
             if (!saved) {
-                for (uint32 x = 0; x < w; x++) {
-                    savedColor[x] = layerOut.pixels.color[x];
-                    savedPriority[x] = layerOut.pixels.priority[x];
-                    savedSpecialColorCalc[x] = layerOut.pixels.specialColorCalc[x];
-                    savedRatio[x] = layerAttrs.colorCalcRatio[x];
-                    savedShadow[x] = layerAttrs.shadowOrWindow[x];
-                    savedType[x] = layerAttrs.specialType[x];
+                save(savedSprite, layerOut, layerAttrs);
+                if constexpr (transparentMeshes) {
+                    save(savedMesh, meshLayerOut, meshLayerAttrs);
                 }
                 saved = true;
             }
@@ -3013,19 +3081,22 @@ bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
             for (uint32 x = 0; x < w; x++) {
                 if (differs[x]) {
                     util::WriteBE<uint16>(&scratch[x * sizeof(uint16)], words[x]);
-                    VDP2DrawSpritePixel<colorMode, false, false, false>(x, regs2, tvmr, params, scratch, x);
+                    VDP2DrawSpritePixel<colorMode, false, transparentMeshes, false>(x, regs2, tvmr, params, scratch, x);
+                    if constexpr (transparentMeshes) {
+                        util::WriteBE<uint16>(&meshScratch[x * sizeof(uint16)], planeMeshWords[plane][x]);
+                        VDP2DrawSpritePixel<colorMode, false, transparentMeshes, true>(x, regs2, tvmr, params,
+                                                                                         meshScratch, x);
+                    }
                 } else {
-                    layerOut.pixels.color[x] = savedColor[x];
-                    layerOut.pixels.priority[x] = savedPriority[x];
-                    layerOut.pixels.specialColorCalc[x] = savedSpecialColorCalc[x];
-                    layerAttrs.colorCalcRatio[x] = savedRatio[x];
-                    layerAttrs.shadowOrWindow[x] = savedShadow[x];
-                    layerAttrs.specialType[x] = savedType[x];
+                    restore(savedSprite, x, layerOut, layerAttrs);
+                    if constexpr (transparentMeshes) {
+                        restore(savedMesh, x, meshLayerOut, meshLayerAttrs);
+                    }
                 }
             }
 
             m_composeOut = planeOut[plane].data();
-            VDP2ComposeLine<false, false>(y, regs2, false);
+            VDP2ComposeLine<false, transparentMeshes>(y, regs2, false);
             m_composeOut = nullptr;
             planeSource[plane] = static_cast<int>(plane);
         }
@@ -3048,12 +3119,10 @@ bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
 
     if (saved) {
         for (uint32 x = 0; x < w; x++) {
-            layerOut.pixels.color[x] = savedColor[x];
-            layerOut.pixels.priority[x] = savedPriority[x];
-            layerOut.pixels.specialColorCalc[x] = savedSpecialColorCalc[x];
-            layerAttrs.colorCalcRatio[x] = savedRatio[x];
-            layerAttrs.shadowOrWindow[x] = savedShadow[x];
-            layerAttrs.specialType[x] = savedType[x];
+            restore(savedSprite, x, layerOut, layerAttrs);
+            if constexpr (transparentMeshes) {
+                restore(savedMesh, x, meshLayerOut, meshLayerAttrs);
+            }
         }
     }
     return true;
@@ -3136,10 +3205,8 @@ void SoftwareVDPRenderer::VDP2DrawLine(uint32 y, bool altField) {
     // Compose image
     VDP2ComposeLine<deinterlace, transparentMeshes>(y, regs2, altField);
 
-    if constexpr (!transparentMeshes) {
-        if (m_frameHR && !altField) {
-            VDP2HRFinishLine(y, regs2, colorMode);
-        }
+    if (m_frameHR && !altField) {
+        VDP2HRFinishLine<transparentMeshes>(y, regs2, colorMode);
     }
 }
 

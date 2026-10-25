@@ -37,6 +37,7 @@ int main(int argc, char **argv) {
     config::Enhancements enh;
     enh.internalResolution = scale;
     enh.deinterlace = std::getenv("HR_DEINTERLACE") != nullptr;
+    enh.transparentMeshes = std::getenv("HR_MESH") != nullptr;
     r.ConfigureEnhancements(enh);
 
     r.SwCallbacks.FrameComplete = {nullptr, [](uint32 *fb, uint32 w, uint32 h, uint32 s, void *) {
@@ -116,6 +117,8 @@ int main(int argc, char **argv) {
     // polygon green rectangle next to it, tiling test
     put(0x0004, 0, 0x0000, 0x83E0, 0, 0, 120, 150, 160, 150, 160, 190, 120, 190);
     put(0x0004, 0, 0x0000, 0x8000 | (31 << 10), 0, 0, 161, 150, 200, 150, 200, 190, 161, 190);
+    // mesh polygon overlapping the textured sprite and the background
+    put(0x0004, 0, 0x0100, 0x8000 | (31 << 5) | 31, 0, 0, 150, 100, 260, 100, 260, 180, 150, 180);
     // lines
     put(0x0006, 0, 0x0000, 0xFFFF, 0, 0, 10, 210, 310, 200, 0, 0, 0, 0);
     put(0x0005, 0, 0x0000, 0xFFFF, 0, 0, 220, 170, 300, 170, 300, 215, 220, 215);
