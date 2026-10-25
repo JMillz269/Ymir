@@ -86,7 +86,7 @@ public:
     }
 
 private:
-    static constexpr uint32 kMaxInstructions = 32;
+    static constexpr uint32 kMaxInstructions = 64;
     static constexpr uint32 kMaxBlockBytes = (kMaxInstructions + 1) * 2;
     static constexpr uint32 kBlockTableSize = 8192;
 

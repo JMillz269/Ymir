@@ -47,11 +47,15 @@ The core has an SH-2 recompiler that translates Saturn CPU code into ARM64 machi
 **experimental**. Turn it on in Settings > Performance & Accuracy > CPU Execution; the option is greyed out until the
 process can obtain executable memory.
 
-How it works: straight-line code is translated into native blocks. Simple register instructions are emitted inline;
-every other instruction (memory accesses, multiplies, system instructions, delay slots) calls the interpreter's own
-handler, so bus behavior and timing are the same as in the interpreter. Blocks are checked against the code in memory
-every time they run, and a store that rewrites code ahead of itself ends the block. The speedup is modest for now; it
-is a foundation to build on (inline memory access, block chaining, register caching).
+How it works: straight-line code is translated into native blocks of up to 64 instructions. Register instructions
+(ALU, shifts, multiplies, DIV0S/DIV1, CMP, control register moves), loads and stores to RAM and ROM (including the
+PC-relative, GBR-relative and post-increment/pre-decrement forms), and all branches, including their delay slots, are
+emitted as ARM64 code with the interpreter's exact cycle counts, load-use stalls and bus timings. A branch back into the
+same block becomes a jump, so tight loops stay in native code. Everything else (accesses to hardware registers and other
+non-RAM addresses, MAC.W/MAC.L, TAS, the read-modify-write byte instructions, LDC to SR, RTE, TRAPA, SLEEP) calls the
+interpreter's own handler, so those behave exactly as they do there. Blocks are checked against the code in memory every
+time they run, and a write into a block's own code ends the block. Block chaining, register caching and compiling the
+68K sound CPU are not done yet.
 
 Getting JIT access on iOS (the app has to be signed with `get-task-allow`, which sideloading tools do for development
 signing; TrollStore installs get JIT differently):

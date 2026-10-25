@@ -36,7 +36,7 @@ namespace {
     std::vector<size_t> g_freeChunks; // chunks returned by destroyed recompilers
 
     // Words reserved for assembling a block before it is copied into executable memory
-    constexpr size_t kMaxBlockWords = 4096;
+    constexpr size_t kMaxBlockWords = 8000;
 
     // Registers used by generated code
     constexpr Reg kThis = X19;   // SH2 *
