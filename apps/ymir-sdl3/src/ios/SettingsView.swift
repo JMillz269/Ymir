@@ -600,6 +600,8 @@ struct CDBlockSettingsView: View {
 
 struct PerformanceSettingsView: View {
     @ObservedObject private var store = SettingStore.shared
+    @State private var jitAvailable = YmirHost.jitAvailable
+    @State private var jitStatus = YmirHost.jitStatus
 
     var body: some View {
         Form {
@@ -617,6 +619,33 @@ struct PerformanceSettingsView: View {
                 Text("Presets")
             } footer: {
                 Text("Presets change the options below and the sound chip settings in Audio.")
+            }
+
+            Section {
+                Picker("CPU Execution", selection: store.bool("system.useRecompiler")) {
+                    Text("Interpreter").tag(false)
+                    Text("Recompiler (JIT)").tag(true)
+                }
+                .disabled(!jitAvailable || store.bool("system.emulateSH2Cache").wrappedValue)
+
+                HStack(spacing: 10) {
+                    Image(systemName: jitAvailable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(jitAvailable ? Color.green : Color.orange)
+                    Text(jitStatus)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                if !jitAvailable {
+                    Button {
+                        requestJIT()
+                    } label: {
+                        Label("Enable JIT…", systemImage: "bolt.fill")
+                    }
+                }
+            } header: {
+                Text("CPU")
+            } footer: {
+                Text(recompilerFooter)
             }
 
             Section {
@@ -651,6 +680,42 @@ struct PerformanceSettingsView: View {
         }
         .navigationTitle("Performance")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { refreshJIT() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            refreshJIT()
+        }
+    }
+
+    private var recompilerFooter: String {
+        if store.bool("system.emulateSH2Cache").wrappedValue {
+            return "The recompiler is not used while SH-2 cache emulation is on."
+        }
+        return "Translates the Saturn's SH-2 processors to native code instead of interpreting them. Experimental: games "
+            + "may run faster, or may misbehave; turn it off if something looks wrong. It needs a JIT enabler "
+            + "(StikDebug, StosDebug, ...) attached to Ymir, and the change applies to the running game immediately."
+    }
+
+    private func refreshJIT() {
+        jitAvailable = YmirHost.jitAvailable
+        jitStatus = YmirHost.jitStatus
+    }
+
+    /// Asks a JIT enabler app to attach to Ymir. Tries the URL schemes of the common enablers in turn.
+    private func requestJIT() {
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
+        let schemes = ["stikdebug", "stikjit", "stosdebug"]
+        func attempt(_ index: Int) {
+            guard index < schemes.count, let url = URL(string: "\(schemes[index])://enable-jit?bundle-id=\(bundleID)") else {
+                jitStatus = "Couldn't reach a JIT enabler. Open StikDebug (or a similar app) and enable JIT for Ymir there."
+                return
+            }
+            UIApplication.shared.open(url, options: [:]) { opened in
+                if !opened {
+                    attempt(index + 1)
+                }
+            }
+        }
+        attempt(0)
     }
 
     private func apply(sh2Cache: Bool, interpolation: Int, granularity: Int, lle: Bool) {

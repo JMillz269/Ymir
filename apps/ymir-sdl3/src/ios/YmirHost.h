@@ -18,6 +18,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property(class, nonatomic, readonly, nullable) NSString *loadedGamePath;
 @property(class, nonatomic, readonly) NSString *documentsPath;
 
+/// Whether the process can obtain executable memory for the recompiler (JIT), and a short explanation for the user.
+/// Re-evaluated on every access: it changes once a JIT enabler attaches to the app.
+@property(class, nonatomic, readonly) BOOL jitAvailable;
+@property(class, nonatomic, readonly) NSString *jitStatus;
+
 @property(class, nonatomic) BOOL paused;
 @property(class, nonatomic) BOOL fastForward;
 

@@ -41,9 +41,34 @@ An on-screen Saturn control pad is drawn over the game: D-pad, A/B/C, X/Y/Z, L/R
 - **Settings > Controls > On-Screen Controls** turns the overlay off.
 - The overlay hides itself while a hardware controller is connected. MFi, Xbox, PlayStation and other controllers supported by iOS work through SDL's gamepad support and use the same default binds as on desktop.
 
-## JIT
+## JIT (SH-2 recompiler)
 
-The emulator core is an interpreter. It does not generate machine code at runtime, so it does not need JIT, and no JIT/TXM-specific code exists in this port. Any future dynamic recompiler would need to be added to the core first.
+The core has an SH-2 recompiler that translates Saturn CPU code into ARM64 machine code. It is **off by default** and
+**experimental**. Turn it on in Settings > Performance & Accuracy > CPU Execution; the option is greyed out until the
+process can obtain executable memory.
+
+How it works: straight-line code is translated into native blocks. Simple register instructions are emitted inline;
+every other instruction (memory accesses, multiplies, system instructions, delay slots) calls the interpreter's own
+handler, so bus behavior and timing are the same as in the interpreter. Blocks are checked against the code in memory
+every time they run, and a store that rewrites code ahead of itself ends the block. The speedup is modest for now; it
+is a foundation to build on (inline memory access, block chaining, register caching).
+
+Getting JIT access on iOS (the app has to be signed with `get-task-allow`, which sideloading tools do for development
+signing; TrollStore installs get JIT differently):
+
+- **iOS 26+ on A15/M2 or newer (TXM)**: needs a JIT enabler that supports TXM, such as StikDebug with its universal
+  script. It attaches a debugger and answers Ymir's `brk #0xf00d` request for an executable region.
+- **Other devices**: any debugger-based enabler (StikDebug, SideStore's JIT, AltServer, Xcode) works; Ymir then maps
+  regular read/write/execute memory.
+- **Settings > Performance & Accuracy > Enable JIT…** asks StikDebug, StikJIT or StosDebug to enable JIT for Ymir
+  through their `enable-jit` URL.
+
+The recompiler is skipped while SH-2 cache emulation or debug tracing is on. If something breaks, switch back to
+**Interpreter** (no restart needed).
+
+Tests: `tools/jit-tests` checks the ARM64 assembler against Keystone and runs random programs on the interpreter and
+the recompiler side by side (the generated code executes in the Unicorn CPU emulator). Those pass; the recompiler has
+not been run on an actual device yet.
 
 ## Known limitations
 

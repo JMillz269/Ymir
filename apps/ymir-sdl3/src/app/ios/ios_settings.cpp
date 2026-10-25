@@ -177,6 +177,8 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
                 ctx->EnqueueEvent(events::emu::SetEmulateSH2Cache(v));
                 cfg->system.emulateSH2Cache = v;
             });
+    addBool("system.useRecompiler", [cfg] { return cfg->system.useSH2Recompiler.Get(); },
+            [cfg](bool v) { cfg->system.useSH2Recompiler = v; });
     addInt("system.sh2ClockFactor", [cfg] { return static_cast<int>(cfg->system.sh2ClockFactor.Get()); },
            [cfg](int v) {
                cfg->system.sh2ClockFactor =

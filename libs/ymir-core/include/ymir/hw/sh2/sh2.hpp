@@ -76,6 +76,12 @@ public:
     /// replaced without the recompiler noticing (it normally detects changes by itself).
     void FlushRecompiler();
 
+    /// @brief Allows the recompiler to be set up again after it couldn't obtain executable memory (e.g. because the JIT
+    /// enabler wasn't attached yet).
+    void ResetRecompilerAvailability() {
+        m_recompilerUnavailable = false;
+    }
+
     void UseDebugBreakManager(debug::DebugBreakManager *mgr) {
         m_debugBreakMgr = mgr;
         if (mgr != nullptr) {

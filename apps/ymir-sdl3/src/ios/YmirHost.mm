@@ -2,6 +2,8 @@
 
 #include <app/ios/host_interface.hpp>
 
+#include <ymir/jit/jit_memory.hpp>
+
 #include <string>
 
 static __weak UIWindow *s_gameWindow = nil;
@@ -51,6 +53,14 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     }
     auto path = host.loadedDiscPath();
     return path.empty() ? nil : ToNSString(path);
+}
+
++ (BOOL)jitAvailable {
+    return ymir::jit::ProbeJit().Available();
+}
+
++ (NSString *)jitStatus {
+    return ToNSString(ymir::jit::ProbeJit().Message());
 }
 
 + (NSString *)documentsPath {

@@ -1059,6 +1059,7 @@ void Settings::ResetToDefaults() {
     system.videoStandard = config::sys::VideoStandard::NTSC;
 
     system.emulateSH2Cache = false;
+    system.useSH2Recompiler = false;
     system.sh2ClockFactor = config_defaults::system::kDefaultSH2ClockFactor;
 
     system.ipl.overrideImage = false;
@@ -1178,6 +1179,7 @@ void Settings::BindConfiguration(ymir::core::Configuration &config) {
     system.autodetectRegion.Observe(config.system.autodetectRegion);
     system.preferredRegionOrder.Observe([&](auto value) { config.system.preferredRegionOrder = value; });
     system.videoStandard.Observe([&](auto value) { config.system.videoStandard = value; });
+    system.useSH2Recompiler.Observe([&](auto value) { config.system.useSH2Recompiler = value; });
     system.sh2ClockFactor.ObserveAndNotify(
         [&](auto value) { m_context.EnqueueEvent(events::emu::SetSH2ClockFactor(value)); });
 
@@ -1295,6 +1297,7 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblSystem, "AutoDetectRegion", system.autodetectRegion);
         Parse(tblSystem, "PreferredRegionOrder", system.preferredRegionOrder);
         Parse(tblSystem, "EmulateSH2Cache", system.emulateSH2Cache);
+        Parse(tblSystem, "UseSH2Recompiler", system.useSH2Recompiler);
         Parse(tblSystem, "SH2ClockFactor", system.sh2ClockFactor, kDefaultSH2ClockFactor, kMinSH2ClockFactor,
               kMaxSH2ClockFactor);
         Parse(tblSystem, "InternalBackupRAMImagePath", system.internalBackupRAMImagePath);
@@ -1941,6 +1944,7 @@ SettingsSaveResult Settings::Save() {
             {"AutoDetectRegion", system.autodetectRegion.Get()},
             {"PreferredRegionOrder", ToTOML(system.preferredRegionOrder.Get())},
             {"EmulateSH2Cache", system.emulateSH2Cache},
+            {"UseSH2Recompiler", system.useSH2Recompiler.Get()},
             {"SH2ClockFactor", system.sh2ClockFactor.Get()},
             {"InternalBackupRAMImagePath", Proximate(ProfilePath::PersistentState, system.internalBackupRAMImagePath).native()},
             {"InternalBackupRAMPerGame", system.internalBackupRAMPerGame},

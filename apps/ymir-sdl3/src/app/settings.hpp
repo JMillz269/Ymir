@@ -188,6 +188,7 @@ struct Settings {
         util::Observable<ymir::core::config::sys::VideoStandard> videoStandard;
 
         bool emulateSH2Cache;
+        util::Observable<bool> useSH2Recompiler;
         util::Observable<uint32> sh2ClockFactor;
 
         std::filesystem::path internalBackupRAMImagePath;
