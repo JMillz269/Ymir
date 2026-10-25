@@ -2595,12 +2595,7 @@ uint64 SH2::RunRecompiledBlock(uint64 cyclesLeft) {
         }
     }
 
-    const uint64 cycles = m_recompiler->Run(cyclesLeft);
-    if (cycles != 0 && (PC & 2) != 0) {
-        // The interpreter expects the longword holding the next instruction to be in the prefetch buffer
-        RefillPipeline<false>();
-    }
-    return cycles;
+    return m_recompiler->Run(cyclesLeft);
 }
 
 void SH2::FlushRecompiler() {

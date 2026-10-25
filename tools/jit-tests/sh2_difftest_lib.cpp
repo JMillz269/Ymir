@@ -217,8 +217,8 @@ uint64 t_check_thunk_address() {
     return reinterpret_cast<uint64>(&sh2::SH2Recompiler::CodeUnchangedThunk);
 }
 
-uint64 t_check_thunk(void *sh2, uint32 blockPc, uint32 offset) {
-    return sh2::SH2Recompiler::CodeUnchangedThunk(static_cast<sh2::SH2 *>(sh2), blockPc, offset);
+uint64 t_check_thunk(void *sh2, uint32 blockPc, uint32 offset, uint32 storePc) {
+    return sh2::SH2Recompiler::CodeUnchangedThunk(static_cast<sh2::SH2 *>(sh2), blockPc, offset, storePc);
 }
 
 uint64 t_step_thunk(void *sh2, uint32 instr) {

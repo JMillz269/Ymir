@@ -12,7 +12,7 @@ import random
 import sys
 
 from unicorn import (Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_PROT_ALL, UC_HOOK_CODE, UcError)
-from unicorn.arm64_const import UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X30, UC_ARM64_REG_SP, UC_ARM64_REG_PC
+from unicorn.arm64_const import UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3, UC_ARM64_REG_X30, UC_ARM64_REG_SP, UC_ARM64_REG_PC
 
 RAM_BASE_H = 0x06000000
 RAM_BASE_L = 0x00200000
@@ -43,7 +43,7 @@ lib.t_step_thunk.restype = u64
 lib.t_step_thunk.argtypes = [vp, u32]
 lib.t_check_thunk_address.restype = u64
 lib.t_check_thunk.restype = u64
-lib.t_check_thunk.argtypes = [vp, u32, u32]
+lib.t_check_thunk.argtypes = [vp, u32, u32, u32]
 lib.t_pool_region.argtypes = [C.POINTER(u64), C.POINTER(u64)]
 lib.t_stats.argtypes = [vp, C.POINTER(u64)]
 lib.t_opcode_type.restype = u32
@@ -120,7 +120,8 @@ class Recomp:
             sh2 = uc.reg_read(UC_ARM64_REG_X0)
             pc = uc.reg_read(UC_ARM64_REG_X1) & 0xFFFFFFFF
             off = uc.reg_read(UC_ARM64_REG_X2) & 0xFFFFFFFF
-            r = lib.t_check_thunk(sh2, pc, off)
+            store_pc = uc.reg_read(UC_ARM64_REG_X3) & 0xFFFFFFFF
+            r = lib.t_check_thunk(sh2, pc, off, store_pc)
             if TRACE:
                 print(f"    check pc={pc:#x} off={off} -> {r}")
             uc.reg_write(UC_ARM64_REG_X0, r)

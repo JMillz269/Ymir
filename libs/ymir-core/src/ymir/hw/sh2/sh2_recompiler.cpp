@@ -157,7 +157,7 @@ uint64 SH2Recompiler::StepThunk(SH2 *sh2, uint32 instr) {
     return sh2->JitStep(static_cast<uint16>(instr));
 }
 
-uint64 SH2Recompiler::CodeUnchangedThunk(SH2 *sh2, uint32 blockPc, uint32 offset) {
+uint64 SH2Recompiler::CodeUnchangedThunk(SH2 *sh2, uint32 blockPc, uint32 offset, uint32 storePc) {
     SH2Recompiler *self = sh2->m_recompiler.get();
     const Block &block = self->m_blocks[SlotFor(blockPc)];
     if (block.pc != blockPc || offset > block.byteLen) {
@@ -167,7 +167,18 @@ uint64 SH2Recompiler::CodeUnchangedThunk(SH2 *sh2, uint32 blockPc, uint32 offset
     if (src == nullptr) {
         return 0;
     }
-    return std::memcmp(src + offset, block.bytes.data() + offset, block.byteLen - offset) == 0 ? 1 : 0;
+    if (std::memcmp(src + offset, block.bytes.data() + offset, block.byteLen - offset) == 0) {
+        return 1;
+    }
+    // The block is about to be left. If the write came from an instruction at an aligned address, the interpreter has
+    // already fetched the longword it belongs to, so the instruction after it is still the old one.
+    if (storePc != 0xFFFFFFFFu && (storePc & 3u) == 0 && storePc >= blockPc && storePc - blockPc + 4 <= block.byteLen) {
+        const uint8 *b = block.bytes.data() + (storePc - blockPc);
+        self->m_prefetch = (static_cast<uint32>(b[0]) << 24) | (static_cast<uint32>(b[1]) << 16) |
+                           (static_cast<uint32>(b[2]) << 8) | b[3];
+        self->m_prefetchValid = true;
+    }
+    return 0;
 }
 
 SH2Recompiler::Kind SH2Recompiler::Classify(OpcodeType opcode) {
@@ -339,6 +350,11 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
     if (src == nullptr) {
         return 0;
     }
+    // An instruction in the second half of a longword comes from the prefetch buffer, which holds what was in memory
+    // when the longword was fetched. If the code was rewritten since, the interpreter has to run it.
+    if ((pc & 2u) != 0 && static_cast<uint16>((src[0] << 8) | src[1]) != static_cast<uint16>(m_sh2.m_fetchedOpcodes)) {
+        return 0;
+    }
 
     Block &block = m_blocks[SlotFor(pc)];
     if (block.pc != pc || block.hostSrc != src || std::memcmp(src, block.bytes.data(), block.byteLen) != 0) {
@@ -352,10 +368,17 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
     }
 
     ++m_stats.blocksExecuted;
-    if (m_executor) {
-        return m_executor(block.fn, m_sh2, cyclesLeft);
+    m_prefetchValid = false;
+    const uint64 cycles = m_executor ? m_executor(block.fn, m_sh2, cyclesLeft) : block.fn(&m_sh2, cyclesLeft);
+    if (cycles != 0 && (m_sh2.PC & 2) != 0) {
+        // The interpreter expects the longword holding the next instruction to be in the prefetch buffer
+        if (m_prefetchValid) {
+            m_sh2.m_fetchedOpcodes = m_prefetch;
+        } else {
+            m_sh2.RefillPipeline<false>();
+        }
     }
-    return block.fn(&m_sh2, cyclesLeft);
+    return cycles;
 }
 
 void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 bytesAvailable) {
@@ -367,6 +390,15 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         // For delay slots: how the instruction decodes when the branch before it isn't taken (BT/S and BF/S)
         OpcodeType normalOpcode = OpcodeType::Illegal;
         Kind normalKind = Kind::Helper;
+    };
+    // Whether the instruction in a delay slot is translated inline. Register-only instructions and loads and stores
+    // are, except for the PC-relative loads, whose address depends on the delay slot's target.
+    auto canInlineSlot = [](const Insn &slot) {
+        if (slot.normalKind == Kind::Inline) {
+            return slot.normalOpcode != OpcodeType::MOVA;
+        }
+        return slot.normalKind == Kind::Mem && slot.normalOpcode != OpcodeType::MOVW_I &&
+               slot.normalOpcode != OpcodeType::MOVL_I;
     };
     std::array<Insn, kMaxInstructions + 1> insns{};
     uint32 count = 0;
@@ -442,8 +474,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         }
         if (insn.kind == Kind::DelayedBranch) {
             // The delay slot has to be translated inline too, since that's where the jump is emitted
-            if (k + 1 >= count || insns[k + 1].normalKind != Kind::Inline ||
-                insns[k + 1].normalOpcode == OpcodeType::MOVA) {
+            if (k + 1 >= count || !canInlineSlot(insns[k + 1])) {
                 continue;
             }
         }
@@ -495,7 +526,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     // Whether the block has loads or stores that are translated inline, and whether any of them writes
     bool hasMem = false;
     for (uint32 k = 0; k < count; ++k) {
-        hasMem = hasMem || insns[k].kind == Kind::Mem;
+        hasMem = hasMem || insns[k].kind == Kind::Mem || insns[k].normalKind == Kind::Mem;
     }
     const sys::SH2Bus::PageLayout pages = m_bus.GetPageLayout();
 
@@ -565,6 +596,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 a.Mov(Sz::X, X0, kThis);
                 a.MovImm(Sz::W, X1, pc);
                 a.MovImm(Sz::W, X2, firstChecked * 2);
+                a.MovImm(Sz::W, X3, ipc);
                 a.MovImm(Sz::X, X16, reinterpret_cast<uint64>(&SH2Recompiler::CodeUnchangedThunk));
                 a.Blr(X16);
                 a.Cbz(Sz::X, X0, epilogue);
@@ -588,6 +620,20 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         }
     };
 
+    // What the interpreter does when a delay slot instruction is done: continue at the branch target, leave the delay
+    // slot and work out whether an interrupt held back during the slot can be taken now
+    auto delayEnd = [&] {
+        field.Load(2, kT0, L.DelaySlotTarget);
+        a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
+        field.Store(0, ZR, L.DelaySlot);
+        field.Load(0, kT1, L.IntcLevel);
+        a.Ldr(2, kT2, kThis, static_cast<uint32>(L.SR));
+        a.Ubfx(Sz::W, kT2, kT2, 4, 4);
+        a.Cmp(Sz::W, kT1, kT2);
+        a.Cset(Sz::W, kT1, Cond::HI);
+        field.Store(0, kT1, L.IntrPending);
+    };
+
     // Loads and stores. RAM and ROM (array backed memory in the cached and cache-through areas) are accessed directly;
     // anything else jumps to an out-of-line copy of the helper call, before any state has been changed.
     struct SlowPath {
@@ -596,12 +642,14 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         uint32 k;
         uint32 pc;
         uint16 w;
+        bool delaySlot;
     };
     struct CodeCheck {
         Label entry;
         Label back;
         uint32 pcNext;
         uint32 firstChecked;
+        bool delaySlot;
     };
     std::deque<SlowPath> slowPaths;
     std::deque<CodeCheck> codeChecks;
@@ -773,8 +821,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         (void)k;
     };
 
-    auto EmitMemory = [&](uint32 k, uint32 ipc, uint16 w) {
-        const OpcodeType op = insns[k].opcode;
+    auto EmitMemory = [&](uint32 k, uint32 ipc, uint16 w, OpcodeType op, bool delaySlot) {
         const uint32 n = (w >> 8) & 0xF;
         const uint32 m = (w >> 4) & 0xF;
 
@@ -888,6 +935,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         slow.k = k;
         slow.pc = ipc;
         slow.w = w;
+        slow.delaySlot = delaySlot;
 
         // 1. The address
         switch (mode) {
@@ -1020,6 +1068,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 CodeCheck &check = codeChecks.back();
                 check.pcNext = ipc + 2;
                 check.firstChecked = firstChecked;
+                check.delaySlot = delaySlot;
                 // The write [hp, hp + size) overlaps the code [base, base + len) if hp - base + (size - 1) < len + size - 1
                 a.Add(Sz::X, 2, 7, 5, Shift::LSL, 0);
                 a.Sub(Sz::X, 2, 2, kCodeBase);
@@ -1030,7 +1079,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             }
         }
         ++m_stats.inlineInstructions;
-        if (k + 1 == count) {
+        if (k + 1 == count && !delaySlot) {
             // The last instruction of the block: continue at the next one. The out-of-line path leaves the PC alone
             // when the handler had to retry the access, so this happens before the two paths join
             a.MovImm(Sz::W, kT0, ipc + 2);
@@ -1040,7 +1089,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         if (special) {
             allowSet = false;
         }
-        pcStale = k + 1 != count;
+        pcStale = k + 1 != count && !delaySlot;
     };
 
     // Translates a register-only instruction into inline code, including its cycle accounting
@@ -1689,27 +1738,23 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         // The instruction in the delay slot of a branch translated above: register-only instructions are translated
         // inline too, followed by what the interpreter does when a delay slot ends
         if (k > 0 && insns[k - 1].kind == Kind::DelayedBranch && insns[k - 1].opcode != OpcodeType::RTE &&
-            insn.normalKind == Kind::Inline && insn.normalOpcode != OpcodeType::MOVA) {
+            canInlineSlot(insn)) {
             Insn slot = insn;
             slot.opcode = insn.normalOpcode;
-            slot.kind = Kind::Inline;
-            auto delayEnd = [&] {
-                field.Load(2, kT0, L.DelaySlotTarget);
-                a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
-                field.Store(0, ZR, L.DelaySlot);
-                // The interrupt that was held back while in the delay slot can be taken now if its level allows
-                field.Load(0, kT1, L.IntcLevel);
-                a.Ldr(2, kT2, kThis, static_cast<uint32>(L.SR));
-                a.Ubfx(Sz::W, kT2, kT2, 4, 4);
-                a.Cmp(Sz::W, kT1, kT2);
-                a.Cset(Sz::W, kT1, Cond::HI);
-                field.Store(0, kT1, L.IntrPending);
+            slot.kind = insn.normalKind;
+            const bool slotIsMem = slot.kind == Kind::Mem;
+            auto emitSlot = [&](bool delay) {
+                if (slotIsMem) {
+                    EmitMemory(k, slot.pc, slot.word, slot.opcode, delay);
+                } else {
+                    emitInline(slot);
+                }
             };
             const OpcodeType branch = insns[k - 1].opcode;
             const sint32 jump = jumpIndex[k - 1];
             const uint32 branchTarget = 0; // only used for exits, which find the PC in the CPU state (pcStored)
             if (branch != OpcodeType::BTS && branch != OpcodeType::BFS) {
-                emitInline(slot);
+                emitSlot(true);
                 delayEnd();
                 if (jump >= 0) {
                     emitJump(k - 1, jump, branchTarget, true);
@@ -1722,7 +1767,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 const bool allowBefore = allowSet;
                 field.Load(0, kT0, L.DelaySlot);
                 a.Cbz(Sz::W, kT0, normal);
-                emitInline(slot);
+                emitSlot(true);
                 delayEnd();
                 if (jump >= 0) {
                     emitJump(k - 1, jump, branchTarget, true);
@@ -1731,9 +1776,12 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 knownWb = wbBefore;
                 allowSet = allowBefore;
                 a.Bind(normal);
-                emitInline(slot);
-                a.MovImm(Sz::W, kT0, insn.pc + 2);
-                a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
+                emitSlot(false);
+                if (!slotIsMem) {
+                    // (loads and stores continue at the next instruction by themselves, unless held up)
+                    a.MovImm(Sz::W, kT0, insn.pc + 2);
+                    a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
+                }
                 a.Bind(finished);
             }
             pcStale = false;
@@ -1741,7 +1789,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
         }
 
         if (insn.kind == Kind::Mem) {
-            EmitMemory(k, insn.pc, w);
+            EmitMemory(k, insn.pc, w, insn.opcode, false);
             continue;
         }
         if (insn.kind == Kind::CondBranch || (insn.kind == Kind::DelayedBranch && insn.opcode != OpcodeType::RTE)) {
@@ -1794,15 +1842,25 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     for (SlowPath &slow : slowPaths) {
         a.Bind(slow.entry);
         emitHelper(slow.k, slow.pc, slow.w, true);
+        if (slow.delaySlot) {
+            // The handler retries an access that is held up by leaving the delay slot unfinished
+            field.Load(0, kT0, L.DelaySlot);
+            a.Cbnz(Sz::W, kT0, epilogue);
+        }
         a.B(slow.join);
     }
     for (CodeCheck &check : codeChecks) {
         a.Bind(check.entry);
-        a.MovImm(Sz::W, kT0, check.pcNext);
-        a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
+        if (check.delaySlot) {
+            delayEnd();
+        } else {
+            a.MovImm(Sz::W, kT0, check.pcNext);
+            a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
+        }
         a.Mov(Sz::X, X0, kThis);
         a.MovImm(Sz::W, X1, pc);
         a.MovImm(Sz::W, X2, check.firstChecked * 2);
+        a.MovImm(Sz::W, X3, check.pcNext - 2);
         a.MovImm(Sz::X, X16, reinterpret_cast<uint64>(&SH2Recompiler::CodeUnchangedThunk));
         a.Blr(X16);
         a.Cbz(Sz::X, X0, epilogue);

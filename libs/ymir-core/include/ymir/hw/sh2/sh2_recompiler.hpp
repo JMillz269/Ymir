@@ -64,7 +64,10 @@ public:
 
     /// @brief The function generated code calls after an instruction that wrote to memory, to find out if the rest of
     /// the block it is running still matches the code in memory. Returns non-zero if so.
-    static uint64 CodeUnchangedThunk(SH2 *sh2, uint32 blockPc, uint32 offset);
+    ///
+    /// If the code changed and `storePc` is the address of the instruction that wrote to it (or 0xFFFFFFFF), the
+    /// interpreter's prefetch buffer is set up to hold what was in memory before the write, as it would have.
+    static uint64 CodeUnchangedThunk(SH2 *sh2, uint32 blockPc, uint32 offset, uint32 storePc);
 
     /// @brief Retrieves the executable memory region shared by all recompilers. For tests.
     static void GetPoolRegion(uint8 **base, size_t *size);
@@ -112,6 +115,10 @@ private:
     size_t m_chunkOffset = 0;
     size_t m_chunkSize = 0;
     size_t m_chunkUsed = 0;
+
+    // The longword the interpreter would have prefetched when a block was left right after a write to its own code
+    bool m_prefetchValid = false;
+    uint32 m_prefetch = 0;
 
     std::vector<Block> m_blocks;
     Executor m_executor;
