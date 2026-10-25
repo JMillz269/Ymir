@@ -153,6 +153,8 @@ int main() {
     Case("cinc w1, w2, eq", [](Assembler &a) { a.Cinc(Sz::W, 1, 2, Cond::EQ); });
     Case("cinc x1, x2, ne", [](Assembler &a) { a.Cinc(Sz::X, 1, 2, Cond::NE); });
     Case("ccmp w1, #5, #4, ne", [](Assembler &a) { a.CcmpImm(Sz::W, 1, 5, 4, Cond::NE); });
+    Case("ccmp x3, x4, #0, eq", [](Assembler &a) { a.Ccmp(Sz::X, 3, 4, 0, Cond::EQ); });
+    Case("ccmp w5, w6, #4, ne", [](Assembler &a) { a.Ccmp(Sz::W, 5, 6, 4, Cond::NE); });
     Case("ccmp x1, #31, #0, eq", [](Assembler &a) { a.CcmpImm(Sz::X, 1, 31, 0, Cond::EQ); });
 
     // -- Loads and stores --

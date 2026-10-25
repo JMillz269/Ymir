@@ -19,6 +19,9 @@ and interrupts), and are validated against the code memory every time they are e
 
 #include <array>
 #include <functional>
+#include <cstdlib>
+#include <memory>
+#include <type_traits>
 #include <vector>
 
 namespace ymir::sh2 {
@@ -72,6 +75,9 @@ public:
     /// @brief Retrieves the executable memory region shared by all recompilers. For tests.
     static void GetPoolRegion(uint8 **base, size_t *size);
 
+    /// @brief Retrieves the memory holding this recompiler's block table. For tests.
+    void GetBlockTableRegion(void **base, size_t *size) const;
+
     struct Stats {
         uint64 blocksCompiled = 0;
         uint64 blocksExecuted = 0;
@@ -80,6 +86,7 @@ public:
         uint64 cacheFlushes = 0;
         uint64 inlineInstructions = 0; // translated inline
         uint64 helperInstructions = 0; // executed through the interpreter's handlers
+        uint64 chainSites = 0;         // places where a block jumps straight into another
     };
     const Stats &GetStats() const {
         return m_stats;
@@ -87,7 +94,8 @@ public:
 
 private:
     static constexpr uint32 kMaxInstructions = 64;
-    static constexpr uint32 kMaxBlockBytes = (kMaxInstructions + 1) * 2;
+    // (rounded up to 16 bytes: blocks are compared in chunks of 16 when one block jumps to another)
+    static constexpr uint32 kMaxBlockBytes = ((kMaxInstructions + 1) * 2 + 15) & ~15u;
     static constexpr uint32 kBlockTableSize = 8192;
 
     struct Block {
@@ -95,7 +103,16 @@ private:
         uint32 byteLen = 0;
         BlockFn fn = nullptr; // null if no code could be generated for this PC
         const uint8 *hostSrc = nullptr; // where the block's code lives in host memory when it was compiled
+        const void *chainEntry = nullptr; // where other blocks jump to continue in this one; null if they can't
+        uint32 paddedLen = 0;             // number of valid bytes in `bytes` for the jump check (a multiple of 16)
         std::array<uint8, kMaxBlockBytes> bytes{};
+    };
+    static_assert(std::is_standard_layout_v<Block>);
+
+    struct BlockTableDeleter {
+        void operator()(Block *p) const {
+            std::free(p);
+        }
     };
 
     enum class Kind { Inline, Mem, Mac, CondBranch, Helper, DelayedBranch, EndAfter, Stop };
@@ -121,7 +138,7 @@ private:
     uint32 m_prefetch = 0;
     uint32 m_prefetchPc = 0; // the PC the longword is meant for
 
-    std::vector<Block> m_blocks;
+    std::unique_ptr<Block[], BlockTableDeleter> m_blocks; // page aligned so that tests can map it
     Executor m_executor;
     Stats m_stats;
 };

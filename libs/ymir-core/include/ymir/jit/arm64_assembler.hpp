@@ -531,6 +531,10 @@ public:
     void CcmpImm(Sz sz, Reg rn, uint32 imm5, uint32 nzcv, Cond cond) {
         Emit(0x7A400800u | S(sz) | (imm5 << 16) | (U(cond) << 12) | (rn << 5) | nzcv);
     }
+    /// @brief Conditional compare of two registers.
+    void Ccmp(Sz sz, Reg rn, Reg rm, uint32 nzcv, Cond cond) {
+        Emit(0x7A400000u | S(sz) | (rm << 16) | (U(cond) << 12) | (rn << 5) | nzcv);
+    }
     /// @brief Sets rd to 1 if the condition holds, 0 otherwise.
     void Cset(Sz sz, Reg rd, Cond cond) {
         Csinc(sz, rd, ZR, ZR, Invert(cond));

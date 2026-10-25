@@ -124,7 +124,19 @@ SH2Recompiler::SH2Recompiler(SH2 &sh2, sys::SH2Bus &bus)
     }
     m_chunkOffset = offset;
     m_chunkSize = kChunkSize;
-    m_blocks.resize(kBlockTableSize);
+    {
+        const size_t bytes = (sizeof(Block) * kBlockTableSize + 4095) & ~size_t{4095};
+        Block *table = static_cast<Block *>(std::aligned_alloc(4096, bytes));
+        if (table == nullptr) {
+            std::lock_guard lock{g_poolMutex};
+            g_freeChunks.push_back(m_chunkOffset);
+            return;
+        }
+        for (size_t i = 0; i < kBlockTableSize; ++i) {
+            new (&table[i]) Block();
+        }
+        m_blocks.reset(table);
+    }
     m_usable = true;
 }
 
@@ -139,12 +151,19 @@ void SH2Recompiler::Flush() {
     if (!m_usable) {
         return;
     }
-    for (Block &block : m_blocks) {
+    for (uint32 i = 0; i < kBlockTableSize; ++i) {
+        Block &block = m_blocks[i];
         block.pc = 1;
         block.fn = nullptr;
+        block.chainEntry = nullptr;
     }
     m_chunkUsed = 0;
     ++m_stats.cacheFlushes;
+}
+
+void SH2Recompiler::GetBlockTableRegion(void **base, size_t *size) const {
+    *base = m_blocks.get();
+    *size = (sizeof(Block) * kBlockTableSize + 4095) & ~size_t{4095};
 }
 
 void SH2Recompiler::GetPoolRegion(uint8 **base, size_t *size) {
@@ -445,11 +464,23 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     }
 
     // The bytes the block depends on, which are compared again every time it runs
-    block.pc = pc;
-    block.hostSrc = src;
-    block.byteLen = std::max<uint32>(count * 2, 2);
-    block.byteLen = std::min<uint32>(block.byteLen, bytesAvailable);
-    std::memcpy(block.bytes.data(), src, block.byteLen);
+    auto fillBlock = [&] {
+        block.pc = pc;
+        block.hostSrc = src;
+        block.chainEntry = nullptr;
+        block.byteLen = std::max<uint32>(count * 2, 2);
+        block.byteLen = std::min<uint32>(block.byteLen, bytesAvailable);
+        std::memcpy(block.bytes.data(), src, block.byteLen);
+        // Other blocks that jump straight into this one compare it in chunks of 16 bytes
+        const uint32 padded = (block.byteLen + 15) & ~15u;
+        if (padded <= bytesAvailable) {
+            std::memcpy(block.bytes.data() + block.byteLen, src + block.byteLen, padded - block.byteLen);
+            block.paddedLen = padded;
+        } else {
+            block.paddedLen = 0;
+        }
+    };
+    fillBlock();
     block.fn = nullptr;
 
     if (count == 0) {
@@ -527,6 +558,8 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     FieldAccess field{a};
 
     Label epilogue;
+    Label chainLabel;
+    std::deque<Label> labelPool; // labels must outlive the code that refers to them
     std::deque<Label> instrLabels(count); // targets of branches inside the block
     std::deque<std::pair<Label, uint32>> budgetExits; // label, PC to store; references to labels must stay valid
 
@@ -545,8 +578,10 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     a.Mov(Sz::X, kThis, X0);
     a.Mov(Sz::X, kBudget, X1);
     a.Mov(Sz::X, kCycles, ZR);
+    // Blocks that jump here have already set up the registers above
+    a.Bind(chainLabel);
+    a.MovImm(Sz::X, kCodeBase, reinterpret_cast<uint64>(src));
     if (hasMem) {
-        a.MovImm(Sz::X, kCodeBase, reinterpret_cast<uint64>(src));
         a.MovImm(Sz::X, kPageTable, reinterpret_cast<uint64>(pages.table));
     }
     // Like the interpreter, interrupts are allowed again from the first instruction on
@@ -625,6 +660,60 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             a.And(Sz::W, kT0, kT0, kT1);
             a.Cbnz(Sz::W, kT0, epilogue);
         }
+    };
+
+    // Continues in the block for `targetPc` without going back to the interpreter's loop, if that block exists and the
+    // code in memory still matches it; otherwise leaves this block like the caller's fallback would. Only targets that
+    // need no extra bookkeeping qualify: an aligned instruction in the same bus page. Returns false (emitting nothing)
+    // if the target doesn't qualify. The PC must already be stored if `pcStored`.
+    auto emitChain = [&](uint32 targetPc, bool pcStored, bool checkIntr) -> bool {
+        if ((targetPc & 3u) != 0 || (targetPc >> 16) != (pc >> 16) || targetPc == pc) {
+            return false;
+        }
+        Label *failLabel = &epilogue;
+        if (!pcStored) {
+            budgetExits.emplace_back();
+            budgetExits.back().second = targetPc;
+            failLabel = &budgetExits.back().first;
+        }
+        Label &fail = *failLabel;
+        a.Cmp(Sz::X, kCycles, kBudget);
+        a.BCond(Cond::CS, fail);
+        if (checkIntr) {
+            field.Load(0, kT0, L.IntrPending);
+            a.Cbnz(Sz::W, kT0, fail);
+        }
+        const Block *target = &m_blocks[SlotFor(targetPc)];
+        a.MovImm(Sz::X, 2, reinterpret_cast<uint64>(target));
+        a.Ldr(2, 3, 2, static_cast<uint32>(offsetof(Block, pc)));
+        a.MovImm(Sz::W, 4, targetPc);
+        a.Cmp(Sz::W, 3, 4);
+        a.BCond(Cond::NE, fail);
+        a.Ldr(3, 5, 2, static_cast<uint32>(offsetof(Block, chainEntry)));
+        a.Cbz(Sz::X, 5, fail);
+        // Same place in memory as when the block was compiled
+        a.Ldr(3, 6, 2, static_cast<uint32>(offsetof(Block, hostSrc)));
+        a.MovImm(Sz::X, 7, static_cast<uint64>(static_cast<sint64>(static_cast<sint32>(targetPc - pc))));
+        a.Add(Sz::X, 7, kCodeBase, 7);
+        a.Cmp(Sz::X, 6, 7);
+        a.BCond(Cond::NE, fail);
+        // Same code as when the block was compiled
+        a.Ldr(2, 8, 2, static_cast<uint32>(offsetof(Block, paddedLen)));
+        a.AddImm(Sz::X, 9, 2, static_cast<uint32>(offsetof(Block, bytes)));
+        Label &loop = labelPool.emplace_back();
+        a.Bind(loop);
+        a.Ldp(Sz::X, 10, 11, 7, 0);
+        a.Ldp(Sz::X, 12, 13, 9, 0);
+        a.Cmp(Sz::X, 10, 12);
+        a.Ccmp(Sz::X, 11, 13, 0, Cond::EQ);
+        a.BCond(Cond::NE, fail);
+        a.AddImm(Sz::X, 7, 7, 16);
+        a.AddImm(Sz::X, 9, 9, 16);
+        a.SubsImm(Sz::W, 8, 8, 16);
+        a.BCond(Cond::HI, loop);
+        a.Br(5);
+        ++m_stats.chainSites;
+        return true;
     };
 
     // What the interpreter does when a delay slot instruction is done: continue at the branch target, leave the delay
@@ -713,7 +802,6 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
 
     // Branches. The delay slot instruction that follows a delayed branch is executed by the handler like any other
     // instruction, with the interpreter's delay slot state set up here.
-    std::deque<Label> labelPool; // labels must outlive the code that refers to them
     auto EmitBranch = [&](uint32 k, const Insn &insn) {
         const OpcodeType op = insn.opcode;
         const uint16 w = insn.word;
@@ -750,7 +838,9 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
             } else {
                 a.MovImm(Sz::W, kT1, target);
                 a.Str(2, kT1, kThis, static_cast<uint32>(L.PC));
-                a.B(epilogue);
+                if (!emitChain(target, true, true)) {
+                    a.B(epilogue);
+                }
             }
             a.Bind(notTaken);
             a.AddImm(Sz::X, kCycles, kCycles, 1);
@@ -1895,13 +1985,61 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 }
             };
             const OpcodeType branch = insns[k - 1].opcode;
-            const sint32 jump = jumpIndex[k - 1];
+            // An instruction that blocks interrupts for the next one can leave an interrupt pending right at the delay
+            // slot's end that has to be serviced after the instruction at the target; only the interpreter's loop does
+            // that, so execution doesn't continue directly at the target in that case
+            bool slotBlocksIntr = false;
+            switch (slot.opcode) {
+            case OpcodeType::LDC_GBR_R:
+            case OpcodeType::LDC_VBR_R:
+            case OpcodeType::LDS_MACH_R:
+            case OpcodeType::LDS_MACL_R:
+            case OpcodeType::LDS_PR_R:
+            case OpcodeType::STC_GBR_R:
+            case OpcodeType::STC_SR_R:
+            case OpcodeType::STC_VBR_R:
+            case OpcodeType::STS_MACH_R:
+            case OpcodeType::STS_MACL_R:
+            case OpcodeType::STS_PR_R:
+            case OpcodeType::LDC_GBR_M:
+            case OpcodeType::LDC_VBR_M:
+            case OpcodeType::LDS_MACH_M:
+            case OpcodeType::LDS_MACL_M:
+            case OpcodeType::LDS_PR_M:
+            case OpcodeType::STC_GBR_M:
+            case OpcodeType::STC_SR_M:
+            case OpcodeType::STC_VBR_M:
+            case OpcodeType::STS_MACH_M:
+            case OpcodeType::STS_MACL_M:
+            case OpcodeType::STS_PR_M: slotBlocksIntr = true; break;
+            default: break;
+            }
+            const sint32 jump = slotBlocksIntr ? -1 : jumpIndex[k - 1];
             const uint32 branchTarget = 0; // only used for exits, which find the PC in the CPU state (pcStored)
+            // Where the branch goes, if that is known
+            uint32 staticTarget = 0;
+            bool hasStaticTarget = !slotBlocksIntr;
+            {
+                const uint16 bw = insns[k - 1].word;
+                const uint32 bpc = insns[k - 1].pc;
+                if (branch == OpcodeType::BRA || branch == OpcodeType::BSR) {
+                    staticTarget = bpc + 4 + static_cast<uint32>((static_cast<sint32>((bw & 0xFFF) << 20) >> 20) * 2);
+                } else if (branch == OpcodeType::BTS || branch == OpcodeType::BFS) {
+                    staticTarget = bpc + 4 + static_cast<uint32>(static_cast<sint8>(bw & 0xFF) * 2);
+                } else {
+                    hasStaticTarget = false;
+                }
+            }
+            if (slotBlocksIntr) {
+                hasStaticTarget = false;
+            }
             if (branch != OpcodeType::BTS && branch != OpcodeType::BFS) {
                 emitSlot(true);
                 delayEnd();
                 if (jump >= 0) {
                     emitJump(k - 1, jump, branchTarget, true);
+                } else if (hasStaticTarget) {
+                    emitChain(staticTarget, true, true);
                 }
             } else {
                 // Whether the branch was taken decides if this is a delay slot
@@ -1915,6 +2053,8 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
                 delayEnd();
                 if (jump >= 0) {
                     emitJump(k - 1, jump, branchTarget, true);
+                } else if (hasStaticTarget) {
+                    emitChain(staticTarget, true, true);
                 }
                 a.B(finished);
                 knownWb = wbBefore;
@@ -1966,6 +2106,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     if (last.kind == Kind::Inline || last.kind == Kind::CondBranch) {
         a.MovImm(Sz::W, kT0, last.pc + 2);
         a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
+        emitChain(last.pc + 2, true, true);
     }
 
     // Epilogue
@@ -2030,11 +2171,7 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     if (m_chunkUsed + sizeBytes + 16 > m_chunkSize) {
         Flush();
         // The block table was cleared, so the block being compiled has to be filled in again
-        block.pc = pc;
-        block.hostSrc = src;
-        block.byteLen = std::max<uint32>(count * 2, 2);
-        block.byteLen = std::min<uint32>(block.byteLen, bytesAvailable);
-        std::memcpy(block.bytes.data(), src, block.byteLen);
+        fillBlock();
     }
     const size_t offset = m_chunkOffset + ((m_chunkUsed + 15) & ~size_t{15});
     m_chunkUsed = (offset - m_chunkOffset) + sizeBytes;
@@ -2044,6 +2181,9 @@ void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 by
     std::memcpy(g_pool.WritePtr(offset), words.data(), sizeBytes);
     g_pool.EndWrite(offset, sizeBytes);
     block.fn = reinterpret_cast<BlockFn>(g_pool.ExecPtr(offset));
+    if (block.paddedLen != 0) {
+        block.chainEntry = g_pool.ExecPtr(offset) + chainLabel.position * sizeof(uint32);
+    }
     ++m_stats.blocksCompiled;
 }
 

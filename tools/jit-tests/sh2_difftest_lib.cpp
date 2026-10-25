@@ -225,6 +225,15 @@ uint64 t_step_thunk(void *sh2, uint32 instr) {
     return sh2::SH2Recompiler::StepThunk(static_cast<sh2::SH2 *>(sh2), instr);
 }
 
+void t_block_table(void *handle, uint64 *base, uint64 *size) {
+    auto *s = static_cast<Subject *>(handle);
+    void *b = nullptr;
+    size_t sz = 0;
+    s->sh2.m_recompiler->GetBlockTableRegion(&b, &sz);
+    *base = reinterpret_cast<uint64>(b);
+    *size = sz;
+}
+
 void t_pool_region(uint64 *base, uint64 *size) {
     uint8 *b = nullptr;
     size_t sz = 0;
@@ -236,7 +245,7 @@ void t_pool_region(uint64 *base, uint64 *size) {
 void t_stats(void *handle, uint64 *out) {
     auto *s = static_cast<Subject *>(handle);
     if (!s->sh2.m_recompiler) {
-        std::memset(out, 0, 7 * sizeof(uint64));
+        std::memset(out, 0, 8 * sizeof(uint64));
         return;
     }
     const auto &st = s->sh2.m_recompiler->GetStats();
@@ -247,6 +256,7 @@ void t_stats(void *handle, uint64 *out) {
     out[4] = st.cacheFlushes;
     out[5] = st.inlineInstructions;
     out[6] = st.helperInstructions;
+    out[7] = st.chainSites;
 }
 
 } // extern "C"

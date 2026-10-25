@@ -46,6 +46,7 @@ lib.t_check_thunk.restype = u64
 lib.t_check_thunk.argtypes = [vp, u32, u32, u32]
 lib.t_pool_region.argtypes = [C.POINTER(u64), C.POINTER(u64)]
 lib.t_stats.argtypes = [vp, C.POINTER(u64)]
+lib.t_block_table.argtypes = [vp, C.POINTER(u64), C.POINTER(u64)]
 lib.t_opcode_type.restype = u32
 lib.t_opcode_type.argtypes = [u32, u32]
 lib.t_kind.restype = u32
@@ -135,7 +136,7 @@ class Recomp:
                 lib.t_pool_region(C.byref(pb), C.byref(ps))
                 self.uc.mem_map_ptr(pb.value, ps.value, UC_PROT_ALL, pb.value)
                 self.pool_mapped = True
-            st = (u64 * 7)()
+            st = (u64 * 8)()
             lib.t_stats(self.h, st)
             if st[0] != self.last_compiled or st[3]:
                 self.uc.ctl_flush_tb()
@@ -168,6 +169,9 @@ class Recomp:
 
         self.cb = EXEC_CB(executor)
         lib.t_set_executor(self.h, self.cb)
+        tb, ts = u64(), u64()
+        lib.t_block_table(self.h, C.byref(tb), C.byref(ts))
+        self.uc.mem_map_ptr(tb.value, ts.value, UC_PROT_ALL, tb.value)
 
 
 def gen_program(rng, n):
@@ -387,7 +391,7 @@ def run_case(seed, verbose=False):
                     code)
         if get_ram(interp) != get_ram(rec.h):
             return f"seed {seed} step {step}: RAM differs", code
-    stats = (u64 * 7)()
+    stats = (u64 * 8)()
     lib.t_stats(rec.h, stats)
     lib.t_destroy(interp)
     lib.t_destroy(rec.h)
@@ -422,8 +426,9 @@ def directed():
                 good = good and si[reg] == val
         print(("ok   " if good else "FAIL ") + name, "" if good else f"interp={[hex(x) for x in si[:8]]} rec={[hex(x) for x in sr[:8]]} "
               f"cycles {ci}/{cr} {rec.errors[:1]}")
-        stats = (u64 * 7)()
+        stats = (u64 * 8)()
         lib.t_stats(rec.h, stats)
+        print(f"     ({stats[0]} blocks compiled, {stats[1]} entered from the interpreter, {stats[7]} jump sites)")
         if stats[1] == 0:
             print("FAIL " + name + ": the recompiler never ran")
             good = False
@@ -443,6 +448,15 @@ def directed():
     check("loop rewriting its head",
           [0xE301, 0x2201, 0x4410, 0x8BFB, 0x0009, 0x0009],
           {0: 0xE309, 2: CODE_ADDR, 4: 2}, expect={3: 9})
+    # Two blocks that jump into each other (the second is too far away to be part of the first one)
+    pingpong = [0x7301, 0xA043, 0x0009] + [0x0009] * 67          # 0x1000: ADD #1,R3 / BRA to 0x108C / NOP
+    pingpong += [0x7402, 0x4510, 0x8BB6]      # 0x108C: ADD #2,R4 / DT R5 / BF back to 0x1000
+    pingpong += [0x0009, 0x0009]
+    check("blocks jumping into each other", pingpong, {5: 40}, budget=900)
+    # The same, but the first block rewrites the first instruction of the second one on its way
+    rewrite = [0x7301, 0x2201, 0xA042, 0x0009] + [0x0009] * 66
+    rewrite += [0x7402, 0x4510, 0x8BB6, 0x0009, 0x0009]
+    check("a block rewrites the block it jumps to", rewrite, {0: 0x7405, 2: CODE_ADDR + 0x8C, 5: 40}, budget=900)
     # Backward branch loop that runs many times
     check("counted loop", [0xE30A, 0x4310, 0x8FFE, 0x0009, 0x0009], {}, budget=200)
     return ok
@@ -457,7 +471,7 @@ def main():
     iters = int(sys.argv[2]) if len(sys.argv) > 2 else 200
     seed0 = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     failures = 0
-    tot = [0] * 7
+    tot = [0] * 8
     for i in range(iters):
         err, extra = run_case(seed0 + i)
         if err:
@@ -475,7 +489,7 @@ def main():
         print("FAIL: the recompiler never ran")
         failures += 1
     print(f"{iters - failures}/{iters} cases matched")
-    print("recompiler stats: compiled=%d executed=%d rejected=%d invalidations=%d flushes=%d inline=%d helper=%d" %
+    print("recompiler stats: compiled=%d executed=%d rejected=%d invalidations=%d flushes=%d inline=%d helper=%d chain=%d" %
           tuple(tot))
     sys.exit(1 if failures else 0)
 
