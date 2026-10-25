@@ -34,7 +34,7 @@ namespace {
     constexpr size_t kPoolSize = 64u * 1024u * 1024u;
     constexpr size_t kBigPoolSize = 256u * 1024u * 1024u;
 
-    std::atomic<uint64> g_statConflicts{0}, g_statInvalidations{0}, g_statBlocks{0}, g_statFlushes{0}, g_statBytes{0}, g_statInstructions{0}, g_statCompileNs{0},
+    std::atomic<uint64> g_statInlineInsns{0}, g_statHelperInsns{0}, g_statConflicts{0}, g_statInvalidations{0}, g_statBlocks{0}, g_statFlushes{0}, g_statBytes{0}, g_statInstructions{0}, g_statCompileNs{0},
         g_statSlowestNs{0};
 
     // Optimizations that can be switched off; changing them bumps the generation, which makes every recompiler discard
@@ -201,7 +201,8 @@ SH2Recompiler::GlobalStats SH2Recompiler::GetGlobalStats() {
     return {g_statBlocks.load(std::memory_order_relaxed), g_statFlushes.load(std::memory_order_relaxed),
             g_statBytes.load(std::memory_order_relaxed), g_statInstructions.load(std::memory_order_relaxed),
             g_statCompileNs.load(std::memory_order_relaxed), g_statSlowestNs.load(std::memory_order_relaxed),
-            g_statConflicts.load(std::memory_order_relaxed), g_statInvalidations.load(std::memory_order_relaxed)};
+            g_statConflicts.load(std::memory_order_relaxed), g_statInvalidations.load(std::memory_order_relaxed),
+            g_statInlineInsns.load(std::memory_order_relaxed), g_statHelperInsns.load(std::memory_order_relaxed)};
 }
 
 void SH2Recompiler::GetBlockTableRegion(void **base, size_t *size) const {
@@ -436,23 +437,22 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
 
     Block *slots = &m_blocks[SlotFor(pc)];
     Block &block = [&]() -> Block & {
-        if (slots[0].pc == pc) {
-            return slots[0];
+        for (uint32 way = 0; way < kBlockWays; ++way) {
+            if (slots[way].pc == pc) {
+                return slots[way];
+            }
         }
-        if (slots[1].pc == pc) {
-            return slots[1];
-        }
-        // Not there: use an empty slot, or else throw out the second one so that a block that other blocks link to
-        // stays where it is
-        if ((slots[0].pc & 1u) != 0) {
-            return slots[0];
-        }
-        if ((slots[1].pc & 1u) != 0) {
-            return slots[1];
+        // Not there: use an empty slot, or else throw out one of the others in turn, so that the block in the first
+        // way (the only one other blocks link to) stays where it is
+        for (uint32 way = 0; way < kBlockWays; ++way) {
+            if ((slots[way].pc & 1u) != 0) {
+                return slots[way];
+            }
         }
         ++m_stats.conflictEvictions;
         g_statConflicts.fetch_add(1, std::memory_order_relaxed);
-        return slots[1];
+        m_victimWay = m_victimWay % (kBlockWays - 1) + 1;
+        return slots[m_victimWay];
     }();
     if (block.pc != pc || block.hostSrc != src || std::memcmp(src, block.bytes.data(), block.byteLen) != 0) {
         if (block.pc == pc) {
@@ -481,7 +481,11 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
 
 void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 bytesAvailable) {
     const auto started = std::chrono::steady_clock::now();
+    const uint64 inlineBefore = m_stats.inlineInstructions;
+    const uint64 helperBefore = m_stats.helperInstructions;
     CompileBlock(block, pc, src, bytesAvailable);
+    g_statInlineInsns.fetch_add(m_stats.inlineInstructions - inlineBefore, std::memory_order_relaxed);
+    g_statHelperInsns.fetch_add(m_stats.helperInstructions - helperBefore, std::memory_order_relaxed);
     const uint64 ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count();
     g_statCompileNs.fetch_add(ns, std::memory_order_relaxed);
     uint64 slowest = g_statSlowestNs.load(std::memory_order_relaxed);

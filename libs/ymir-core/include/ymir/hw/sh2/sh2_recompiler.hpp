@@ -89,6 +89,8 @@ public:
         uint64 slowestCompileNanoseconds = 0;
         uint64 conflictEvictions = 0; // blocks thrown out of the table by a block for another address
         uint64 invalidations = 0;     // blocks compiled again because the code in memory changed
+        uint64 inlineInstructions = 0;
+        uint64 helperInstructions = 0; // translated as calls to the interpreter
     };
     static GlobalStats GetGlobalStats();
 
@@ -144,11 +146,12 @@ private:
     static constexpr uint32 kMaxInstructions = 32;
     // (rounded up to 16 bytes: blocks are compared in chunks of 16 when one block jumps to another)
     static constexpr uint32 kMaxBlockBytes = ((kMaxInstructions + 1) * 2 + 2 + 15) & ~15u;
-    // The table has two ways per set: a block lives in either of the two slots its address maps to. Slot numbers
+    // The table has four ways per set: a block lives in one of the four slots its address maps to. Slot numbers
     // returned by SlotFor are those of the first way; generated code only links to blocks found there.
-    static constexpr uint32 kBlockTableSize = 32768;
+    static constexpr uint32 kBlockWays = 4;
+    static constexpr uint32 kBlockTableSize = 65536;
     static constexpr uint32 kBlockSetBits = 14;
-    static_assert((1u << (kBlockSetBits + 1)) == kBlockTableSize);
+    static_assert((1u << kBlockSetBits) * kBlockWays == kBlockTableSize);
 
     struct Block {
         uint32 pc = 1; // odd = empty slot
@@ -171,15 +174,17 @@ private:
 
     static Kind Classify(OpcodeType opcode);
     static uint32 SlotFor(uint32 pc) {
-        return (((pc >> 1) * 0x9E3779B1u) >> (32 - kBlockSetBits)) << 1;
+        return (((pc >> 1) * 0x9E3779B1u) >> (32 - kBlockSetBits)) * kBlockWays;
     }
     // The block for `pc` if there is one in the table
     const Block *FindBlock(uint32 pc) const {
         const Block *first = &m_blocks[SlotFor(pc)];
-        if (first[0].pc == pc) {
-            return &first[0];
+        for (uint32 way = 0; way < kBlockWays; ++way) {
+            if (first[way].pc == pc) {
+                return &first[way];
+            }
         }
-        return first[1].pc == pc ? &first[1] : nullptr;
+        return nullptr;
     }
 
     void Compile(Block &block, uint32 pc, const uint8 *src, uint32 bytesAvailable);
@@ -196,6 +201,7 @@ private:
 
     // The longword the interpreter would have prefetched when a block was left right after a write to its own code
     uint32 m_optionsGeneration = 0;
+    uint32 m_victimWay = 0;
     bool m_prefetchValid = false;
     uint32 m_prefetch = 0;
     uint32 m_prefetchPc = 0; // the PC the longword is meant for
