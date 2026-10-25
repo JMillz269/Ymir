@@ -119,6 +119,7 @@ private:
     // The longword the interpreter would have prefetched when a block was left right after a write to its own code
     bool m_prefetchValid = false;
     uint32 m_prefetch = 0;
+    uint32 m_prefetchPc = 0; // the PC the longword is meant for
 
     std::vector<Block> m_blocks;
     Executor m_executor;

@@ -167,18 +167,22 @@ uint64 SH2Recompiler::CodeUnchangedThunk(SH2 *sh2, uint32 blockPc, uint32 offset
     if (src == nullptr) {
         return 0;
     }
-    if (std::memcmp(src + offset, block.bytes.data() + offset, block.byteLen - offset) == 0) {
-        return 1;
-    }
-    // The block is about to be left. If the write came from an instruction at an aligned address, the interpreter has
-    // already fetched the longword it belongs to, so the instruction after it is still the old one.
+    const bool unchanged = std::memcmp(src + offset, block.bytes.data() + offset, block.byteLen - offset) == 0;
+
+    // If the write came from an instruction at an aligned address, the interpreter has already fetched the longword it
+    // belongs to, so the instruction after it stays the old one even if that is what was overwritten. Remember it for
+    // when the block is left there.
     if (storePc != 0xFFFFFFFFu && (storePc & 3u) == 0 && storePc >= blockPc && storePc - blockPc + 4 <= block.byteLen) {
-        const uint8 *b = block.bytes.data() + (storePc - blockPc);
-        self->m_prefetch = (static_cast<uint32>(b[0]) << 24) | (static_cast<uint32>(b[1]) << 16) |
-                           (static_cast<uint32>(b[2]) << 8) | b[3];
-        self->m_prefetchValid = true;
+        const uint32 pairOffset = storePc - blockPc + 2;
+        if (std::memcmp(src + pairOffset, block.bytes.data() + pairOffset, 2) != 0) {
+            const uint8 *b = block.bytes.data() + (storePc - blockPc);
+            self->m_prefetch = (static_cast<uint32>(b[0]) << 24) | (static_cast<uint32>(b[1]) << 16) |
+                               (static_cast<uint32>(b[2]) << 8) | b[3];
+            self->m_prefetchPc = storePc + 2;
+            self->m_prefetchValid = true;
+        }
     }
-    return 0;
+    return unchanged ? 1 : 0;
 }
 
 SH2Recompiler::Kind SH2Recompiler::Classify(OpcodeType opcode) {
@@ -372,7 +376,7 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
     const uint64 cycles = m_executor ? m_executor(block.fn, m_sh2, cyclesLeft) : block.fn(&m_sh2, cyclesLeft);
     if (cycles != 0 && (m_sh2.PC & 2) != 0) {
         // The interpreter expects the longword holding the next instruction to be in the prefetch buffer
-        if (m_prefetchValid) {
+        if (m_prefetchValid && m_sh2.PC == m_prefetchPc) {
             m_sh2.m_fetchedOpcodes = m_prefetch;
         } else {
             m_sh2.RefillPipeline<false>();
