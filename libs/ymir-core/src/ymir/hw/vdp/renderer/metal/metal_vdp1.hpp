@@ -57,6 +57,7 @@ public:
         fbramDirty.ClearAll();
         action = Action::None;
 
+        std::memcpy(vramShadow.data(), vdpState.mem1.VRAM.data(), vramShadow.size());
         vramDirty.SetAll();
         VDP1FlushVRAM();
         gpu.Vdp1UploadFBRAM(0, vdpState.mem1.FBRAM.data(), static_cast<uint32>(kVDP1FBRAMSize * 2));
@@ -73,10 +74,20 @@ public:
     // -----------------------------------------------------------------------------------------------------------------
     // Called by the renderer
 
-    void WriteVRAM(uint32 address) {
+    /// @brief Notes a write to VDP1 VRAM. The write has been made to the VRAM in the VDP state already.
+    void WriteVRAM(uint32 address, uint16 value, uint32 size) {
         // Submit spans if the target address is in use by a textured polygon in the current batch
         if (vramTexUsageTracker.IsInUse(address)) [[unlikely]] {
             VDP1SubmitSpans();
+        }
+        // The GPU gets its VRAM from the shadow copy, which is one write behind the one in the VDP state: the batch
+        // above has to be drawn with the contents from before this write, so this write can only reach the shadow copy
+        // after it.
+        address &= kVDP1VRAMSize - 1;
+        if (size == 1) {
+            vramShadow[address] = static_cast<uint8>(value);
+        } else {
+            util::WriteBE<uint16>(&vramShadow[address & ~1u], value);
         }
         vramDirty.Set(address >> kVRAMDirtyBitmapChunkSizeShift);
     }
@@ -177,6 +188,8 @@ private:
     static constexpr size_t kVRAMDirtyBitmapSize = kVDP1VRAMSize / kVRAMDirtyBitmapChunkSize;
 
     util::DirtyBitmap<kVRAMDirtyBitmapSize> vramDirty;
+    /// @brief The VRAM contents the GPU has or is about to get (see WriteVRAM).
+    std::vector<uint8> vramShadow = std::vector<uint8>(kVDP1VRAMSize);
     /// @brief Tracks VRAM usage by textures in a batch of spans.
     MemoryUsageTracker<kVDP1VRAMSize> vramTexUsageTracker;
 
@@ -286,7 +299,7 @@ private:
         for (pos = vramDirty.FindNext(count); pos < vramDirty.Size(); pos = vramDirty.FindNext(count, pos + count)) {
             const uint32 vramOffset = static_cast<uint32>(pos << kVRAMDirtyBitmapChunkSizeShift);
             const uint32 size = static_cast<uint32>(count << kVRAMDirtyBitmapChunkSizeShift);
-            gpu.Vdp1UploadVRAM(vramOffset, &vdpState.mem1.VRAM[vramOffset], size);
+            gpu.Vdp1UploadVRAM(vramOffset, &vramShadow[vramOffset], size);
         }
         vramDirty.ClearAll();
     }

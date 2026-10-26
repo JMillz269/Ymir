@@ -1116,7 +1116,7 @@ void MetalVDPRenderer::PostLoadStateSync() {
 
 void MetalVDPRenderer::VDP1WriteVRAM(uint32 address, uint8 value) {
     if (m_impl->vdp1) {
-        m_impl->vdp1->WriteVRAM(address);
+        m_impl->vdp1->WriteVRAM(address, value, 1);
         if (m_impl->compare) {
             SoftwareVDPRenderer::VDP1WriteVRAM(address, value);
         }
@@ -1128,7 +1128,7 @@ void MetalVDPRenderer::VDP1WriteVRAM(uint32 address, uint8 value) {
 void MetalVDPRenderer::VDP1WriteVRAM(uint32 address, uint16 value) {
     if (m_impl->vdp1) {
         // The address is always word-aligned
-        m_impl->vdp1->WriteVRAM(address);
+        m_impl->vdp1->WriteVRAM(address, value, 2);
         if (m_impl->compare) {
             SoftwareVDPRenderer::VDP1WriteVRAM(address, value);
         }
