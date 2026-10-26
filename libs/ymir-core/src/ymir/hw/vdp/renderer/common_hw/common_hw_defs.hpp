@@ -2,6 +2,9 @@
 
 #include <ymir/core/types.hpp>
 
+#include <ymir/hw/vdp/vdp1_defs.hpp>
+#include <ymir/hw/vdp/vdp2_defs.hpp>
+
 #include <cmrc/cmrc.hpp>
 CMRC_DECLARE(ymir_core_shaders);
 
