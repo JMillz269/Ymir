@@ -1037,10 +1037,17 @@ void SoftwareVDPRenderer::VDP1HRPublish(uint8 fbIndex) {
     }
     const uint32 s = m_hrScale1;
     if (s > 1 && m_hrDrawScale[fbIndex] == m_hrKey1) {
-        const size_t count = size_t(kHRFBWidth) * kHRFBHeight * s * s;
-        std::copy_n(m_hrDraw[fbIndex].data(), count, m_hrShown[fbIndex].data());
+        // VDP2 only reads the part of the framebuffer that fits the widest displayable mode
+        const size_t stride = size_t(kHRFBWidth) * s;
+        const size_t rowLength = size_t(kHROutMaxW) * s;
+        auto publish = [&](const std::vector<uint16> &src, std::vector<uint16> &dst) {
+            for (size_t row = 0; row < size_t(kHRFBHeight) * s; row++) {
+                std::copy_n(&src[row * stride], rowLength, &dst[row * stride]);
+            }
+        };
+        publish(m_hrDraw[fbIndex], m_hrShown[fbIndex]);
         if (m_hrKey1 & kHRMeshKey) {
-            std::copy_n(m_hrMesh[fbIndex].data(), count, m_hrMeshShown[fbIndex].data());
+            publish(m_hrMesh[fbIndex], m_hrMeshShown[fbIndex]);
         }
         m_hrShownScale[fbIndex].store(m_hrKey1, std::memory_order_release);
     } else {
@@ -3028,6 +3035,35 @@ bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
     [[maybe_unused]] Saved savedMesh;
     bool saved = false;
 
+    // When sprite color calculation, color offset and the debug overlay are off, a sprite pixel that ends up as the
+    // topmost layer (and is not a shadow) is the output as is. A plane whose changed pixels all qualify needs no
+    // composition, which saves most of the work in scenes where the sprite layer is drawn over the backgrounds.
+    [[maybe_unused]] bool fastCompose = false;
+    [[maybe_unused]] std::array<uint8, kW> maxOtherPriority;
+    [[maybe_unused]] std::array<uint32, kW> backgroundOut;
+    if constexpr (!transparentMeshes) {
+        const VDP2State &state2 = m_state.state2;
+        if (m_hrFastCooldown > 0) {
+            m_hrFastCooldown--;
+        }
+        fastCompose = m_hrFastCooldown == 0 && state2.layerEnabled[LYR_Sprite] && !params.colorCalcEnable &&
+                      !m_vdp2DebugRenderOptions.overlay.enable &&
+                      !(regs2.colorOffsetEnable[LYR_Sprite] &&
+                        regs2.colorOffset[regs2.colorOffsetSelect[LYR_Sprite]].nonZero);
+        if (fastCompose) {
+            std::fill_n(maxOtherPriority.begin(), w, uint8(0));
+            for (uint32 layer = 0; layer < m_layerOutputs[0].size(); layer++) {
+                if (layer == LYR_Sprite || !state2.layerEnabled[layer]) {
+                    continue;
+                }
+                const auto &priorities = m_layerOutputs[0][layer].pixels.priority;
+                for (uint32 x = 0; x < w; x++) {
+                    maxOtherPriority[x] = std::max(maxOtherPriority[x], priorities[x]);
+                }
+            }
+        }
+    }
+
     const size_t hrStride = size_t(kHRFBWidth) * s;
     const size_t outStride = size_t(w) * s;
     const uint8 *nativeRow = &nativeFB[size_t(y) * kHRFBWidth * sizeof(uint16)];
@@ -3085,6 +3121,23 @@ bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
                     save(savedMesh, meshLayerOut, meshLayerAttrs);
                 }
                 saved = true;
+
+                if constexpr (!transparentMeshes) {
+                    if (fastCompose) {
+                        // Compose the line without the sprite layer, for pixels that turn transparent
+                        for (uint32 x = 0; x < w; x++) {
+                            layerOut.pixels.priority[x] = 0;
+                            layerAttrs.specialType[x] = SpriteData::Special::Normal;
+                            layerAttrs.shadowOrWindow[x] = false;
+                        }
+                        m_composeOut = backgroundOut.data();
+                        VDP2ComposeLine<false, transparentMeshes>(y, regs2, false);
+                        m_composeOut = nullptr;
+                        for (uint32 x = 0; x < w; x++) {
+                            restore(savedSprite, x, layerOut, layerAttrs);
+                        }
+                    }
+                }
             }
 
             for (uint32 x = 0; x < w; x++) {
@@ -3101,6 +3154,42 @@ bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
                     if constexpr (transparentMeshes) {
                         restore(savedMesh, x, meshLayerOut, meshLayerAttrs);
                     }
+                }
+            }
+
+            if constexpr (!transparentMeshes) {
+                if (fastCompose) {
+                    bool direct = true;
+                    for (uint32 x = 0; x < w; x++) {
+                        if (!differs[x]) {
+                            continue;
+                        }
+                        const uint8 priority = layerOut.pixels.priority[x];
+                        const auto type = layerAttrs.specialType[x];
+                        const bool shadow =
+                            type == SpriteData::Special::Shadow || (!params.useSpriteWindow && layerAttrs.shadowOrWindow[x]);
+                        if (shadow || (priority == 0 ? false : (priority < maxOtherPriority[x] || type != SpriteData::Special::Normal))) {
+                            direct = false;
+                            break;
+                        }
+                    }
+                    if (direct) {
+                        const uint32 *nativeLine = &m_framebuffer[size_t(y) * w];
+                        uint32 *out = planeOut[plane].data();
+                        for (uint32 x = 0; x < w; x++) {
+                            if (!differs[x]) {
+                                out[x] = nativeLine[x];
+                            } else if (layerOut.pixels.priority[x] == 0) {
+                                out[x] = backgroundOut[x];
+                            } else {
+                                out[x] = layerOut.pixels.color[x].u32 | 0xFF000000u;
+                            }
+                        }
+                        planeSource[plane] = static_cast<int>(plane);
+                        continue;
+                    }
+                    m_hrFastCooldown = 4;
+                    fastCompose = false;
                 }
             }
 

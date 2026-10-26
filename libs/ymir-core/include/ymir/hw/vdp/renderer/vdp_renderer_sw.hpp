@@ -218,6 +218,10 @@ private:
     // True while a VDP1 command is being replayed into the large framebuffer.
     bool m_hrPass = false;
 
+    // Lines (VDP2 side) to wait before trying the shortcut that skips composing upscaled sprite pixels again after it
+    // found a line that needs the full composition.
+    uint32 m_hrFastCooldown = 0;
+
     // Large VDP1 framebuffers drawn by the VDP1 context. Pixels are host-endian RGB555+MSB.
     // Each entry has m_hrDrawScale[i] as its scale, or 0 if the contents are stale.
     std::array<std::vector<uint16>, 2> m_hrDraw;
