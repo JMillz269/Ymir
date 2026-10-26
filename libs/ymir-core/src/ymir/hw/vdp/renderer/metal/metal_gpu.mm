@@ -1,0 +1,580 @@
+#include "metal_gpu.hpp"
+
+#include "../common_hw/common_hw_defs.hpp"
+
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+namespace ymir::vdp::metal {
+
+namespace {
+
+    // The compute shaders are compiled to Metal libraries at build time (see cmake/CompileShaders.cmake). Names of the
+    // shader resources are those of the HLSL variables.
+    constexpr const char *kSpriteShaderPath = "src/vdp/cs_vdp2_render_sprite.metallib";
+    constexpr const char *kBGShaderPath = "src/vdp/cs_vdp2_render_bgs.metallib";
+    constexpr const char *kComposeShaderPath = "src/vdp/cs_vdp2_compose.metallib";
+
+    /// Frames that can be in the GPU's hands at the same time
+    constexpr uint32 kNumFrameSlots = 3;
+
+    /// Memory for the data of the passes of a frame
+    constexpr NSUInteger kArenaSize = 16u * 1024u * 1024u;
+
+    /// Everything the shaders can be bound to
+    enum class Res {
+        Unknown,
+        Common,
+        LayerParams,
+        Vram,
+        CramColor,
+        CramRotCoeff,
+        RotParamBases,
+        SpriteFB,
+        ComposeParams,
+        LnclBack,
+        LayerOut,
+        SpriteAttrs,
+        RbgLineColor,
+        ColorCalcWindow,
+        Composite,
+    };
+
+    Res ResourceForName(NSString *name) {
+        struct Entry {
+            const char *name;
+            Res res;
+        };
+        static const Entry kEntries[] = {
+            {"g_layerRenderParams", Res::LayerParams},
+            {"g_vram", Res::Vram},
+            {"g_cramColor", Res::CramColor},
+            {"g_cramRotCoeff", Res::CramRotCoeff},
+            {"g_rotParamBases", Res::RotParamBases},
+            {"g_spriteFB", Res::SpriteFB},
+            {"g_composeParams", Res::ComposeParams},
+            {"g_lnclBackIn", Res::LnclBack},
+            {"g_layerOut", Res::LayerOut},
+            {"g_layerIn", Res::LayerOut},
+            {"g_spriteAttrsOut", Res::SpriteAttrs},
+            {"g_spriteAttrsIn", Res::SpriteAttrs},
+            {"g_rbgLineColorOut", Res::RbgLineColor},
+            {"g_rbgLineColorIn", Res::RbgLineColor},
+            {"g_colorCalcWindowOut", Res::ColorCalcWindow},
+            {"g_colorCalcWindowIn", Res::ColorCalcWindow},
+            {"g_compositeOut", Res::Composite},
+        };
+        for (const Entry &entry : kEntries) {
+            if ([name isEqualToString:[NSString stringWithUTF8String:entry.name]]) {
+                return entry.res;
+            }
+        }
+        // The constant buffer is named after its HLSL cbuffer
+        if ([name hasPrefix:@"CommonRenderParams"] || [name hasPrefix:@"type_CommonRenderParams"]) {
+            return Res::Common;
+        }
+        return Res::Unknown;
+    }
+
+    /// One resource of a shader: what it is and where the shader expects it
+    struct Slot {
+        Res res;
+        bool isTexture;
+        NSUInteger index;
+    };
+
+    struct Pipeline {
+        id<MTLComputePipelineState> state = nil;
+        std::vector<Slot> slots;
+    };
+
+    /// Data of a pass, staged in the frame's arena. It stays valid for as long as the contents are the same and the
+    /// arena isn't reused.
+    struct Blob {
+        std::vector<uint8> data;
+        uint64 generation = ~0ull;
+        NSUInteger offset = 0;
+        id<MTLTexture> texture = nil; // view of the data as a texture, for shaders that read it like a texel buffer
+    };
+
+    NSString *ErrorString(NSError *error) {
+        return error != nil ? [error localizedDescription] : @"unknown error";
+    }
+
+} // namespace
+
+class MetalGpu final : public Gpu {
+public:
+    ~MetalGpu() override {
+        // Wait for the GPU to finish with everything
+        if (m_cmdBuf != nil) {
+            EndEncoder();
+            [m_cmdBuf commit];
+            [m_cmdBuf waitUntilCompleted];
+            m_cmdBuf = nil;
+        }
+        if (m_frameStarted) {
+            // (this frame was never finished, so nothing will signal its semaphore)
+            dispatch_semaphore_signal(m_slots[m_currentSlot].done);
+        }
+        for (uint32 i = 0; i < kNumFrameSlots; ++i) {
+            if (m_slots[i].lastBuf != nil) {
+                [m_slots[i].lastBuf waitUntilCompleted];
+            }
+            if (m_slots[i].done != nil) {
+                // A semaphore has to be back at its initial value when it is released
+                dispatch_semaphore_wait(m_slots[i].done, DISPATCH_TIME_FOREVER);
+                dispatch_semaphore_signal(m_slots[i].done);
+            }
+        }
+    }
+
+    bool Initialize(id<MTLDevice> device, std::string &error) {
+        m_device = device;
+        m_queue = [device newCommandQueue];
+        if (m_queue == nil) {
+            error = "Could not create a Metal command queue";
+            return false;
+        }
+
+        if (!CreatePipeline(kSpriteShaderPath, m_sprite, error) || !CreatePipeline(kBGShaderPath, m_bgs, error) ||
+            !CreatePipeline(kComposeShaderPath, m_compose, error)) {
+            return false;
+        }
+
+        // Memory the GPU reads the VDP2 VRAM and the VDP1 framebuffers from
+        m_vram = [device newBufferWithLength:kVDP2VRAMSize options:MTLResourceStorageModePrivate];
+        m_spriteFB = [device newBufferWithLength:kVDP1FBRAMSize * 2 options:MTLResourceStorageModePrivate];
+        if (m_vram == nil || m_spriteFB == nil) {
+            error = "Could not allocate GPU memory for VRAM";
+            return false;
+        }
+
+        // Layer outputs: NBG0-3, RBG0-1, sprite, transparent meshes
+        m_layerOut = Create2DTexture(MTLPixelFormatRGBA8Uint, kMaxResH, kMaxResV, 8);
+        m_spriteAttrs = Create2DTexture(MTLPixelFormatR16Uint, kMaxResH, kMaxResV, 2);
+        m_rbgLineColor = Create2DTexture(MTLPixelFormatRGBA8Uint, kMaxNormalResH, kMaxNormalResV, 2);
+        m_colorCalcWindow = Create2DTexture(MTLPixelFormatR8Uint, kMaxResH, kMaxResV, 1);
+        m_composite = Create2DTexture(MTLPixelFormatRGBA8Unorm, kMaxResH, kMaxResV, 1);
+        if (m_layerOut == nil || m_spriteAttrs == nil || m_rbgLineColor == nil || m_colorCalcWindow == nil ||
+            m_composite == nil) {
+            error = "Could not allocate GPU textures";
+            return false;
+        }
+
+        for (uint32 i = 0; i < kNumFrameSlots; ++i) {
+            FrameSlot &slot = m_slots[i];
+            slot.arena = [device newBufferWithLength:kArenaSize
+                                             options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
+            slot.readback = [device newBufferWithLength:kMaxResH * kMaxResV * sizeof(uint32)
+                                                options:MTLResourceStorageModeShared];
+            slot.done = dispatch_semaphore_create(1);
+            if (slot.arena == nil || slot.readback == nil) {
+                error = "Could not allocate GPU buffers";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
+
+    void UploadVRAM(uint32 offset, const void *data, uint32 size) override {
+        if (size == 0 || offset + size > kVDP2VRAMSize) {
+            return;
+        }
+        UploadTo(m_vram, offset, data, size);
+    }
+
+    void UploadSpriteFB(uint32 offset, const void *data, uint32 size) override {
+        if (size == 0 || offset + size > kVDP1FBRAMSize * 2) {
+            return;
+        }
+        UploadTo(m_spriteFB, offset, data, size);
+    }
+
+    void RenderLayers(const LayerPassParams &params) override {
+        if (params.numLines == 0) {
+            return;
+        }
+        EnsureFrame();
+
+        // (if the arena fills up while staging, it is emptied and everything has to be staged again)
+        Staged staged{};
+        uint64 generation;
+        do {
+            generation = m_arenaGeneration;
+            staged.common = Stage(m_blobCommon, params.common, params.commonSize);
+            staged.layerParams = Stage(m_blobLayerParams, params.layerParams, params.layerParamsSize);
+            staged.cramColor =
+                StageTexels(m_blobCramColor, params.cramColors, params.cramColorsSize, MTLPixelFormatRGBA8Uint);
+            staged.cramRotCoeff = Stage(m_blobCramRot, params.cramRotCoeffs, params.cramRotCoeffsSize);
+            staged.rotParamBases = Stage(m_blobRotBases, params.rotParamBases, params.rotParamBasesSize);
+        } while (generation != m_arenaGeneration);
+        EnsureCompute();
+
+        // Sprite layer
+        [m_encoder setComputePipelineState:m_sprite.state];
+        Bind(m_sprite, staged);
+        [m_encoder dispatchThreadgroups:MTLSizeMake((params.hres + 31) / 32, params.numLines, 1)
+                  threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+        // Background layers
+        [m_encoder setComputePipelineState:m_bgs.state];
+        Bind(m_bgs, staged);
+        [m_encoder dispatchThreadgroups:MTLSizeMake(params.hres / 32, params.numLines, 1)
+                  threadsPerThreadgroup:MTLSizeMake(32, 1, 7)];
+    }
+
+    void Compose(const ComposePassParams &params) override {
+        if (params.numLines == 0) {
+            return;
+        }
+        EnsureFrame();
+
+        Staged staged{};
+        uint64 generation;
+        do {
+            generation = m_arenaGeneration;
+            staged.common = Stage(m_blobCommon, params.common, params.commonSize);
+            staged.composeParams = Stage(m_blobCompose, params.composeParams, params.composeParamsSize);
+            staged.lnclBack =
+                StageTexels(m_blobLnclBack, params.lnclBack, params.lnclBackSize, MTLPixelFormatRGBA8Uint);
+        } while (generation != m_arenaGeneration);
+        EnsureCompute();
+
+        [m_encoder setComputePipelineState:m_compose.state];
+        Bind(m_compose, staged);
+        [m_encoder dispatchThreadgroups:MTLSizeMake((params.hres + 31) / 32, params.numLines, 1)
+                  threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+
+    FinishedFrame FinishFrame(uint32 width, uint32 height) override {
+        EnsureFrame();
+        FrameSlot &slot = m_slots[m_currentSlot];
+
+        width = std::min<uint32>(width, kMaxResH);
+        height = std::min<uint32>(height, kMaxResV);
+
+        // Copy the image out of the GPU
+        EndEncoder();
+        if (width > 0 && height > 0) {
+            id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+            [blit copyFromTexture:m_composite
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 0)
+                       sourceSize:MTLSizeMake(width, height, 1)
+                         toBuffer:slot.readback
+                destinationOffset:0
+           destinationBytesPerRow:width * sizeof(uint32)
+         destinationBytesPerImage:width * height * sizeof(uint32)];
+            [blit endEncoding];
+        }
+
+        dispatch_semaphore_t done = slot.done;
+        [m_cmdBuf addCompletedHandler:^(id<MTLCommandBuffer>) {
+            dispatch_semaphore_signal(done);
+        }];
+        [m_cmdBuf commit];
+        slot.lastBuf = m_cmdBuf;
+        slot.width = width;
+        slot.height = height;
+        m_cmdBuf = nil;
+
+        // The previous frame has had a whole frame's time to finish
+        FinishedFrame result{};
+        if (m_hasPrevious) {
+            FrameSlot &prev = m_slots[m_previousSlot];
+            [prev.lastBuf waitUntilCompleted];
+            result.pixels = static_cast<const uint32 *>([prev.readback contents]);
+            result.width = prev.width;
+            result.height = prev.height;
+        }
+        m_previousSlot = m_currentSlot;
+        m_hasPrevious = true;
+        m_currentSlot = (m_currentSlot + 1) % kNumFrameSlots;
+        m_frameStarted = false;
+        return result;
+    }
+
+private:
+    struct FrameSlot {
+        id<MTLBuffer> arena = nil;
+        id<MTLBuffer> readback = nil;
+        dispatch_semaphore_t done = nil;
+        id<MTLCommandBuffer> lastBuf = nil;
+        uint32 width = 0;
+        uint32 height = 0;
+    };
+
+    /// Where the data of the current pass is in the arena
+    struct Staged {
+        const Blob *common = nullptr;
+        const Blob *layerParams = nullptr;
+        const Blob *cramColor = nullptr;
+        const Blob *cramRotCoeff = nullptr;
+        const Blob *rotParamBases = nullptr;
+        const Blob *composeParams = nullptr;
+        const Blob *lnclBack = nullptr;
+    };
+
+    id<MTLDevice> m_device = nil;
+    id<MTLCommandQueue> m_queue = nil;
+
+    Pipeline m_sprite, m_bgs, m_compose;
+
+    id<MTLBuffer> m_vram = nil;
+    id<MTLBuffer> m_spriteFB = nil;
+    id<MTLTexture> m_layerOut = nil;
+    id<MTLTexture> m_spriteAttrs = nil;
+    id<MTLTexture> m_rbgLineColor = nil;
+    id<MTLTexture> m_colorCalcWindow = nil;
+    id<MTLTexture> m_composite = nil;
+
+    std::array<FrameSlot, kNumFrameSlots> m_slots;
+    uint32 m_currentSlot = 0;
+    uint32 m_previousSlot = 0;
+    bool m_hasPrevious = false;
+    bool m_frameStarted = false;
+
+    id<MTLCommandBuffer> m_cmdBuf = nil;
+    id<MTLComputeCommandEncoder> m_encoder = nil;
+
+    NSUInteger m_arenaOffset = 0;
+    uint64 m_arenaGeneration = 0;
+
+    Blob m_blobCommon, m_blobLayerParams, m_blobCramColor, m_blobCramRot, m_blobRotBases, m_blobCompose,
+        m_blobLnclBack;
+
+    // -------------------------------------------------------------------------------------------------------------
+    // Setup
+
+    id<MTLTexture> Create2DTexture(MTLPixelFormat format, NSUInteger width, NSUInteger height, NSUInteger slices) {
+        MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
+        desc.textureType = slices > 1 ? MTLTextureType2DArray : MTLTextureType2D;
+        desc.pixelFormat = format;
+        desc.width = width;
+        desc.height = height;
+        desc.arrayLength = slices;
+        desc.storageMode = MTLStorageModePrivate;
+        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        return [m_device newTextureWithDescriptor:desc];
+    }
+
+    bool CreatePipeline(const char *path, Pipeline &pipeline, std::string &error) {
+        auto &fs = g_fsShaders;
+        if (!fs.is_file(path)) {
+            error = std::string("Embedded shader not found: ") + path;
+            return false;
+        }
+        auto file = fs.open(path);
+        dispatch_data_t data = dispatch_data_create(file.begin(), file.size(), nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        NSError *nsError = nil;
+        id<MTLLibrary> library = [m_device newLibraryWithData:data error:&nsError];
+        if (library == nil) {
+            error = std::string("Could not load shader library ") + path + ": " + [ErrorString(nsError) UTF8String];
+            return false;
+        }
+
+        id<MTLFunction> function = [library newFunctionWithName:@"CSMain"];
+        if (function == nil && [library.functionNames count] > 0) {
+            function = [library newFunctionWithName:library.functionNames[0]];
+        }
+        if (function == nil) {
+            error = std::string("No compute function in shader library ") + path;
+            return false;
+        }
+
+        MTLAutoreleasedComputePipelineReflection reflection = nil;
+        pipeline.state = [m_device newComputePipelineStateWithFunction:function
+                                                               options:MTLPipelineOptionArgumentInfo
+                                                            reflection:&reflection
+                                                                 error:&nsError];
+        if (pipeline.state == nil) {
+            error = std::string("Could not create compute pipeline for ") + path + ": " +
+                    [ErrorString(nsError) UTF8String];
+            return false;
+        }
+
+        for (MTLArgument *arg in reflection.arguments) {
+            Slot slot{};
+            slot.res = ResourceForName(arg.name);
+            slot.isTexture = arg.type == MTLArgumentTypeTexture;
+            slot.index = arg.index;
+            if (arg.type != MTLArgumentTypeBuffer && arg.type != MTLArgumentTypeTexture) {
+                continue;
+            }
+            if (slot.res == Res::Unknown) {
+                std::fprintf(stderr, "[Ymir] Metal VDP: unrecognized shader resource '%s' in %s\n",
+                             [arg.name UTF8String], path);
+                continue;
+            }
+            pipeline.slots.push_back(slot);
+        }
+        return true;
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
+    // Frames and command encoding
+
+    void EnsureFrame() {
+        if (m_frameStarted) {
+            return;
+        }
+        FrameSlot &slot = m_slots[m_currentSlot];
+        // Wait until the GPU is done with the frame that used this slot before
+        dispatch_semaphore_wait(slot.done, DISPATCH_TIME_FOREVER);
+        m_arenaOffset = 0;
+        ++m_arenaGeneration;
+        m_cmdBuf = [m_queue commandBuffer];
+        m_encoder = nil;
+        m_frameStarted = true;
+    }
+
+    void EndEncoder() {
+        if (m_encoder != nil) {
+            [m_encoder endEncoding];
+            m_encoder = nil;
+        }
+    }
+
+    void EnsureCompute() {
+        if (m_encoder == nil) {
+            m_encoder = [m_cmdBuf computeCommandEncoder];
+        }
+    }
+
+    /// Submits the work recorded so far and waits for it, to make room in the arena
+    void DrainArena() {
+        EndEncoder();
+        [m_cmdBuf commit];
+        [m_cmdBuf waitUntilCompleted];
+        m_cmdBuf = [m_queue commandBuffer];
+        m_arenaOffset = 0;
+        ++m_arenaGeneration;
+    }
+
+    NSUInteger Allocate(NSUInteger size) {
+        constexpr NSUInteger kAlign = 256;
+        size = (size + kAlign - 1) & ~(kAlign - 1);
+        if (m_arenaOffset + size > kArenaSize) {
+            DrainArena();
+        }
+        const NSUInteger offset = m_arenaOffset;
+        m_arenaOffset += size;
+        return offset;
+    }
+
+    /// Copies data into the arena, unless the same data is already there
+    const Blob *Stage(Blob &blob, const void *data, uint32 size) {
+        if (data == nullptr || size == 0) {
+            return nullptr;
+        }
+        if (blob.generation == m_arenaGeneration && blob.data.size() == size &&
+            std::memcmp(blob.data.data(), data, size) == 0) {
+            return &blob;
+        }
+        blob.offset = Allocate(size);
+        std::memcpy(static_cast<uint8 *>([m_slots[m_currentSlot].arena contents]) + blob.offset, data, size);
+        blob.data.assign(static_cast<const uint8 *>(data), static_cast<const uint8 *>(data) + size);
+        blob.generation = m_arenaGeneration;
+        blob.texture = nil;
+        return &blob;
+    }
+
+    /// Like Stage, for data the shader reads as a buffer of texels (Buffer<uint4> in HLSL)
+    const Blob *StageTexels(Blob &blob, const void *data, uint32 size, MTLPixelFormat format) {
+        const Blob *staged = Stage(blob, data, size);
+        if (staged == nullptr || blob.texture != nil) {
+            return staged;
+        }
+        // (SPIRV-Cross turns a texel buffer into a 2D texture; a single row holds all the texels)
+        const NSUInteger texelSize = 4;
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                         width:size / texelSize
+                                                                                        height:1
+                                                                                     mipmapped:NO];
+        desc.storageMode = MTLStorageModeShared;
+        desc.cpuCacheMode = MTLCPUCacheModeWriteCombined; // (has to match the buffer)
+        desc.usage = MTLTextureUsageShaderRead;
+        blob.texture = [m_slots[m_currentSlot].arena newTextureWithDescriptor:desc offset:blob.offset bytesPerRow:size];
+        return staged;
+    }
+
+    /// Copies data to a GPU buffer in sequence with the passes
+    void UploadTo(id<MTLBuffer> dst, NSUInteger dstOffset, const void *data, uint32 size) {
+        EnsureFrame();
+        const NSUInteger offset = Allocate(size);
+        id<MTLBuffer> arena = m_slots[m_currentSlot].arena;
+        std::memcpy(static_cast<uint8 *>([arena contents]) + offset, data, size);
+        EndEncoder();
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:arena sourceOffset:offset toBuffer:dst destinationOffset:dstOffset size:size];
+        [blit endEncoding];
+    }
+
+    void Bind(const Pipeline &pipeline, const Staged &staged) {
+        id<MTLBuffer> arena = m_slots[m_currentSlot].arena;
+        for (const Slot &slot : pipeline.slots) {
+            const Blob *blob = nullptr;
+            id<MTLBuffer> buffer = nil;
+            NSUInteger offset = 0;
+            id<MTLTexture> texture = nil;
+            switch (slot.res) {
+            case Res::Common: blob = staged.common; break;
+            case Res::LayerParams: blob = staged.layerParams; break;
+            case Res::CramColor: blob = staged.cramColor; break;
+            case Res::CramRotCoeff: blob = staged.cramRotCoeff; break;
+            case Res::RotParamBases: blob = staged.rotParamBases; break;
+            case Res::ComposeParams: blob = staged.composeParams; break;
+            case Res::LnclBack: blob = staged.lnclBack; break;
+            case Res::Vram: buffer = m_vram; break;
+            case Res::SpriteFB: buffer = m_spriteFB; break;
+            case Res::LayerOut: texture = m_layerOut; break;
+            case Res::SpriteAttrs: texture = m_spriteAttrs; break;
+            case Res::RbgLineColor: texture = m_rbgLineColor; break;
+            case Res::ColorCalcWindow: texture = m_colorCalcWindow; break;
+            case Res::Composite: texture = m_composite; break;
+            case Res::Unknown: break;
+            }
+
+            if (blob != nullptr) {
+                if (slot.isTexture) {
+                    texture = blob->texture;
+                } else {
+                    buffer = arena;
+                    offset = blob->offset;
+                }
+            }
+
+            if (slot.isTexture) {
+                [m_encoder setTexture:texture atIndex:slot.index];
+            } else {
+                [m_encoder setBuffer:buffer offset:offset atIndex:slot.index];
+            }
+        }
+    }
+};
+
+std::unique_ptr<Gpu> Gpu::Create(void *device, std::string &error) {
+    if (device == nullptr) {
+        error = "No Metal device provided";
+        return nullptr;
+    }
+    auto gpu = std::make_unique<MetalGpu>();
+    if (!gpu->Initialize((__bridge id<MTLDevice>)device, error)) {
+        return nullptr;
+    }
+    return gpu;
+}
+
+} // namespace ymir::vdp::metal

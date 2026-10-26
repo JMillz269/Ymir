@@ -352,6 +352,8 @@ int App::Run(const CommandLineOptions &options) {
             [&](uint32 value) { m_context.EnqueueEvent(events::emu::SetInternalResolution(value)); });
         videoSettings.enhancements.skipNativeVDP1.Observe(
             [&](bool value) { m_context.EnqueueEvent(events::emu::SetSkipNativeVDP1(value)); });
+        videoSettings.useMetalRenderer.Observe(
+            [&](bool value) { m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false)); });
     }
 
     // Profile priority:
@@ -488,7 +490,7 @@ int App::Run(const CommandLineOptions &options) {
     m_context.EnqueueEvent(events::emu::LoadInternalBackupMemory());
     EnableRewindBuffer(settings.general.enableRewindBuffer);
     util::BoostCurrentProcessPriority(settings.general.boostProcessPriority);
-    if (settings.video.useHardwareAcceleration) {
+    if (settings.video.useHardwareAcceleration || settings.video.useMetalRenderer) {
         m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false));
     }
 

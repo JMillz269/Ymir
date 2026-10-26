@@ -60,6 +60,18 @@ This saves roughly the cost of a native VDP1 pass. Games that read the framebuff
 drawn see the previous contents, and a thin line the enlarged drawing doesn't put on that sub-pixel can be missing
 from the readback (never from the picture).
 
+## Metal renderer (experimental)
+
+**Settings > Display > Metal Renderer** draws the Saturn's second video chip (VDP2: the background layers, the sprite
+layer built from VDP1's framebuffer and the final mixing of all of them) with the GPU, using the same compute shaders as
+the Direct3D 12 renderer on Windows. VDP1 (polygons, sprites and lines) is still drawn by the software renderer on the
+processor. Moving VDP2 to the GPU frees a good part of the processor time a frame takes and lowers heat.
+
+The finished image is read back from the GPU and shown through the normal display path, so all the display filters,
+upscaling and screenshots keep working. The image arrives one frame late. Deinterlacing, Transparent Meshes and
+Internal Resolution are not supported yet and are ignored while the Metal renderer is on. If it can't be created the
+setting is turned off again and the software renderer is used.
+
 `tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer
 (`build.sh` builds it against a core build) to check the output and time frames.
 

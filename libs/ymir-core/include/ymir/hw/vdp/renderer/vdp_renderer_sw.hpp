@@ -72,6 +72,12 @@ public:
         return false;
     }
 
+    /// @brief Whether this renderer uses the GPU for part of the work. It still delivers frames through the software
+    /// renderer's frame callback.
+    virtual bool IsGpuAssisted() const {
+        return false;
+    }
+
     void Reset(bool hard) override;
 
     // -------------------------------------------------------------------------

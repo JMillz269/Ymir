@@ -506,6 +506,7 @@ struct Settings {
         bool borderlessFullScreen;
 
         util::Observable<bool> useHardwareAcceleration;
+        util::Observable<bool> useMetalRenderer; // draw VDP2 on the GPU with Metal (VDP1 stays on the CPU)
 
         struct SoftwareRenderer {
             util::Observable<bool> threadedVDP1;

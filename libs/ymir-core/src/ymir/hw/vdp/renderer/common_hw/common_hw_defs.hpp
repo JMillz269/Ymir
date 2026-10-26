@@ -793,10 +793,10 @@ inline constexpr size_t kVDP2CRAMColorCacheEntries = kVDP2CRAMSize / sizeof(uint
 using CRAMColorCache = std::array<ColorR8G8B8A8, kVDP2CRAMColorCacheEntries>;
 
 /// @brief Size of the VDP2 CRAM color buffer, in bytes.
-inline constexpr UINT kVDP2CRAMColorBufferSize = sizeof(CRAMColorCache);
+inline constexpr uint32 kVDP2CRAMColorBufferSize = sizeof(CRAMColorCache);
 
 /// @brief Size of the VDP2 CRAM rotation coefficients buffer, in bytes.
 /// The second half of CRAM can be used for that purpose.
-inline constexpr UINT kVDP2CRAMRotCoeffBufferSize = kVDP2CRAMSize / 2;
+inline constexpr uint32 kVDP2CRAMRotCoeffBufferSize = kVDP2CRAMSize / 2;
 
 } // namespace ymir::vdp

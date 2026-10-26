@@ -432,6 +432,7 @@ function(_shader_make_compile_spirv_command)
     # Parse arguments
     set(options
         INCLUDE_REFLECTION
+        VK_DX_LAYOUT
     )
     set(oneValueArgs
         OUT_COMMAND
@@ -456,6 +457,11 @@ function(_shader_make_compile_spirv_command)
         endif ()
         if (ARG_INCLUDE_REFLECTION)
             list(APPEND _compile_flags "-fspv-reflect")
+        endif ()
+        if (ARG_VK_DX_LAYOUT)
+            # Lay out constant and structured buffers the way Direct3D does, so that the same C++ structures can be
+            # used with every graphics API
+            list(APPEND _compile_flags "-fvk-use-dx-layout")
         endif ()
 
         set(${ARG_OUT_COMMAND}
@@ -608,12 +614,17 @@ endfunction()
 #   INCLUDE_REFLECTION (optional)
 #       If specified, shaders are compiled with reflection information.
 #
+#   VK_DX_LAYOUT (optional)
+#       If specified, SPIR-V (and therefore Metal) shaders use the Direct3D memory layout for constant and structured
+#       buffers (-fvk-use-dx-layout).
+#
 # Output:
 #   OUT_PATHS is set to a list of full paths of the generated .cso/.spv files.
 function(compile_shader)
     # Parse arguments
     set(options
         INCLUDE_REFLECTION
+        VK_DX_LAYOUT
     )
     set(oneValueArgs
         OUT_PATHS
@@ -711,6 +722,7 @@ function(compile_shader)
         INCLUDE_PATHS ${ARG_INCLUDE_PATHS}
         MACROS ${ARG_MACROS}
         ${_fwd_INCLUDE_REFLECTION}
+        ${_fwd_VK_DX_LAYOUT}
     )
     if (_spirv_compile_command)
         list(APPEND _compile_commands ${_spirv_compile_command})

@@ -105,6 +105,24 @@ EmuEvent SwitchVDPRenderer(bool verbose) {
 
         auto &settings = ctx.serviceLocator.GetRequired<Settings>();
         auto &vdp = ctx.saturn.instance->VDP;
+#if YMIR_PLATFORM_HAS_METAL
+        if (settings.video.useMetalRenderer) {
+            if (auto *metalCtx = gfxCtx.As<gfx::MetalGraphicsContext>()) {
+                auto result = vdp.UseMetalRenderer(metalCtx->GetDevice());
+                if (result) {
+                    ctx.screen.frameReadyEvent.Set(); // unblock main thread in case video sync is enabled
+                    notifySuccess("Metal renderer initialized successfully");
+                    return;
+                }
+                ctx.DisplayMessage(fmt::format("Failed to create Metal VDP renderer: {}", result.Error().message));
+            } else {
+                ctx.DisplayMessage("The Metal renderer needs the Metal graphics backend");
+            }
+
+            // Metal renderer instantiation failed; revert setting
+            settings.video.useMetalRenderer = false;
+        }
+#endif
         if (settings.video.useHardwareAcceleration) {
             const gfx::Backend backend = gfxCtx.GetBackend();
             switch (backend) {
@@ -141,7 +159,8 @@ EmuEvent SwitchVDPRenderer(bool verbose) {
         }
 
         // Fall back to software renderer if not using GPU acceleration or the hardware renderer failed to initialize
-        if (vdp.GetRenderer().GetType() != vdp::VDPRendererType::Software) {
+        const vdp::SoftwareVDPRenderer *currentSw = vdp.GetRenderer().As<vdp::VDPRendererType::Software>();
+        if (currentSw == nullptr || currentSw->IsGpuAssisted()) {
             vdp.UseSoftwareRenderer();
             gfxCtx.ResetDisplayOutputTextures();
             notifySuccess("Software renderer initialized successfully");

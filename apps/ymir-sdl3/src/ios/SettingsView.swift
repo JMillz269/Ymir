@@ -289,6 +289,14 @@ struct DisplaySettingsView: View {
             }
 
             Section {
+                Toggle("Metal Renderer (Experimental)", isOn: store.bool("video.metalRenderer"))
+            } header: {
+                Text("Graphics Chip")
+            } footer: {
+                Text("Draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The first video chip (polygons and sprites) is still drawn by the processor. The image arrives one frame later. Deinterlacing, Transparent Meshes and Internal Resolution don't work with it yet and are ignored while it is on.")
+            }
+
+            Section {
                 Picker("Internal Resolution", selection: store.int("video.internalResolution", default: 1)) {
                     Text("Native").tag(1)
                     Text("2×").tag(2)

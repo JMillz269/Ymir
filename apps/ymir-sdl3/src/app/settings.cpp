@@ -1148,6 +1148,7 @@ void Settings::ResetToDefaults() {
     video.fullScreenMode.refreshRate = 0.0f;
     video.fullScreenMode.pixelDensity = 0.0f;
     video.useHardwareAcceleration = false;
+    video.useMetalRenderer = false;
     video.swRenderer.threadedVDP1 = true;
     video.swRenderer.threadedVDP2 = true;
     video.swRenderer.threadedDeinterlacer = true;
@@ -1677,6 +1678,7 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
                 Parse(tblSwRenderer, "ThreadedDeinterlacer", video.swRenderer.threadedDeinterlacer);
             }
             Parse(tblVideo, "UseHardwareAcceleration", video.useHardwareAcceleration);
+            Parse(tblVideo, "UseMetalRenderer", video.useMetalRenderer);
         } else {
             if (configVersion >= 4) {
                 Parse(tblVideo, "ThreadedVDP1", video.swRenderer.threadedVDP1);
@@ -2119,6 +2121,7 @@ SettingsSaveResult Settings::Save() {
                 {"ThreadedDeinterlacer", video.swRenderer.threadedDeinterlacer.Get()},
             }}},
             {"UseHardwareAcceleration", video.useHardwareAcceleration.Get()},
+            {"UseMetalRenderer", video.useMetalRenderer.Get()},
             {"Enhancements", toml::table{{
                 {"Deinterlace", video.enhancements.deinterlace.Get()},
                 {"TransparentMeshes", video.enhancements.transparentMeshes.Get()},

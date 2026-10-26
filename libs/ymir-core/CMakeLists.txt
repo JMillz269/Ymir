@@ -394,9 +394,21 @@ if (WIN32)
             src/ymir/hw/vdp/renderer/d3d12/d3d12_upload_buffer.hpp
     )
 elseif (APPLE)
-    target_sources(ymir-core PRIVATE
-        src/ymir/gpu/shaders/gpu_shaders_macos.cpp
+    target_sources(ymir-core
+        PUBLIC
+            include/ymir/hw/vdp/renderer/vdp_renderer_hw_metal.hpp
+
+        PRIVATE
+            src/ymir/gpu/shaders/gpu_shaders_macos.cpp
+
+            src/ymir/hw/vdp/renderer/vdp_renderer_hw_metal.cpp
+            src/ymir/hw/vdp/renderer/metal/metal_gpu.hpp
+            src/ymir/hw/vdp/renderer/metal/metal_gpu.mm
     )
+    set_source_files_properties(src/ymir/hw/vdp/renderer/metal/metal_gpu.mm PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON
+                                COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(ymir-core PUBLIC "-framework Metal" "-framework Foundation")
 elseif (UNIX) # Linux and FreeBSD
     target_sources(ymir-core PRIVATE
         src/ymir/gpu/shaders/gpu_shaders_unixlike.cpp
@@ -481,6 +493,7 @@ foreach (SHADER_SRC ${COMPUTE_SHADER_SOURCES})
         VARIANT ${_variant}
         MACROS ${_macros}
         INCLUDE_PATHS "${SHADER_INPUT_DIR}/include"
+        VK_DX_LAYOUT
     )
     list(APPEND COMPILED_SHADERS ${SHADER_BINARY_FILES})
     list(APPEND COMPILED_SHADERS_SOURCE_PATHS ${_shader_src_path})
