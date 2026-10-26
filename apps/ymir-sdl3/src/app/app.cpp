@@ -86,6 +86,7 @@
 #include <ymir/media/host_cd.hpp>
 
 #include <ymir/util/lsn_denormals.hpp>
+#include <ymir/util/perf_counters.hpp>
 #include <ymir/util/process.hpp>
 #include <ymir/util/scope_guard.hpp>
 #include <ymir/util/string.hpp>
@@ -1173,7 +1174,9 @@ void App::RunEmulator() {
                 }
 
                 if (sharedCtx.emuSpeed.limitSpeed && screen.videoSync) {
+                    const auto perfWaitStart = ymir::perf::Clock::now();
                     screen.frameRequestEvent.Wait();
+                    ymir::perf::emuWaitNs.fetch_add(ymir::perf::NanosecondsSince(perfWaitStart), std::memory_order_relaxed);
                     screen.frameRequestEvent.Reset();
                 }
                 if (settings.video.reduceLatency || !screen.updated || screen.videoSync) {
@@ -2230,7 +2233,9 @@ void App::RunEmulator() {
 
         // Update display
         if (screen.videoSync && screen.expectFrame && !m_context.paused) {
+            const auto perfWaitStart = ymir::perf::Clock::now();
             screen.frameReadyEvent.Wait();
+            ymir::perf::guiWaitNs.fetch_add(ymir::perf::NanosecondsSince(perfWaitStart), std::memory_order_relaxed);
             screen.frameReadyEvent.Reset();
             screen.expectFrame = false;
         }

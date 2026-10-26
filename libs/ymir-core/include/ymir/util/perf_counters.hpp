@@ -19,6 +19,8 @@ inline std::atomic<uint64> otherNs{0}; // VDP timing, scheduler events (SCSP, 68
 inline std::atomic<uint64> vdp1Ns{0};  // VDP1 command execution (render thread if threaded)
 inline std::atomic<uint64> vdp2Ns{0};  // VDP2 line rendering (render thread if threaded)
 inline std::atomic<uint64> frames{0};  // frames completed
+inline std::atomic<uint64> emuWaitNs{0}; // emulator waiting for the display to ask for the next frame (video sync)
+inline std::atomic<uint64> guiWaitNs{0}; // display waiting for the emulator to finish a frame (video sync)
 
 using Clock = std::chrono::steady_clock;
 
