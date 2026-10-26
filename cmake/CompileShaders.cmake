@@ -462,6 +462,10 @@ function(_shader_make_compile_spirv_command)
             # Lay out constant and structured buffers the way Direct3D does, so that the same C++ structures can be
             # used with every graphics API
             list(APPEND _compile_flags "-fvk-use-dx-layout")
+            # Direct3D keeps read-only (t) and read-write (u) registers apart, but they all end up in the same set of
+            # bindings in SPIR-V, where a shader with t1 and u1 would get both on binding 1 and SPIRV-Cross would
+            # alias them to the same buffer. Move the read-write ones out of the way.
+            list(APPEND _compile_flags -fvk-u-shift 16 0)
         endif ()
 
         set(${ARG_OUT_COMMAND}
