@@ -234,6 +234,7 @@ public:
     bool Initialize(id<MTLDevice> device, std::string &error) {
         m_device = device;
         m_queue = [device newCommandQueue];
+        m_fence = [device newFence];
         if (m_queue == nil) {
             error = "Could not create a Metal command queue";
             return false;
@@ -636,6 +637,8 @@ private:
 
     id<MTLDevice> m_device = nil;
     id<MTLCommandQueue> m_queue = nil;
+    id<MTLFence> m_fence = nil;
+    bool m_fenceUpdated = false;
 
     Pipeline m_sprite, m_bgs, m_compose;
 
@@ -772,6 +775,9 @@ private:
 
     void EndEncoder() {
         if (m_encoder != nil) {
+            // Every compute encoder waits for the one before it (see EnsureCompute)
+            [m_encoder updateFence:m_fence];
+            m_fenceUpdated = true;
             [m_encoder endEncoding];
             m_encoder = nil;
         }
@@ -780,6 +786,13 @@ private:
     void EnsureCompute() {
         if (m_encoder == nil) {
             m_encoder = [m_cmdBuf computeCommandEncoder];
+            // Metal doesn't necessarily know that a texture made from a buffer and the buffer are the same memory, and
+            // runs encoders that don't seem to depend on each other at the same time. The shaders use the same memory
+            // both ways (atomics on the buffer, reads and writes through the texture), so make every encoder wait for
+            // the previous one.
+            if (m_fenceUpdated) {
+                [m_encoder waitForFence:m_fence];
+            }
         }
     }
 
