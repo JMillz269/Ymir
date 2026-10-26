@@ -4,6 +4,7 @@
 
 #include <ymir/hw/sh2/sh2_recompiler.hpp>
 #include <ymir/util/dev_log.hpp>
+#include <ymir/util/perf_counters.hpp>
 
 #include <bit>
 #include <cassert>
@@ -529,6 +530,7 @@ bool Saturn::Run() {
 
     const uint64 cycles = static_config::max_timing_granularity ? 1 : std::max<sint64>(m_scheduler.RemainingCount(), 0);
 
+    const auto perfStart = perf::Clock::now();
     uint64 execCycles;
     if (SCU.IsDMAActive()) {
         // Stall both SH2 CPUs and only run the SCU and other stuff
@@ -585,6 +587,7 @@ bool Saturn::Run() {
             } while (execCycles < cycles);
         }
     }
+    const auto perfSH2Done = perf::Clock::now();
     VDP.Advance(execCycles);
     if (idleSync) {
         sh2::SH2Recompiler::NoteSliceCycles(execCycles, coarseCycles);
@@ -607,6 +610,14 @@ bool Saturn::Run() {
     }*/
 
     m_scheduler.Advance(execCycles);
+
+    if constexpr (!debug) {
+        const auto perfEnd = perf::Clock::now();
+        using std::chrono::duration_cast;
+        using std::chrono::nanoseconds;
+        perf::sh2Ns.fetch_add(duration_cast<nanoseconds>(perfSH2Done - perfStart).count(), std::memory_order_relaxed);
+        perf::otherNs.fetch_add(duration_cast<nanoseconds>(perfEnd - perfSH2Done).count(), std::memory_order_relaxed);
+    }
 
     if constexpr (debug) {
         if (m_debugBreakMgr.LowerDebugBreak()) {

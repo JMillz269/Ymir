@@ -3,6 +3,7 @@
 #include <ymir/util/constexpr_for.hpp>
 #include <ymir/util/dev_log.hpp>
 #include <ymir/util/inline.hpp>
+#include <ymir/util/perf_counters.hpp>
 #include <ymir/util/thread_name.hpp>
 #include <ymir/util/unreachable.hpp>
 
@@ -582,6 +583,7 @@ void SoftwareVDPRenderer::VDP2EndFrame() {
         m_vdp2RenderingContext.renderFinishedSignal.Reset();
     }
     Callbacks.VDP2DrawFinished();
+    perf::frames.fetch_add(1, std::memory_order_relaxed);
     if (m_frameHR && m_frameHRW == m_HRes && m_frameHRH == m_VRes) {
         SwCallbacks.FrameComplete(m_hrFramebuffer.data(), m_HRes, m_VRes, m_frameHRScale);
     } else {
@@ -1867,6 +1869,13 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1PlotTexturedQuad(uint32 cmdAddress, V
 template <bool deinterlace, bool transparentMeshes>
 FORCE_INLINE void SoftwareVDPRenderer::VDP1Cmd_Handle(uint32 cmdAddress, VDP1Command::Control control) {
     using enum VDP1Command::CommandType;
+    const auto perfStart = perf::Clock::now();
+    struct PerfScope {
+        perf::Clock::time_point start;
+        ~PerfScope() {
+            perf::vdp1Ns.fetch_add(perf::NanosecondsSince(start), std::memory_order_relaxed);
+        }
+    } perfScope{perfStart};
 
     auto drawCommand = [&] {
         switch (control.command) {
@@ -3131,6 +3140,14 @@ bool SoftwareVDPRenderer::VDP2HRComposeLine(uint32 y, const VDP2Regs &regs2) {
 template <bool deinterlace, bool transparentMeshes>
 void SoftwareVDPRenderer::VDP2DrawLine(uint32 y, bool altField) {
     devlog::trace<grp::swvdp2_verbose>("Drawing line {} {} field", y, (altField ? "alt" : "main"));
+
+    const auto perfStart = perf::Clock::now();
+    struct PerfScope {
+        perf::Clock::time_point start;
+        ~PerfScope() {
+            perf::vdp2Ns.fetch_add(perf::NanosecondsSince(start), std::memory_order_relaxed);
+        }
+    } perfScope{perfStart};
 
     const VDP1RegTVMR &tvmr = VDP2GetVDP1TVMR();
     const VDP2Regs &regs2 = VDP2GetRegs();
