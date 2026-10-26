@@ -331,7 +331,8 @@ public:
         m_fragments = [m_device newBufferWithLength:kMaxVDP1OITFragmentsPerDispatch * sizeof(VDP1OITFragment)
                                             options:MTLResourceStorageModePrivate];
         m_fbramReadback = [m_device newBufferWithLength:kVDP1FBRAMSize * 2 options:MTLResourceStorageModeShared];
-        if (m_vdp1Vram == nil || m_spriteOutBuf == nil || m_listHeadsBuf == nil || m_fragments == nil ||
+        m_vramReadback = [m_device newBufferWithLength:kVDP1VRAMSize options:MTLResourceStorageModeShared];
+        if (m_vramReadback == nil || m_vdp1Vram == nil || m_spriteOutBuf == nil || m_listHeadsBuf == nil || m_fragments == nil ||
             m_fbramReadback == nil) {
             error = "Could not allocate GPU memory for VDP1";
             return false;
@@ -481,6 +482,17 @@ public:
         [m_encoder dispatchThreadgroups:MTLSizeMake((params.count + 63) / 64, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         Vdp1Barrier();
+    }
+
+    void Vdp1DownloadVRAM(void *dst, uint32 size) override {
+        size = std::min<uint32>(size, kVDP1VRAMSize);
+        EnsureFrame();
+        EndEncoder();
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:m_vdp1Vram sourceOffset:0 toBuffer:m_vramReadback destinationOffset:0 size:size];
+        [blit endEncoding];
+        DrainArena();
+        std::memcpy(dst, [m_vramReadback contents], size);
     }
 
     void Vdp1DownloadFBRAM(void *dst, uint32 size) override {
@@ -657,6 +669,7 @@ private:
     id<MTLBuffer> m_listHeadsBuf = nil;
     id<MTLBuffer> m_fragments = nil;
     id<MTLBuffer> m_fbramReadback = nil;
+    id<MTLBuffer> m_vramReadback = nil;
     id<MTLTexture> m_spriteOutTex = nil;
     id<MTLTexture> m_listHeadsTex = nil;
 

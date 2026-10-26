@@ -113,6 +113,30 @@ public:
         }
     }
 
+    /// @brief Compares the VRAM on the GPU with the one in the VDP state and logs the differences (for diagnostics).
+    void DebugCompareVRAM() {
+        VDP1FlushWork();
+        std::vector<uint8> gpuVRAM(kVDP1VRAMSize);
+        gpu.Vdp1DownloadVRAM(gpuVRAM.data(), static_cast<uint32>(gpuVRAM.size()));
+        uint32 diffsGpu = 0, diffsShadow = 0;
+        uint32 first = ~0u, last = 0;
+        for (uint32 i = 0; i < kVDP1VRAMSize; ++i) {
+            if (gpuVRAM[i] != vdpState.mem1.VRAM[i]) {
+                if (diffsGpu < 6) {
+                    metal::LogMessage("    VRAM %05X: GPU %02X, CPU %02X, shadow %02X", i, gpuVRAM[i],
+                                      vdpState.mem1.VRAM[i], vramShadow[i]);
+                }
+                ++diffsGpu;
+                first = std::min(first, i);
+                last = i;
+            }
+            diffsShadow += vramShadow[i] != vdpState.mem1.VRAM[i];
+        }
+        metal::LogMessage("  VRAM: %u bytes differ between the GPU and the CPU (in %05X..%05X), %u between the shadow "
+                          "copy and the CPU",
+                          diffsGpu, first, last, diffsShadow);
+    }
+
     /// @brief Submits everything that was waiting to be drawn.
     void FlushWork() {
         VDP1FlushWork();

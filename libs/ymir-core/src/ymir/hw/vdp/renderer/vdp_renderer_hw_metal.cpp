@@ -12,6 +12,7 @@
 #include <bit>
 #include <concepts>
 #include <map>
+#include <cstdio>
 #include <cstring>
 #include <span>
 #include <string>
@@ -74,9 +75,25 @@ struct MetalVDPRenderer::Impl {
     uint32 compareFrames = 0;
     uint32 compareMismatches = 0;
 
+    std::vector<std::string> compareHalfTransparent;
+
     void CompareNoteCommand(uint32 cmdAddress, VDP1Command::Control control) {
         const uint16 pmod = vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x04);
         ++compareCommands[(static_cast<uint32>(control.command) << 16) | pmod];
+        if ((pmod & 3) == 3 && compareHalfTransparent.size() < 4) {
+            char text[200];
+            std::snprintf(text, sizeof(text),
+                          "    half-transparent command at %05X: ctrl %04X pmod %04X colr %04X srca %04X size %04X "
+                          "A(%04X,%04X) B(%04X,%04X) C(%04X,%04X) D(%04X,%04X)",
+                          cmdAddress, vdpState.mem1.ReadVRAM<uint16>(cmdAddress), pmod,
+                          vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 6), vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 8),
+                          vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 10), vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 12),
+                          vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 14), vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 16),
+                          vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 18), vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 20),
+                          vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 22), vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 24),
+                          vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 26));
+            compareHalfTransparent.push_back(text);
+        }
     }
 
     void CompareFramebuffers() {
@@ -130,6 +147,12 @@ struct MetalVDPRenderer::Impl {
             ++compareMismatches;
             metal::LogMessage("compare: frame %u, FB %u (%ux%u, %u bits): %u pixels differ, in x %u..%u y %u..%u",
                               compareFrames, fbi, width, height, bpp * 8, diffs, minX, maxX, minY, maxY);
+            for (const std::string &text : compareHalfTransparent) {
+                metal::LogMessage("%s", text.c_str());
+            }
+            if (compareMismatches <= 3) {
+                vdp1->DebugCompareVRAM();
+            }
             metal::LogMessage("    commands this frame (type, CMDPMOD): count");
             uint32 listed = 0;
             for (const auto &[key, count] : compareCommands) {
@@ -142,6 +165,7 @@ struct MetalVDPRenderer::Impl {
             metal::LogMessage("compare: frame %u matches", compareFrames);
         }
         compareCommands.clear();
+        compareHalfTransparent.clear();
     }
 
     // -----------------------------------------------------------------------------------------------------------------

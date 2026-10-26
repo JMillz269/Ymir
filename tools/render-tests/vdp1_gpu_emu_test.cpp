@@ -250,6 +250,9 @@ struct EmuGpu final : metal::Gpu {
     metal::FinishedFrame FinishFrame(uint32, uint32) override {
         return {};
     }
+    void Vdp1DownloadVRAM(void *dst, uint32 size) override {
+        std::memcpy(dst, vram.data(), size);
+    }
     void Vdp1DownloadFBRAM(void *dst, uint32 size) override {
         std::memcpy(dst, fbram.data(), size);
     }

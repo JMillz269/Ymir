@@ -135,6 +135,9 @@ public:
     /// @brief Applies writes made by the CPU to the framebuffer.
     virtual void Vdp1WriteFB(const Vdp1FBWritePassParams &params) = 0;
 
+    /// @brief Waits for everything submitted so far to finish and copies the VDP1 VRAM (for diagnostics).
+    virtual void Vdp1DownloadVRAM(void *dst, uint32 size) = 0;
+
     /// @brief Waits for everything submitted so far to finish and copies the start of the VDP1 framebuffer memory.
     virtual void Vdp1DownloadFBRAM(void *dst, uint32 size) = 0;
 
