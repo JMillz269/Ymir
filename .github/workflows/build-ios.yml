@@ -1,0 +1,135 @@
+name: iOS build
+
+# Builds an unsigned Ymir.ipa for arm64 iPhones and iPads (Metal graphics backend).
+#
+# The IPA is unsigned on purpose: install it with a sideloading tool (AltStore, SideStore, Sideloadly, TrollStore, ...),
+# which signs it with your own certificate and entitlements.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "CMake build type"
+        required: false
+        default: "Release"
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+  push:
+    branches:
+      - claude/**
+      - ios/**
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+env:
+  VULKAN_SDK_VERSION: "1.4.357.0"
+  IOS_DEPLOYMENT_TARGET: "16.0"
+
+jobs:
+  build-ios:
+    name: ios-arm64
+    runs-on: macos-latest
+
+    steps:
+      # The Liquid Glass tab bar and buttons need the iOS 26 SDK (Xcode 26 or later)
+      - name: Select the newest Xcode
+        shell: bash
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)"
+          if [ -n "$xcode" ]; then
+            sudo xcode-select -s "$xcode/Contents/Developer"
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      # Provides DXC with SPIR-V support and spirv-cross, used to compile the HLSL shaders into Metal libraries
+      - name: Set up Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
+        with:
+          vulkan_version: ${{ env.VULKAN_SDK_VERSION }}
+          cache: true
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          submodules: recursive
+
+      - name: Set reusable strings
+        id: strings
+        shell: bash
+        run: |
+          echo "build-output-dir=${{ github.workspace }}/build-ios" >> "$GITHUB_OUTPUT"
+          echo "build-type=${{ inputs.build_type || 'Release' }}" >> "$GITHUB_OUTPUT"
+          echo "ymir-artifact-name=ymir-ios-arm64-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap vcpkg
+        shell: bash
+        run: ${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh
+
+      - name: Cache vcpkg
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: ios-arm64-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-triplets/**') }}
+
+      # The Xcode generator is used because it compiles the asset catalog (app icon) and builds a proper iOS app bundle
+      - name: Configure CMake
+        env:
+          VCPKG_BINARY_SOURCES: 'clear;files,${{ github.workspace }}/vcpkg_cache,readwrite'
+        run: >
+          cmake -S ${{ github.workspace }} -B ${{ steps.strings.outputs.build-output-dir }}
+          -G Xcode
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_SYSROOT=iphoneos
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.IOS_DEPLOYMENT_TARGET }}
+          -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+          -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
+          -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY=
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+          -DVCPKG_TARGET_TRIPLET=arm64-ios16
+          -DBUILD_SHARED_LIBS=OFF
+          -DYmir_ENABLE_IPO=ON
+          -DYmir_ENABLE_DEVLOG=OFF
+          -DYmir_ENABLE_IMGUI_DEMO=OFF
+          -DYmir_ENABLE_UPDATE_CHECKS=OFF
+          -DYmir_ENABLE_SANDBOX=OFF
+          -DYmir_ENABLE_YMDASM=OFF
+          -DYmir_ENABLE_TESTS=OFF
+          -DYmir_EXTRA_INLINING=ON
+          -DYmir_DEV_BUILD=OFF
+          -DYmir_LIBRARY_ONLY=OFF
+
+      - name: Build
+        run: >
+          cmake --build ${{ steps.strings.outputs.build-output-dir }}
+          --config ${{ steps.strings.outputs.build-type }}
+          --target ymir-sdl3
+          --parallel
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          app="$(find "${{ steps.strings.outputs.build-output-dir }}" -type d -name 'ymir-sdl3.app' -path '*iphoneos*' | head -n 1)"
+          if [ -z "$app" ]; then
+            echo "Could not find the built ymir-sdl3.app" >&2
+            exit 1
+          fi
+          echo "Packaging $app"
+          plutil -p "$app/Info.plist" | head -n 20
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$app" Payload/Ymir.app
+          zip -qry "${{ steps.strings.outputs.ymir-artifact-name }}.ipa" Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: ${{ steps.strings.outputs.ymir-artifact-name }}
+          path: ${{ steps.strings.outputs.ymir-artifact-name }}.ipa
+          retention-days: 30
