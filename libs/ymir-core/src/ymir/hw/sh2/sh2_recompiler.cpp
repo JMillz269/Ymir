@@ -42,6 +42,7 @@ namespace {
     // its code. The environment variables are for experiments.
     std::atomic<bool> g_registerCache{std::getenv("YMIR_JIT_NOCACHE") == nullptr};
     std::atomic<bool> g_blockLinking{std::getenv("YMIR_JIT_NOCHAIN") == nullptr};
+    std::atomic<bool> g_tCache{std::getenv("YMIR_JIT_NOTBIT") == nullptr};
     std::atomic<uint32> g_optionsGeneration{1};
     uint32 CacheMinUses() {
         static const uint32 value =
@@ -66,6 +67,8 @@ namespace {
     // Callee-saved registers that hold the most used SH-2 registers while a block runs
     constexpr uint32 kFirstCached = 24;
     constexpr uint32 kLastCached = 28;
+    // Holds the T bit while a block keeps it out of the CPU state (then the last cached register is not available)
+    constexpr Reg kTReg = X28;
     constexpr Reg kTmpWb = 9;
     constexpr Reg kT0 = 10, kT1 = 11, kT2 = 12, kT3 = 13, kT4 = 14;
 
@@ -779,7 +782,9 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
     // one is used. Generating is done twice: once to count, once for real.
     std::array<uint32, kMaxBlockWords> words{};
     auto generate = [&](const std::array<sint32, 16> &cacheHost, std::array<uint32, 16> &useCount, size_t &outWords,
-                        size_t &outChainWord) -> bool {
+                        size_t &outChainWord, bool tCached, uint32 &outTReads, uint32 &outTWrites,
+                        uint32 &outHelpers) -> bool {
+    outTReads = outTWrites = outHelpers = 0;
 
     // Offsets of the CPU state that generated code reads and writes
     struct {
@@ -860,12 +865,22 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
                 a.Str(2, static_cast<Reg>(cached(r)), kThis, static_cast<uint32>(L.R + 4 * r));
             }
         }
+        if (tCached) {
+            // (the other bits of SR may have been changed by a handler, so only bit 0 is written)
+            a.Ldr(2, kT3, kThis, static_cast<uint32>(L.SR));
+            a.Bfi(Sz::W, kT3, kTReg, 0, 1);
+            a.Str(2, kT3, kThis, static_cast<uint32>(L.SR));
+        }
     };
     auto reloadRegs = [&] {
         for (uint32 r = 0; r < 16; ++r) {
             if (cached(r) >= 0) {
                 a.Ldr(2, static_cast<Reg>(cached(r)), kThis, static_cast<uint32>(L.R + 4 * r));
             }
+        }
+        if (tCached) {
+            a.Ldr(2, kTReg, kThis, static_cast<uint32>(L.SR));
+            a.AndImm(Sz::W, kTReg, kTReg, 1);
         }
     };
 
@@ -911,15 +926,51 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
         }
     };
     // T lives in bit 0 of SR
+    // (while the block keeps T in kTReg, the CPU state is only brought up to date when something else needs it)
     auto readTBit = [&](Reg dst) {
+        ++outTReads;
+        if (tCached) {
+            a.Mov(Sz::W, dst, kTReg);
+            return;
+        }
         a.Ldr(2, dst, kThis, static_cast<uint32>(L.SR));
         a.AndImm(Sz::W, dst, dst, 1);
     };
     // Sets T to the low bit of `value` (which must be 0 or 1)
     auto writeT = [&](Reg value) {
+        ++outTWrites;
+        if (tCached) {
+            a.Mov(Sz::W, kTReg, value);
+            return;
+        }
         a.Ldr(2, kT3, kThis, static_cast<uint32>(L.SR));
         a.Bfi(Sz::W, kT3, value, 0, 1);
         a.Str(2, kT3, kThis, static_cast<uint32>(L.SR));
+    };
+    // Sets T to a constant
+    auto setTConst = [&](uint32 value) {
+        ++outTWrites;
+        if (tCached) {
+            a.MovImm(Sz::W, kTReg, value);
+            return;
+        }
+        a.Ldr(2, kT0, kThis, static_cast<uint32>(L.SR));
+        if (value != 0) {
+            EmitLogicalImm(a, 1, kT0, kT0, 1u);
+        } else {
+            EmitLogicalImm(a, 0, kT0, kT0, ~1u);
+        }
+        a.Str(2, kT0, kThis, static_cast<uint32>(L.SR));
+    };
+    // Branches to `target` if T is set (`ifSet`) or clear
+    auto branchOnT = [&](bool ifSet, Label &target) {
+        ++outTReads;
+        if (tCached) {
+            ifSet ? a.Tbnz(kTReg, 0, target) : a.Tbz(kTReg, 0, target);
+            return;
+        }
+        a.Ldr(2, kT0, kThis, static_cast<uint32>(L.SR));
+        ifSet ? a.Tbnz(kT0, 0, target) : a.Tbz(kT0, 0, target);
     };
 
     // The value of the pipeline's writeback register if it is known at this point (kWBRegNone if none), or -1
@@ -936,7 +987,7 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
     // Emits a call to the interpreter's handler for the instruction `w` at `ipc` (the `k`-th of the block) and the
     // checks that follow it: whether code ahead in the block was overwritten, whether control left the block and
     // whether an interrupt is about to be serviced.
-    auto emitHelper = [&](uint32 k, uint32 ipc, uint16 w, bool setPc) {
+    auto emitHelper = [&](uint32 k, uint32 ipc, uint16 w, bool setPc, bool outOfLine = false) {
         if (setPc) {
             a.MovImm(Sz::W, kT0, ipc);
             a.Str(2, kT0, kThis, static_cast<uint32>(L.PC));
@@ -949,6 +1000,9 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
         reloadRegs();
         a.Add(Sz::X, kCycles, kCycles, X0);
         ++m_stats.helperInstructions;
+        if (!outOfLine) {
+            ++outHelpers;
+        }
         // A store may have rewritten instructions further down this very block. The interpreter would execute the
         // new ones, so leave the block (the next entry recompiles it) if the rest changed
         {
@@ -1149,12 +1203,7 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
             setWbNone();
             const uint32 target = ipc + 4 + static_cast<uint32>(disp8);
             Label &notTaken = labelPool.emplace_back();
-            a.Ldr(2, kT0, kThis, static_cast<uint32>(L.SR));
-            if (op == OpcodeType::BT) {
-                a.Tbz(kT0, 0, notTaken);
-            } else {
-                a.Tbnz(kT0, 0, notTaken);
-            }
+            branchOnT(op != OpcodeType::BT, notTaken);
             a.AddImm(Sz::X, kCycles, kCycles, 3);
             if (jumpIndex[k] >= 0) {
                 emitJump(k, jumpIndex[k], target, false);
@@ -1176,12 +1225,7 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
             const uint32 target = ipc + 4 + static_cast<uint32>(disp8);
             Label &notTaken = labelPool.emplace_back();
             a.AddImm(Sz::X, kCycles, kCycles, 1);
-            a.Ldr(2, kT0, kThis, static_cast<uint32>(L.SR));
-            if (op == OpcodeType::BTS) {
-                a.Tbz(kT0, 0, notTaken);
-            } else {
-                a.Tbnz(kT0, 0, notTaken);
-            }
+            branchOnT(op != OpcodeType::BTS, notTaken);
             a.AddImm(Sz::X, kCycles, kCycles, 1);
             a.MovImm(Sz::W, kT2, target);
             setUpDelaySlot(kT2);
@@ -1833,20 +1877,16 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
             readTBit(kT0);
             storeR(kT0, n);
             break;
-        case OpcodeType::CLRT:
-            a.Ldr(2, kT0, kThis, static_cast<uint32>(L.SR));
-            EmitLogicalImm(a, 0, kT0, kT0, ~1u);
-            a.Str(2, kT0, kThis, static_cast<uint32>(L.SR));
-            break;
-        case OpcodeType::SETT:
-            a.Ldr(2, kT0, kThis, static_cast<uint32>(L.SR));
-            EmitLogicalImm(a, 1, kT0, kT0, 1u);
-            a.Str(2, kT0, kThis, static_cast<uint32>(L.SR));
-            break;
+        case OpcodeType::CLRT: setTConst(0); break;
+        case OpcodeType::SETT: setTConst(1); break;
         case OpcodeType::DIV0U: // clears M, Q and T
             a.Ldr(2, kT0, kThis, static_cast<uint32>(L.SR));
             EmitLogicalImm(a, 0, kT0, kT0, ~0x301u);
             a.Str(2, kT0, kThis, static_cast<uint32>(L.SR));
+            if (tCached) {
+                ++outTWrites;
+                a.MovImm(Sz::W, kTReg, 0);
+            }
             break;
         case OpcodeType::CLRMAC:
             // MAC is the 64-bit value right after SR's neighbors: clear both halves through the generic path
@@ -2189,6 +2229,10 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
             a.Bfi(Sz::W, kT3, kT1, 8, 1);
             a.Bfi(Sz::W, kT3, kT2, 0, 1);
             a.Str(2, kT3, kThis, static_cast<uint32>(L.SR));
+            if (tCached) {
+                ++outTWrites;
+                a.Mov(Sz::W, kTReg, kT2);
+            }
             break;
         case OpcodeType::DIV1: {
             // w1 = Rn, w2 = Rm, w3 = SR, w4 = old Q, w5 = M, w6 = T, w7 = new Q, w8 = value before the add/subtract
@@ -2199,7 +2243,12 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
             a.Ldr(2, 3, kThis, static_cast<uint32>(L.SR));
             a.Ubfx(Sz::W, 4, 3, 8, 1);
             a.Ubfx(Sz::W, 5, 3, 9, 1);
-            a.AndImm(Sz::W, 6, 3, 1);
+            if (tCached) {
+                ++outTReads;
+                a.Mov(Sz::W, 6, kTReg);
+            } else {
+                a.AndImm(Sz::W, 6, 3, 1);
+            }
             a.LsrImm(Sz::W, 7, 1, 31);
             a.Orr(Sz::W, 1, 6, 1, Shift::LSL, 1);
             if (m == n) {
@@ -2226,6 +2275,10 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
             a.Bfi(Sz::W, 3, 7, 8, 1);
             a.Bfi(Sz::W, 3, 6, 0, 1);
             a.Str(2, 3, kThis, static_cast<uint32>(L.SR));
+            if (tCached) {
+                ++outTWrites;
+                a.Mov(Sz::W, kTReg, 6);
+            }
             storeR(1, n);
             break;
         }
@@ -2461,7 +2514,7 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
     // Out-of-line parts of loads and stores
     for (SlowPath &slow : slowPaths) {
         a.Bind(slow.entry);
-        emitHelper(slow.k, slow.pc, slow.w, true);
+        emitHelper(slow.k, slow.pc, slow.w, true, true);
         if (slow.delaySlot) {
             // The handler retries an access that is held up by leaving the delay slot unfinished
             field.Load(0, kT0, L.DelaySlot);
@@ -2505,15 +2558,31 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
     size_t wordCount = 0;
     size_t chainWord = 0;
     const Stats savedStats = m_stats;
-    if (!generate(noCache, useCount, wordCount, chainWord)) {
+    uint32 tReads = 0, tWrites = 0, helperCalls = 0;
+    if (!generate(noCache, useCount, wordCount, chainWord, false, tReads, tWrites, helperCalls)) {
         m_stats = savedStats;
         ++m_stats.blocksRejected;
         return;
     }
     m_stats = savedStats;
+    // Keeping T in a host register saves instructions on every access, but costs some at every entry, exit and call
+    // into the interpreter (where it has to be written back and read again). SR is accessed directly by some
+    // instructions, which then need the CPU state up to date.
+    bool tCached = false;
+    {
+        bool readsSr = hasLoadSr;
+        for (uint32 k = 0; k < count; ++k) {
+            for (OpcodeType op : {insns[k].opcode, insns[k].normalOpcode}) {
+                readsSr = readsSr || op == OpcodeType::STC_SR_R || op == OpcodeType::STC_SR_M;
+            }
+        }
+        const uint32 gain = (2 * tWrites + tReads) * (hasLoop ? 4 : 1);
+        const uint32 cost = 5 + 5 * helperCalls * (hasLoop ? 4 : 1);
+        tCached = g_tCache.load(std::memory_order_relaxed) && !readsSr && (gain > cost || std::getenv("YMIR_JIT_TBITALL") != nullptr);
+    }
     std::array<sint32, 16> cacheHost;
     cacheHost.fill(-1);
-    for (uint32 hostReg = kFirstCached; hostReg <= kLastCached; ++hostReg) {
+    for (uint32 hostReg = kFirstCached; hostReg <= (tCached ? kLastCached - 1 : kLastCached); ++hostReg) {
         uint32 best = 16;
         for (uint32 r = 0; r < 16; ++r) {
             if (cacheHost[r] < 0 && useCount[r] >= (hasLoop ? std::max<uint32>(CacheMinUses() / 2, 2u) : CacheMinUses()) && (best == 16 || useCount[r] > useCount[best])) {
@@ -2526,7 +2595,7 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
         cacheHost[best] = static_cast<sint32>(hostReg);
     }
     std::array<uint32, 16> unusedCount{};
-    if (!generate(cacheHost, unusedCount, wordCount, chainWord)) {
+    if (!generate(cacheHost, unusedCount, wordCount, chainWord, tCached, tReads, tWrites, helperCalls)) {
         ++m_stats.blocksRejected;
         return;
     }
