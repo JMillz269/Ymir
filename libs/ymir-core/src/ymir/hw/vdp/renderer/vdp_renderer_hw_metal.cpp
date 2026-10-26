@@ -819,6 +819,10 @@ struct MetalVDPRenderer::Impl {
             cpuLayerRenderParams->nbg[i].scrollYIncBase = 0;
         }
 
+    }
+
+    /// @brief Sends the VDP1 framebuffer that is being displayed to the GPU.
+    void VDP2UploadSpriteFB() {
         // VDP2 reads the VDP1 framebuffer that was just finished. Make sure the render thread is done with it.
         owner.VDP1SyncFB();
         const uint8 displayFB = vdpState.fbIndex.display;
@@ -878,6 +882,12 @@ struct MetalVDPRenderer::Impl {
     }
 
     void VDP2RenderLine(uint32 y) {
+        if (y == 0) {
+            // The frame starts before VDP1 swaps its framebuffers (at the end of the last line of the vertical blank),
+            // so the framebuffer to show is only known now
+            VDP2UploadSpriteFB();
+        }
+
         VDP2CalcAccessPatterns();
         VDP2CalcVCellScrollDelay();
         VDP2DrawLineColorBackScreens(y);
