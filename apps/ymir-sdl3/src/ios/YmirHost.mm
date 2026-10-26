@@ -77,11 +77,14 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     static uint64_t lastSH2 = 0, lastOther = 0, lastVDP1 = 0, lastVDP2 = 0, lastFrames = 0;
     const uint64_t sh2 = ymir::perf::sh2Ns.load(), other = ymir::perf::otherNs.load();
     const uint64_t vdp1 = ymir::perf::vdp1Ns.load(), vdp2 = ymir::perf::vdp2Ns.load(), frames = ymir::perf::frames.load();
-    NSString *perf = @"";
+    // Keep showing the last measurement while no frames are being emulated (the page refreshes every second)
+    static NSString *lastPerf = @"";
+    NSString *perf = lastPerf;
     if (frames > lastFrames) {
         const double n = static_cast<double>(frames - lastFrames) * 1.0e6;
         perf = [NSString stringWithFormat:@"\nPer frame: SH-2 and SCU %.2f ms, VDP timing/sound/CD %.2f ms, VDP1 %.2f ms, VDP2 %.2f ms (the VDP times run on other threads when threaded)",
                                           (sh2 - lastSH2) / n, (other - lastOther) / n, (vdp1 - lastVDP1) / n, (vdp2 - lastVDP2) / n];
+        lastPerf = perf;
     }
     lastSH2 = sh2; lastOther = other; lastVDP1 = vdp1; lastVDP2 = vdp2; lastFrames = frames;
     return [[main stringByAppendingString:perf] stringByAppendingFormat:@"\nMost used interpreter calls: %s", helpers.empty() ? "none yet" : helpers.c_str()];
