@@ -407,6 +407,10 @@ public:
         [m_encoder dispatchThreadgroups:MTLSizeMake((params.numPixels + 63) / 64, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         Vdp1Barrier();
+        // The drawing wrote the pixel buffers with atomic operations on the buffers, the merger reads and clears them
+        // as textures (and the next drawing uses atomics again). Starting a new encoder in between makes sure that
+        // each side sees what the other wrote.
+        EndEncoder();
 
         if (params.shadingMode != 3) {
             // Merge the output into the framebuffer. The merger gets the common part of the constants only.
@@ -425,6 +429,7 @@ public:
             [m_encoder dispatchThreadgroups:MTLSizeMake((params.mergeWidth + 7) / 8, (params.mergeHeight + 7) / 8, 1)
                       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
             Vdp1Barrier();
+            EndEncoder();
         }
     }
 

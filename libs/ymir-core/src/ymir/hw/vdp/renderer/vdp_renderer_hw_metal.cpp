@@ -96,8 +96,11 @@ struct MetalVDPRenderer::Impl {
         uint32 diffs = 0;
         uint32 minX = ~0u, minY = ~0u, maxX = 0, maxY = 0;
         uint32 shown = 0;
-        for (uint32 y = 0; y < height; ++y) {
-            for (uint32 x = 0; x < width; ++x) {
+        // (only what can be seen)
+        const uint32 compareW = std::min(width, HRes);
+        const uint32 compareH = std::min(height, VRes);
+        for (uint32 y = 0; y < compareH; ++y) {
+            for (uint32 x = 0; x < compareW; ++x) {
                 const size_t offset = (static_cast<size_t>(y) * width + x) * bpp;
                 if (offset + bpp > kVDP1FBRAMSize) {
                     continue;

@@ -310,10 +310,10 @@ uint HalfTransparentBlend(uint baseColor, uint listHead) {
         frags[j + 1] = key;
     }
 
-    // Blend colors
+    // Blend colors, starting from the oldest fragment (the last one), as the pixels would have been drawn
     uint4 finalColor = Uint16ToColor555(baseColor);
-    for (uint k = 0; k < count; ++k) {
-        uint4 fragColor = Uint16ToColor555(frags[k].data);
+    for (uint n = 0; n < count; ++n) {
+        uint4 fragColor = Uint16ToColor555(frags[count - 1 - n].data);
         if (finalColor.a != 0) {
             finalColor.rgb = (finalColor.rgb + fragColor.rgb) >> 1u;
         } else {
