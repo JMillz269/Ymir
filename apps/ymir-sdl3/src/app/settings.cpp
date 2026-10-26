@@ -1154,6 +1154,7 @@ void Settings::ResetToDefaults() {
     video.enhancements.deinterlace = false;
     video.enhancements.transparentMeshes = false;
     video.enhancements.internalResolution = 1;
+    video.enhancements.skipNativeVDP1 = false;
 
     audio.volume = 0.8;
     audio.mute = false;
@@ -1695,6 +1696,7 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
                 Parse(tblEnhancements, "Deinterlace", video.enhancements.deinterlace);
                 Parse(tblEnhancements, "TransparentMeshes", video.enhancements.transparentMeshes);
                 Parse(tblEnhancements, "InternalResolution", video.enhancements.internalResolution, 1u, 1u, 4u);
+                Parse(tblEnhancements, "SkipNativeVDP1", video.enhancements.skipNativeVDP1);
             }
         } else {
             Parse(tblVideo, "Deinterlace", video.enhancements.deinterlace);
@@ -2121,6 +2123,7 @@ SettingsSaveResult Settings::Save() {
                 {"Deinterlace", video.enhancements.deinterlace.Get()},
                 {"TransparentMeshes", video.enhancements.transparentMeshes.Get()},
                 {"InternalResolution", video.enhancements.internalResolution.Get()},
+                {"SkipNativeVDP1", video.enhancements.skipNativeVDP1.Get()},
             }}},
         }}},
 

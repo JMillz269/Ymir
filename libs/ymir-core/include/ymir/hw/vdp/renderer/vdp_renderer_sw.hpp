@@ -208,10 +208,14 @@ private:
 
     // Requested scale; written by the emulator thread, latched by the render threads at frame boundaries.
     std::atomic_uint32_t m_hrRequested{1};
+    std::atomic_bool m_hrSkipRequested{false};
     bool m_hrAllocated = false;
 
     // Scale latched by the VDP1 side. Owned by whichever context executes VDP1 commands.
     uint32 m_hrScale1 = 1;
+    bool m_hrSkipNative1 = false;
+    // Per draw framebuffer: native draws were skipped since the native framebuffer was last taken from the large one
+    std::array<bool, 2> m_hrNativeStale{};
     // Scale plus kHRMeshKey if the transparent mesh layer is also drawn; identifies what the large buffers contain
     uint32 m_hrKey1 = 1;
     static constexpr uint32 kHRMeshKey = 0x100;
@@ -769,6 +773,8 @@ private:
 
     // Publishes the large draw framebuffer to VDP2 when VDP1 is threaded.
     void VDP1HRPublish(uint8 fbIndex);
+    // Fills the native framebuffer from the large one if native draws were skipped
+    void VDP1HRSyncNative(uint8 fbIndex);
 
     // Mirrors a CPU write to the native framebuffer into the large one.
     void VDP1HRCpuWrite(uint8 fbIndex, uint32 address);

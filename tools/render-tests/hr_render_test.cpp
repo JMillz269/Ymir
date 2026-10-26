@@ -38,6 +38,7 @@ int main(int argc, char **argv) {
     enh.internalResolution = scale;
     enh.deinterlace = std::getenv("HR_DEINTERLACE") != nullptr;
     enh.transparentMeshes = std::getenv("HR_MESH") != nullptr;
+    enh.skipNativeVDP1 = std::getenv("HR_SKIPNATIVE") != nullptr;
     r.ConfigureEnhancements(enh);
 
     r.SwCallbacks.FrameComplete = {nullptr, [](uint32 *fb, uint32 w, uint32 h, uint32 s, void *) {

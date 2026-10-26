@@ -517,6 +517,7 @@ struct Settings {
             util::Observable<bool> deinterlace;
             util::Observable<bool> transparentMeshes;
             util::Observable<uint32> internalResolution; // 1 = native
+            util::Observable<bool> skipNativeVDP1;       // when upscaling, don't also draw VDP1 at native size
         } enhancements;
     } video;
 

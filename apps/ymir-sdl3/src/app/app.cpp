@@ -350,6 +350,8 @@ int App::Run(const CommandLineOptions &options) {
             [&](bool value) { m_context.EnqueueEvent(events::emu::SetTransparentMeshes(value)); });
         videoSettings.enhancements.internalResolution.Observe(
             [&](uint32 value) { m_context.EnqueueEvent(events::emu::SetInternalResolution(value)); });
+        videoSettings.enhancements.skipNativeVDP1.Observe(
+            [&](bool value) { m_context.EnqueueEvent(events::emu::SetSkipNativeVDP1(value)); });
     }
 
     // Profile priority:

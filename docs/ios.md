@@ -54,6 +54,12 @@ pixel, so they stay blocky when magnified. Frames in modes that can't be enlarge
 rotated VDP1 framebuffers) are rendered at native size. Transparent Meshes works together with it: the mesh layer is kept at the larger size too. The cost grows
 with the square of the scale, so 4x needs a lot more CPU than 2x.
 
+**Skip Native Drawing (Experimental)** stops drawing each command at the normal size as well. At the end of every frame
+the normal-size framebuffer (what the emulated CPU reads back) is copied from the first sub-pixel of the enlarged one.
+This saves roughly the cost of a native VDP1 pass. Games that read the framebuffer while a frame is still being
+drawn see the previous contents, and a thin line the enlarged drawing doesn't put on that sub-pixel can be missing
+from the readback (never from the picture).
+
 `tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer
 (`build.sh` builds it against a core build) to check the output and time frames.
 

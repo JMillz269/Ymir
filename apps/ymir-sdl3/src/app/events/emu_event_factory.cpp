@@ -75,6 +75,13 @@ EmuEvent SetInternalResolution(uint32 scale) {
     });
 }
 
+EmuEvent SetSkipNativeVDP1(bool skip) {
+    return RunFunction([=](SharedContext &ctx) {
+        ctx.saturn.instance->VDP.ModifyEnhancements(
+            [&](vdp::config::Enhancements &enhancements) { enhancements.skipNativeVDP1 = skip; });
+    });
+}
+
 EmuEvent UseNullVDPRenderer(util::Event &event) {
     return RunFunction([&event](SharedContext &ctx) {
         auto &vdp = ctx.saturn.instance->VDP;

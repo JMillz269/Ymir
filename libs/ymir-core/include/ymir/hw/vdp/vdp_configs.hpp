@@ -32,6 +32,10 @@ struct Enhancements {
     /// resolution) are rendered at native resolution.
     uint32 internalResolution = 1;
 
+    /// Skip drawing VDP1 commands at the native size while upscaling; the native framebuffer is then taken from the
+    /// upscaled one when the frame ends.
+    bool skipNativeVDP1 = false;
+
     /// @brief Determines if any enhancement is enabled:
     /// - `deinterlace` is set to `true`
     /// - `transparentMeshes` is set to `true`

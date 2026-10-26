@@ -108,6 +108,8 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
             [cfg](bool v) { cfg->video.enhancements.transparentMeshes = v; });
     addInt("video.internalResolution", [cfg] { return static_cast<int>(cfg->video.enhancements.internalResolution.Get()); },
            [cfg](int v) { cfg->video.enhancements.internalResolution = static_cast<uint32>(std::clamp(v, 1, 4)); });
+    addBool("video.skipNativeVDP1", [cfg] { return cfg->video.enhancements.skipNativeVDP1.Get(); },
+            [cfg](bool v) { cfg->video.enhancements.skipNativeVDP1 = v; });
     addBool("video.threadedVDP1", [cfg] { return cfg->video.swRenderer.threadedVDP1.Get(); },
             [cfg](bool v) { cfg->video.swRenderer.threadedVDP1 = v; });
     addBool("video.threadedVDP2", [cfg] { return cfg->video.swRenderer.threadedVDP2.Get(); },

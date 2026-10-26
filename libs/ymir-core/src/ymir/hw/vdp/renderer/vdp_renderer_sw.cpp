@@ -97,6 +97,7 @@ SoftwareVDPRenderer::Create(VDPState &state, const config::VDP2DebugRender &vdp2
 
 void SoftwareVDPRenderer::Reset(bool hard) {
     m_hrDrawScale.fill(0);
+    m_hrNativeStale.fill(false);
     m_hrShownScale[0].store(0);
     m_hrShownScale[1].store(0);
     m_HRes = vdp::kDefaultResH;
@@ -159,6 +160,7 @@ void SoftwareVDPRenderer::EnableThreadedVDP1(bool enable) {
 
     m_threadedVDP1Rendering = enable;
     m_hrDrawScale.fill(0);
+    m_hrNativeStale.fill(false);
     m_hrShownScale[0].store(0);
     m_hrShownScale[1].store(0);
     if (enable) {
@@ -246,6 +248,7 @@ void SoftwareVDPRenderer::PreSaveStateSync() {
 
 void SoftwareVDPRenderer::PostLoadStateSync() {
     m_hrDrawScale.fill(0);
+    m_hrNativeStale.fill(false);
     m_hrShownScale[0].store(0);
     m_hrShownScale[1].store(0);
     for (uint32 address = 0; address < kVDP2CRAMSize; address += 2) {
@@ -513,6 +516,8 @@ void SoftwareVDPRenderer::VDP1ExecuteCommand(uint32 cmdAddress, VDP1Command::Con
 void SoftwareVDPRenderer::VDP1EndFrame() {
     if (m_threadedVDP1Rendering) {
         m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::EndDraw());
+    } else {
+        VDP1HRSyncNative(m_state.fbIndex.draw);
     }
     Callbacks.VDP1DrawFinished();
 }
@@ -653,6 +658,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             }
             case EvtType::SwapBuffers: {
                 const auto fbIndex = m_state.fbIndex.draw;
+                VDP1HRSyncNative(fbIndex);
                 m_state.mem1.FBRAM[fbIndex] = rctx.vdp1.mem.FBRAM[fbIndex];
                 VDP1HRLatch();
                 VDP1HRPublish(fbIndex);
@@ -662,6 +668,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             }
             case EvtType::EndDraw: {
                 const auto fbIndex = m_state.fbIndex.draw;
+                VDP1HRSyncNative(fbIndex);
                 m_state.mem1.FBRAM[fbIndex] = rctx.vdp1.mem.FBRAM[fbIndex];
                 VDP1HRPublish(fbIndex);
                 break;
@@ -699,6 +706,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
                 rctx.vdp1.regs = m_state.regs1;
                 rctx.vdp1.mem = m_state.mem1;
                 m_hrDrawScale.fill(0);
+    m_hrNativeStale.fill(false);
                 m_hrShownScale[0].store(0);
                 m_hrShownScale[1].store(0);
                 rctx.postLoadSyncSignal.Set();
@@ -982,10 +990,12 @@ void SoftwareVDPRenderer::HRApplyConfig() {
         m_hrAllocated = true;
     }
     m_hrRequested.store(scale, std::memory_order_release);
+    m_hrSkipRequested.store(m_enhancements.skipNativeVDP1, std::memory_order_release);
 }
 
 FORCE_INLINE void SoftwareVDPRenderer::VDP1HRLatch() {
     m_hrScale1 = m_hrRequested.load(std::memory_order_acquire);
+    m_hrSkipNative1 = m_hrSkipRequested.load(std::memory_order_acquire);
     m_hrKey1 = m_hrScale1 | (m_enhancements.transparentMeshes ? kHRMeshKey : 0u);
 }
 
@@ -998,10 +1008,12 @@ bool SoftwareVDPRenderer::VDP1HRPrepare(uint8 fbIndex) {
         return false;
     }
     if (!HRSupportsTVMR(VDP1GetRegs().tvmr)) {
+        VDP1HRSyncNative(fbIndex);
         m_hrDrawScale[fbIndex] = 0;
         return false;
     }
     if (m_hrDrawScale[fbIndex] != m_hrKey1) {
+        m_hrNativeStale[fbIndex] = false;
         VDP1HRResync(fbIndex);
     }
     return true;
@@ -1029,6 +1041,31 @@ void SoftwareVDPRenderer::VDP1HRResync(uint8 fbIndex) {
         upscale(m_meshFBRAM[0][fbIndex], m_hrMesh[fbIndex].data());
     }
     m_hrDrawScale[fbIndex] = m_hrKey1;
+}
+
+void SoftwareVDPRenderer::VDP1HRSyncNative(uint8 fbIndex) {
+    if (!m_hrNativeStale[fbIndex]) {
+        return;
+    }
+    m_hrNativeStale[fbIndex] = false;
+    if (m_hrScale1 <= 1 || m_hrDrawScale[fbIndex] != m_hrKey1) {
+        return;
+    }
+    // The first sub-pixel of every native pixel is what VDP2 compares the other sub-pixels with
+    const uint32 s = m_hrScale1;
+    const size_t stride = size_t(kHRFBWidth) * s;
+    auto downsample = [&](const uint16 *hr, SpriteFB &fb) {
+        for (uint32 y = 0; y < kHRFBHeight; y++) {
+            const uint16 *row = &hr[size_t(y) * s * stride];
+            for (uint32 x = 0; x < kHRFBWidth; x++) {
+                util::WriteBE<uint16>(&fb[(y * kHRFBWidth + x) * sizeof(uint16)], row[size_t(x) * s]);
+            }
+        }
+    };
+    downsample(m_hrDraw[fbIndex].data(), VDP1GetRendererFBRAM(false, fbIndex));
+    if (m_hrKey1 & kHRMeshKey) {
+        downsample(m_hrMesh[fbIndex].data(), m_meshFBRAM[0][fbIndex]);
+    }
 }
 
 void SoftwareVDPRenderer::VDP1HRPublish(uint8 fbIndex) {
@@ -1060,6 +1097,7 @@ void SoftwareVDPRenderer::VDP1HRCpuWrite(uint8 fbIndex, uint32 address) {
         return;
     }
     if (!HRSupportsTVMR(VDP1GetRegs().tvmr)) {
+        VDP1HRSyncNative(fbIndex);
         m_hrDrawScale[fbIndex] = 0;
         return;
     }
@@ -1910,14 +1948,32 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1Cmd_Handle(uint32 cmdAddress, VDP1Com
     case DrawPolylines: [[fallthrough]];
     case DrawPolylinesAlt: [[fallthrough]];
     case DrawLine:
-        drawCommand();
+    {
+        const uint8 drawFB = m_state.fbIndex.draw;
+        const bool hrActive = m_hrScale1 > 1 && ((m_hrKey1 & kHRMeshKey) != 0) == transparentMeshes;
+        bool replay;
+        if (hrActive && m_hrSkipNative1) {
+            // Only the large framebuffer is drawn; the native one is taken from it when the frame ends
+            replay = VDP1HRShouldReplay();
+            if (replay) {
+                m_hrNativeStale[drawFB] = true;
+            } else {
+                VDP1HRSyncNative(drawFB);
+                drawCommand();
+            }
+        } else {
+            VDP1HRSyncNative(drawFB);
+            drawCommand();
+            replay = hrActive && VDP1HRShouldReplay();
+        }
         // Replay the command into the large framebuffer with scaled coordinates
-        if (m_hrScale1 > 1 && ((m_hrKey1 & kHRMeshKey) != 0) == transparentMeshes && VDP1HRShouldReplay()) {
+        if (replay) {
             m_hrPass = true;
             drawCommand();
             m_hrPass = false;
         }
         break;
+    }
 
     case UserClipping: [[fallthrough]];
     case UserClippingAlt: VDP1Cmd_SetUserClipping(cmdAddress); break;
