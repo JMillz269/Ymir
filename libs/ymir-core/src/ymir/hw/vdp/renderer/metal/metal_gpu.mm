@@ -155,40 +155,11 @@ namespace {
         id<MTLTexture> texture = nil; // view of the data as a texture, for shaders that read it like a texel buffer
     };
 
-    /// Writes a line to Documents/metal-vdp-log.txt (visible in the Files app), to help find problems on a device. The
-    /// file is started anew every time the app runs and stops growing after a while.
-    void Log(const char *format, ...) __attribute__((format(printf, 1, 2)));
-    void Log(const char *format, ...) {
-        static std::mutex mutex;
-        static FILE *file = nullptr;
-        static bool opened = false;
-        static uint32 lines = 0;
-        std::lock_guard<std::mutex> lock(mutex);
-        if (!opened) {
-            opened = true;
-            NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-            if (dirs.count > 0) {
-                NSString *path = [dirs[0] stringByAppendingPathComponent:@"metal-vdp-log.txt"];
-                file = std::fopen([path fileSystemRepresentation], "w");
-            }
-        }
-        if (file == nullptr || lines >= 3000) {
-            return;
-        }
-        ++lines;
-        va_list args;
-        va_start(args, format);
-        std::vfprintf(file, format, args);
-        va_end(args);
-        std::fputc('\n', file);
-        std::fflush(file);
-    }
-
     /// Makes the command buffer report to the log if the GPU fails to run it
     void WatchCommandBuffer(id<MTLCommandBuffer> cmdBuf, const char *what) {
         [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> buf) {
             if (buf.status == MTLCommandBufferStatusError) {
-                Log("GPU error in %s: %s", what, [[buf.error description] UTF8String]);
+                LogMessage("GPU error in %s: %s", what, [[buf.error description] UTF8String]);
             }
         }];
     }
@@ -198,6 +169,41 @@ namespace {
     }
 
 } // namespace
+
+void LogMessage(const char *format, ...) {
+    static std::mutex mutex;
+    static FILE *file = nullptr;
+    static bool opened = false;
+    static uint32 lines = 0;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!opened) {
+        opened = true;
+        NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        if (dirs.count > 0) {
+            NSString *path = [dirs[0] stringByAppendingPathComponent:@"metal-vdp-log.txt"];
+            file = std::fopen([path fileSystemRepresentation], "w");
+        }
+    }
+    if (file == nullptr || lines >= 3000) {
+        return;
+    }
+    ++lines;
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(file, format, args);
+    va_end(args);
+    std::fputc('\n', file);
+    std::fflush(file);
+}
+
+bool DiagnosticSwitch(const char *name) {
+    NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (dirs.count == 0) {
+        return false;
+    }
+    NSString *path = [dirs[0] stringByAppendingPathComponent:[NSString stringWithUTF8String:name]];
+    return [[NSFileManager defaultManager] fileExistsAtPath:path];
+}
 
 class MetalGpu final : public Gpu {
 public:
@@ -369,8 +375,9 @@ public:
         if (params.numPixels == 0 || params.shadingMode > 3 || params.mergeMode > 2) {
             return;
         }
-        if (++m_logDraws <= 40) {
-            Log("draw #%u: shade %u merge %u pixels %u spans %u cmds %u", m_logDraws, params.shadingMode,
+        ++m_logDrawsByMode[params.shadingMode];
+        if (++m_logDraws <= 5) {
+            LogMessage("draw #%u: shade %u merge %u pixels %u spans %u cmds %u", m_logDraws, params.shadingMode,
                 params.mergeMode, params.numPixels, params.spansSize / 48, params.commandsSize / 20);
         }
         EnsureFrame();
@@ -426,7 +433,7 @@ public:
             return;
         }
         if (++m_logErases <= 20) {
-            Log("erase #%u: %ux%u", m_logErases, params.width, params.height);
+            LogMessage("erase #%u: %ux%u", m_logErases, params.width, params.height);
         }
         EnsureFrame();
 
@@ -473,7 +480,7 @@ public:
     void Vdp1DownloadFBRAM(void *dst, uint32 size) override {
         size = std::min<uint32>(size, kVDP1FBRAMSize * 2);
         if (++m_logDownloads <= 30 || m_logDownloads % 200 == 0) {
-            Log("FBRAM download #%u", m_logDownloads);
+            LogMessage("FBRAM download #%u", m_logDownloads);
         }
         EnsureFrame();
         EndEncoder();
@@ -549,8 +556,9 @@ public:
         width = std::min<uint32>(width, kMaxResH);
         height = std::min<uint32>(height, kMaxResV);
         if (++m_logFrames <= 10 || m_logFrames % 300 == 0) {
-            Log("frame %u (%ux%u), draws so far %u, downloads %u", m_logFrames, width, height, m_logDraws,
-                m_logDownloads);
+            LogMessage("frame %u (%ux%u), draws so far %u (copy %u, shadow %u, half-transparent %u, msb %u), downloads %u",
+                       m_logFrames, width, height, m_logDraws, m_logDrawsByMode[0], m_logDrawsByMode[1],
+                       m_logDrawsByMode[2], m_logDrawsByMode[3], m_logDownloads);
         }
 
         // Copy the image out of the GPU
@@ -631,6 +639,7 @@ private:
     uint32 m_logDraws = 0;
     uint32 m_logDownloads = 0;
     uint32 m_logErases = 0;
+    std::array<uint32, 4> m_logDrawsByMode{};
     uint32 m_logFrames = 0;
     std::array<Pipeline, 4> m_polyDraw;
     std::array<Pipeline, 3> m_merger;
@@ -719,9 +728,7 @@ private:
             return false;
         }
 
-        Log("pipeline %s (max %lu threads per group)", path, (unsigned long)pipeline.state.maxTotalThreadsPerThreadgroup);
         for (MTLArgument *arg in reflection.arguments) {
-            Log("  %s: type %d index %lu", [arg.name UTF8String], (int)arg.type, (unsigned long)arg.index);
             Slot slot{};
             slot.res = ResourceForName(arg.name);
             slot.isTexture = arg.type == MTLArgumentTypeTexture;
@@ -730,7 +737,7 @@ private:
                 continue;
             }
             if (slot.res == Res::Unknown) {
-                Log("  ^ not recognized!");
+                LogMessage("pipeline %s: resource '%s' not recognized!", path, [arg.name UTF8String]);
                 std::fprintf(stderr, "[Ymir] Metal VDP: unrecognized shader resource '%s' in %s\n",
                              [arg.name UTF8String], path);
                 continue;

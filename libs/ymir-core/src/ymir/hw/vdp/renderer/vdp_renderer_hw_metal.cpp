@@ -11,6 +11,7 @@
 #include <array>
 #include <bit>
 #include <concepts>
+#include <map>
 #include <cstring>
 #include <span>
 #include <string>
@@ -63,6 +64,82 @@ struct MetalVDPRenderer::Impl {
 
     /// @brief VDP1 drawn on the GPU; null if the software renderer draws VDP1.
     std::unique_ptr<MetalVDP1> vdp1;
+
+    // Diagnostics (turned on by a folder named metal-vdp-compare in the Documents folder): VDP1 is drawn by both the
+    // software renderer and the GPU, and the framebuffers are compared before every swap. The software renderer's is
+    // the one the game reads.
+    bool compare = false;
+    std::vector<uint8> compareFB;
+    std::map<uint32, uint32> compareCommands; // (command type << 16 | CMDPMOD) -> count in this frame
+    uint32 compareFrames = 0;
+    uint32 compareMismatches = 0;
+
+    void CompareNoteCommand(uint32 cmdAddress, VDP1Command::Control control) {
+        const uint16 pmod = vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x04);
+        ++compareCommands[(static_cast<uint32>(control.command) << 16) | pmod];
+    }
+
+    void CompareFramebuffers() {
+        ++compareFrames;
+        vdp1->FlushWork();
+        compareFB.resize(kVDP1FBRAMSize * 2);
+        gpu->Vdp1DownloadFBRAM(compareFB.data(), static_cast<uint32>(kVDP1FBRAMSize * 2));
+
+        const VDP1Regs &regs1 = vdpState.regs1;
+        const uint8 fbi = vdpState.fbIndex.draw;
+        const uint32 bpp = regs1.tvmr.pixel8Bits ? 1u : 2u;
+        const uint32 width = regs1.tvmr.fbSizeH;
+        const uint32 height = regs1.tvmr.fbSizeV;
+        const uint8 *gpuPixels = &compareFB[fbi * kVDP1FBRAMSize];
+        const uint8 *swPixels = vdpState.mem1.FBRAM[fbi].data();
+
+        uint32 diffs = 0;
+        uint32 minX = ~0u, minY = ~0u, maxX = 0, maxY = 0;
+        uint32 shown = 0;
+        for (uint32 y = 0; y < height; ++y) {
+            for (uint32 x = 0; x < width; ++x) {
+                const size_t offset = (static_cast<size_t>(y) * width + x) * bpp;
+                if (offset + bpp > kVDP1FBRAMSize) {
+                    continue;
+                }
+                if (std::memcmp(gpuPixels + offset, swPixels + offset, bpp) == 0) {
+                    continue;
+                }
+                ++diffs;
+                minX = std::min(minX, x);
+                minY = std::min(minY, y);
+                maxX = std::max(maxX, x);
+                maxY = std::max(maxY, y);
+                if (shown < 6) {
+                    ++shown;
+                    uint32 gpuValue = gpuPixels[offset];
+                    uint32 swValue = swPixels[offset];
+                    if (bpp == 2) {
+                        gpuValue = (gpuValue << 8) | gpuPixels[offset + 1];
+                        swValue = (swValue << 8) | swPixels[offset + 1];
+                    }
+                    metal::LogMessage("    (%u,%u): GPU %04X, software %04X", x, y, gpuValue, swValue);
+                }
+            }
+        }
+
+        if (diffs != 0 && compareMismatches < 60) {
+            ++compareMismatches;
+            metal::LogMessage("compare: frame %u, FB %u (%ux%u, %u bits): %u pixels differ, in x %u..%u y %u..%u",
+                              compareFrames, fbi, width, height, bpp * 8, diffs, minX, maxX, minY, maxY);
+            metal::LogMessage("    commands this frame (type, CMDPMOD): count");
+            uint32 listed = 0;
+            for (const auto &[key, count] : compareCommands) {
+                if (listed++ >= 16) {
+                    break;
+                }
+                metal::LogMessage("    %u, %04X: %u", key >> 16, key & 0xFFFF, count);
+            }
+        } else if (diffs == 0 && compareFrames % 300 == 0) {
+            metal::LogMessage("compare: frame %u matches", compareFrames);
+        }
+        compareCommands.clear();
+    }
 
     // -----------------------------------------------------------------------------------------------------------------
     // State
@@ -972,8 +1049,12 @@ util::VoidResult<> MetalVDPRenderer::Initialize(void *device, bool gpuVDP1) {
             return util::ErrorMessage{error};
         }
         m_impl->vdp1 = std::make_unique<MetalVDP1>(m_impl->vdpState, *m_impl->gpu);
-        // (nor is its VDP1 pass)
+        // (nor is its VDP1 pass, unless the comparison is on)
         EnableThreadedVDP1(false);
+        m_impl->compare = metal::DiagnosticSwitch("metal-vdp-compare");
+        if (m_impl->compare) {
+            metal::LogMessage("comparing the GPU's VDP1 with the software renderer's");
+        }
     }
     m_impl->Reset();
     return {};
@@ -1033,6 +1114,9 @@ void MetalVDPRenderer::PostLoadStateSync() {
 void MetalVDPRenderer::VDP1WriteVRAM(uint32 address, uint8 value) {
     if (m_impl->vdp1) {
         m_impl->vdp1->WriteVRAM(address);
+        if (m_impl->compare) {
+            SoftwareVDPRenderer::VDP1WriteVRAM(address, value);
+        }
     } else {
         SoftwareVDPRenderer::VDP1WriteVRAM(address, value);
     }
@@ -1042,13 +1126,20 @@ void MetalVDPRenderer::VDP1WriteVRAM(uint32 address, uint16 value) {
     if (m_impl->vdp1) {
         // The address is always word-aligned
         m_impl->vdp1->WriteVRAM(address);
+        if (m_impl->compare) {
+            SoftwareVDPRenderer::VDP1WriteVRAM(address, value);
+        }
     } else {
         SoftwareVDPRenderer::VDP1WriteVRAM(address, value);
     }
 }
 
 void MetalVDPRenderer::VDP1SyncFB() {
-    if (m_impl->vdp1) {
+    if (m_impl->compare) {
+        // (the software renderer's framebuffer is the one the game sees)
+        m_impl->vdp1->FlushWork();
+        SoftwareVDPRenderer::VDP1SyncFB();
+    } else if (m_impl->vdp1) {
         m_impl->vdp1->SyncFB();
     } else {
         SoftwareVDPRenderer::VDP1SyncFB();
@@ -1058,6 +1149,9 @@ void MetalVDPRenderer::VDP1SyncFB() {
 void MetalVDPRenderer::VDP1WriteFB(uint32 address, uint8 value) {
     if (m_impl->vdp1) {
         m_impl->vdp1->WriteFB(address, 1);
+        if (m_impl->compare) {
+            SoftwareVDPRenderer::VDP1WriteFB(address, value);
+        }
     } else {
         SoftwareVDPRenderer::VDP1WriteFB(address, value);
     }
@@ -1066,6 +1160,9 @@ void MetalVDPRenderer::VDP1WriteFB(uint32 address, uint8 value) {
 void MetalVDPRenderer::VDP1WriteFB(uint32 address, uint16 value) {
     if (m_impl->vdp1) {
         m_impl->vdp1->WriteFB(address, 2);
+        if (m_impl->compare) {
+            SoftwareVDPRenderer::VDP1WriteFB(address, value);
+        }
     } else {
         SoftwareVDPRenderer::VDP1WriteFB(address, value);
     }
@@ -1074,6 +1171,9 @@ void MetalVDPRenderer::VDP1WriteFB(uint32 address, uint16 value) {
 void MetalVDPRenderer::VDP1WriteReg(uint32 address, uint16 value) {
     if (m_impl->vdp1) {
         m_impl->vdp1->WriteReg();
+        if (m_impl->compare) {
+            SoftwareVDPRenderer::VDP1WriteReg(address, value);
+        }
     } else {
         SoftwareVDPRenderer::VDP1WriteReg(address, value);
     }
@@ -1110,13 +1210,20 @@ void MetalVDPRenderer::VDP2WriteReg(uint32 address, uint16 value) {
 void MetalVDPRenderer::VDP1EraseFramebuffer(uint64 cycles) {
     if (m_impl->vdp1) {
         m_impl->vdp1->EraseFramebuffer(cycles);
+        if (m_impl->compare) {
+            SoftwareVDPRenderer::VDP1EraseFramebuffer(cycles);
+        }
     } else {
         SoftwareVDPRenderer::VDP1EraseFramebuffer(cycles);
     }
 }
 
 void MetalVDPRenderer::VDP1SwapFramebuffer() {
-    if (m_impl->vdp1) {
+    if (m_impl->compare) {
+        m_impl->CompareFramebuffers();
+        m_impl->vdp1->SwapFramebuffer();
+        SoftwareVDPRenderer::VDP1SwapFramebuffer(); // (also calls the callback)
+    } else if (m_impl->vdp1) {
         m_impl->vdp1->SwapFramebuffer();
         Callbacks.VDP1FramebufferSwap();
     } else {
@@ -1127,6 +1234,9 @@ void MetalVDPRenderer::VDP1SwapFramebuffer() {
 void MetalVDPRenderer::VDP1BeginFrame() {
     if (m_impl->vdp1) {
         m_impl->vdp1->BeginFrame();
+        if (m_impl->compare) {
+            SoftwareVDPRenderer::VDP1BeginFrame();
+        }
     } else {
         SoftwareVDPRenderer::VDP1BeginFrame();
     }
@@ -1135,13 +1245,19 @@ void MetalVDPRenderer::VDP1BeginFrame() {
 void MetalVDPRenderer::VDP1ExecuteCommand(uint32 cmdAddress, VDP1Command::Control control) {
     if (m_impl->vdp1) {
         m_impl->vdp1->ExecuteCommand(cmdAddress, control);
+        if (m_impl->compare) {
+            m_impl->CompareNoteCommand(cmdAddress, control);
+            SoftwareVDPRenderer::VDP1ExecuteCommand(cmdAddress, control);
+        }
     } else {
         SoftwareVDPRenderer::VDP1ExecuteCommand(cmdAddress, control);
     }
 }
 
 void MetalVDPRenderer::VDP1EndFrame() {
-    if (m_impl->vdp1) {
+    if (m_impl->compare) {
+        SoftwareVDPRenderer::VDP1EndFrame(); // (also calls the callback)
+    } else if (m_impl->vdp1) {
         Callbacks.VDP1DrawFinished();
     } else {
         SoftwareVDPRenderer::VDP1EndFrame();

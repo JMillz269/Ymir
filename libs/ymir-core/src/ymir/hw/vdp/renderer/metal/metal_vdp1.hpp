@@ -693,6 +693,10 @@ private:
         case 5: texSize <<= 1u; break; // 16 bpp, 32768 colors, RGB mode
         }
         vramTexUsageTracker.MarkRange(data.charAddr, texSize);
+        if (data.mode.colorMode == 1) {
+            // The color lookup table is read from VRAM by the GPU too
+            vramTexUsageTracker.MarkRange(static_cast<uint32>(m_batch.cpuCmdParams[data.cmdIndex].cmdcolr) * 8u, 32);
+        }
 
         // TODO: cache this
         auto findEndCodeIndex = [&](uint32 v) -> uint32 {
