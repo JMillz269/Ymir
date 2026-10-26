@@ -181,6 +181,12 @@ private:
         const uint8 *hostSrc = nullptr; // where the block's code lives in host memory when it was compiled
         const void *chainEntry = nullptr; // where other blocks jump to continue in this one; null if they can't
         uint32 paddedLen = 0;             // number of valid bytes in `bytes` for the jump check (a multiple of 16)
+        // The bus's code stamps for the (at most two) pieces of memory holding the block's code, and the values they
+        // had when the code was last compared with memory. While they are the same, nothing was written there.
+        uint32 *stamp0 = nullptr;
+        uint32 *stamp1 = nullptr;
+        uint32 token0 = 0;
+        uint32 token1 = 0;
         std::array<uint8, kMaxBlockBytes> bytes{};
     };
     static_assert(std::is_standard_layout_v<Block>);
@@ -194,6 +200,12 @@ private:
     enum class Kind { Inline, Mem, Mac, CondBranch, Helper, DelayedBranch, EndAfter, Stop };
 
     static Kind Classify(OpcodeType opcode);
+    // Whether nothing was written to the memory holding the block's code since it was last compared
+    static bool StampsCurrent(const Block &block) {
+        return block.stamp0 != nullptr && *block.stamp0 == block.token0 && *block.stamp1 == block.token1;
+    }
+    // Marks the memory holding the block's code as compared (whoever compares it first after a write sets the mark)
+    void AdoptStamps(Block &block);
     static uint32 SlotFor(uint32 pc) {
         return (((pc >> 1) * 0x9E3779B1u) >> (32 - kBlockSetBits)) * kBlockWays;
     }

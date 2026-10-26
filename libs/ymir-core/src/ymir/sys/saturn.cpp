@@ -230,6 +230,9 @@ const sys::ClockRatios &Saturn::GetClockRatios() const noexcept {
 
 void Saturn::LoadIPL(std::span<uint8, sys::kIPLSize> ipl) {
     mem.LoadIPL(ipl);
+    // Translated code in the old IPL ROM is no longer valid (ROM is never marked as written to)
+    masterSH2.FlushRecompiler();
+    slaveSH2.FlushRecompiler();
 }
 
 void Saturn::LoadCDBlockROM(std::span<uint8, sh1::kROMSize> rom) {

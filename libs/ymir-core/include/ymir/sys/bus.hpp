@@ -20,6 +20,8 @@
 #include <concepts>
 #include <cstddef>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace ymir::sys {
 
@@ -151,13 +153,44 @@ public:
 
         const uint32 startIndex = start >> pageGranularityBits;
         const uint32 endIndex = end >> pageGranularityBits;
+        uint32 *stamps = CodeStampsFor(array.data(), N);
         uint32 offset = 0;
         for (uint32 i = startIndex; i <= endIndex; i++) {
             m_pages[i] = {}; // clear all handlers
             m_pages[i].array = &array[offset & kMask];
             m_pages[i].arrayWritable = writable;
+            m_pages[i].stamps = &stamps[(offset & kMask) >> kCodeGranuleBits];
             offset += kPageSize;
         }
+    }
+
+    /// @brief Size of the pieces of array memory that code stamps are kept for.
+    static constexpr uint32 kCodeGranuleBits = 7;
+
+    /// @brief Code stamps tell the dynamic recompiler whether code it translated can have changed.
+    ///
+    /// Every array-backed page has one 32-bit stamp per 128 bytes. Writes to an array through this bus (or through
+    /// generated code that does the same) set the stamp of the piece they touch to zero. A stamp that isn't zero was
+    /// set by the recompiler after it compared its copy of the code with memory, and means that nothing was written
+    /// there since.
+    ///
+    /// @param[in] address the address to look up
+    /// @return a pointer to the stamp of the piece containing the address, or `nullptr` if it isn't backed by an array
+    [[nodiscard]] uint32 *GetCodeStamp(uint32 address) {
+        address &= kAddressMask;
+        const MemoryPage &entry = m_pages[address >> pageGranularityBits];
+        if (entry.stamps == nullptr) {
+            return nullptr;
+        }
+        return &entry.stamps[(address & kPageMask) >> kCodeGranuleBits];
+    }
+
+    /// @brief Returns a new non-zero value to mark a stamp with.
+    [[nodiscard]] uint32 NextCodeToken() {
+        if (++m_codeToken == 0) {
+            ++m_codeToken;
+        }
+        return m_codeToken;
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -201,6 +234,7 @@ public:
         if (entry.array) {
             if (entry.arrayWritable) {
                 util::WriteBE<T>(&entry.array[address & kPageMask], value);
+                entry.stamps[(address & kPageMask) >> kCodeGranuleBits] = 0;
             }
             return;
         }
@@ -254,6 +288,7 @@ public:
         if (entry.array) {
             if (entry.arrayWritable) {
                 util::WriteBE<T>(&entry.array[address & kPageMask], value);
+                entry.stamps[(address & kPageMask) >> kCodeGranuleBits] = 0;
             }
             return;
         }
@@ -294,6 +329,7 @@ public:
         uint32 entryShift; // log2 of the size of an entry
         uint32 offArray;
         uint32 offArrayWritable;
+        uint32 offStamps;
         uint32 offReadCycles[3];  // 8, 16 and 32-bit accesses
         uint32 offWriteCycles[3]; // 8, 16 and 32-bit accesses
     };
@@ -306,6 +342,7 @@ public:
         l.entryShift = std::countr_zero(sizeof(MemoryPage));
         l.offArray = offsetof(MemoryPage, array);
         l.offArrayWritable = offsetof(MemoryPage, arrayWritable);
+        l.offStamps = offsetof(MemoryPage, stamps);
         l.offReadCycles[0] = offsetof(MemoryPage, readCycles8);
         l.offReadCycles[1] = offsetof(MemoryPage, readCycles16);
         l.offReadCycles[2] = offsetof(MemoryPage, readCycles32);
@@ -387,6 +424,7 @@ private:
 
         uint8 *array = nullptr;
         bool arrayWritable = false;
+        uint32 *stamps = nullptr; // code stamps for the page's part of the array
 
         // Slow path for MMIO and other regions
 
@@ -421,6 +459,20 @@ private:
 
     std::array<MemoryPage, kPageCount> m_pages;
 
+    // Code stamps of the arrays mapped to the bus, one list per array
+    std::vector<std::pair<const uint8 *, std::vector<uint32>>> m_codeStamps;
+    uint32 m_codeToken = 0;
+
+    uint32 *CodeStampsFor(const uint8 *array, size_t size) {
+        for (auto &[key, stamps] : m_codeStamps) {
+            if (key == array) {
+                return stamps.data();
+            }
+        }
+        m_codeStamps.emplace_back(array, std::vector<uint32>((size >> kCodeGranuleBits) + 1, 0u));
+        return m_codeStamps.back().second.data();
+    }
+
     template <bool normal, bool sideEffectFree, bus_handler_fn... THandlers>
         requires util::unique_types<THandlers...>
     void Map(uint32 start, uint32 end, void *context, THandlers &&...handlers) {
@@ -429,6 +481,7 @@ private:
         for (uint32 i = startIndex; i <= endIndex; i++) {
             m_pages[i].array = nullptr;
             m_pages[i].arrayWritable = false;
+            m_pages[i].stamps = nullptr;
 
             m_pages[i].ctx = context;
             if constexpr (normal) {

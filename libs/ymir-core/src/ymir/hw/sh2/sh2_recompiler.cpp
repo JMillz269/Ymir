@@ -561,7 +561,16 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
         m_victimWay = m_victimWay % (kBlockWays - 1) + 1;
         return slots[m_victimWay];
     }();
-    if (block.pc != pc || block.hostSrc != src || std::memcmp(src, block.bytes.data(), block.byteLen) != 0) {
+    bool current = block.pc == pc && block.hostSrc == src;
+    if (current && !StampsCurrent(block)) {
+        // Something was written near the code since it was last compared (or this is the first time): compare it now
+        // (the bytes after the block are part of what the stamps vouch for, because blocks that jump here rely on them)
+        current = std::memcmp(src, block.bytes.data(), block.paddedLen != 0 ? block.paddedLen : block.byteLen) == 0;
+        if (current) {
+            AdoptStamps(block);
+        }
+    }
+    if (!current) {
         if (block.pc == pc) {
             ++m_stats.invalidations;
             g_statInvalidations.fetch_add(1, std::memory_order_relaxed);
@@ -584,6 +593,20 @@ uint64 SH2Recompiler::Run(uint64 cyclesLeft) {
         }
     }
     return cycles;
+}
+
+void SH2Recompiler::AdoptStamps(Block &block) {
+    if (block.stamp0 == nullptr) {
+        return;
+    }
+    if (*block.stamp0 == 0) {
+        *block.stamp0 = m_bus.NextCodeToken();
+    }
+    block.token0 = *block.stamp0;
+    if (*block.stamp1 == 0) {
+        *block.stamp1 = m_bus.NextCodeToken();
+    }
+    block.token1 = *block.stamp1;
 }
 
 void SH2Recompiler::Compile(Block &block, uint32 pc, const uint8 *src, uint32 bytesAvailable) {
@@ -679,6 +702,15 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
         } else {
             block.paddedLen = 0;
         }
+        // The memory just read is the one the stamps vouch for
+        const uint32 coveredLen = block.paddedLen != 0 ? block.paddedLen : block.byteLen;
+        block.stamp0 = m_bus.GetCodeStamp(pc);
+        block.stamp1 = m_bus.GetCodeStamp(pc + coveredLen - 1);
+        if (block.stamp0 == nullptr || block.stamp1 == nullptr) {
+            block.stamp0 = block.stamp1 = nullptr;
+        }
+        block.token0 = block.token1 = 0;
+        AdoptStamps(block);
     };
     fillBlock();
     block.fn = nullptr;
@@ -989,20 +1021,18 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
         a.Add(Sz::X, 7, kCodeBase, 7);
         a.Cmp(Sz::X, 6, 7);
         a.BCond(Cond::NE, fail);
-        // Same code as when the block was compiled
-        a.Ldr(2, 8, 2, static_cast<uint32>(offsetof(Block, paddedLen)));
-        a.AddImm(Sz::X, 9, 2, static_cast<uint32>(offsetof(Block, bytes)));
-        Label &loop = labelPool.emplace_back();
-        a.Bind(loop);
-        a.Ldp(Sz::X, 10, 11, 7, 0);
-        a.Ldp(Sz::X, 12, 13, 9, 0);
-        a.Cmp(Sz::X, 10, 12);
-        a.Ccmp(Sz::X, 11, 13, 0, Cond::EQ);
+        // Same code as when the block was compiled: nothing was written to the memory holding it since it was
+        // compared (a block without stamps has none to match)
+        a.Ldr(3, 8, 2, static_cast<uint32>(offsetof(Block, stamp0)));
+        a.Cbz(Sz::X, 8, fail);
+        a.Ldr(3, 9, 2, static_cast<uint32>(offsetof(Block, stamp1)));
+        a.Ldr(2, 10, 8, 0);
+        a.Ldr(2, 11, 9, 0);
+        a.Ldr(2, 12, 2, static_cast<uint32>(offsetof(Block, token0)));
+        a.Ldr(2, 13, 2, static_cast<uint32>(offsetof(Block, token1)));
+        a.Cmp(Sz::W, 10, 12);
+        a.Ccmp(Sz::W, 11, 13, 0, Cond::EQ);
         a.BCond(Cond::NE, fail);
-        a.AddImm(Sz::X, 7, 7, 16);
-        a.AddImm(Sz::X, 9, 9, 16);
-        a.SubsImm(Sz::W, 8, 8, 16);
-        a.BCond(Cond::HI, loop);
         flushRegs();
         a.Br(5);
         ++m_stats.chainSites;
@@ -1435,6 +1465,10 @@ void SH2Recompiler::CompileBlock(Block &block, uint32 pc, const uint8 *src, uint
             default: a.Rev(Sz::W, 8, 8); break;
             }
             a.StrReg(sizeLog2, 8, 7, 5, Extend::UXTW, false);
+            // Code stamps: the piece of memory written to is no longer known to match any translated code
+            a.Ldr(3, 4, 6, pages.offStamps);
+            a.LsrImm(Sz::W, 3, 5, sys::SH2Bus::kCodeGranuleBits);
+            a.StrReg(2, ZR, 4, 3, Extend::LSL, true);
             if (mode == Mode::RegPre) {
                 storeR(1, baseReg);
             }

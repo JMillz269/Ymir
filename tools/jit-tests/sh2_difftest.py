@@ -31,6 +31,7 @@ lib.t_create.restype = vp
 lib.t_create.argtypes = [C.c_int]
 lib.t_destroy.argtypes = [vp]
 lib.t_object_range.argtypes = [vp, C.POINTER(u64), C.POINTER(u64)]
+lib.t_stamp_range.argtypes = [vp, u32, C.POINTER(u64), C.POINTER(u64)]
 lib.t_set_mem.argtypes = [vp, u32, C.c_char_p, u32]
 lib.t_get_ram.argtypes = [vp, C.c_char_p, C.c_char_p]
 lib.t_set_state.argtypes = [vp, C.POINTER(u32)]
@@ -94,6 +95,15 @@ class Recomp:
         self.uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
         self.uc.mem_map_ptr(base.value, size.value, UC_PROT_ALL, base.value)
         self.uc.mem_map(STACK_BASE, STACK_SIZE, UC_PROT_ALL)
+        # The bus's code stamps, which generated code writes to (pages that are already mapped are skipped)
+        for which in (0, 1):
+            sb, ss = u64(), u64()
+            lib.t_stamp_range(self.h, which, C.byref(sb), C.byref(ss))
+            for page in range(sb.value, sb.value + ss.value, 0x1000):
+                try:
+                    self.uc.mem_map_ptr(page, 0x1000, UC_PROT_ALL, page)
+                except UcError:
+                    pass
         self.thunk = lib.t_step_thunk_address()
         self.pool_mapped = False
         self.last_compiled = -1

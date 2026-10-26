@@ -99,6 +99,15 @@ void t_object_range(void *handle, uint64 *base, uint64 *size) {
     *size = RoundUpPage(sizeof(Subject));
 }
 
+// The memory holding the code stamps of one of the two RAMs, rounded out to whole pages
+void t_stamp_range(void *handle, uint32 which, uint64 *base, uint64 *size) {
+    auto *s = static_cast<Subject *>(handle);
+    const uint64 first = reinterpret_cast<uint64>(s->bus.GetCodeStamp(which == 0 ? 0x600'0000 : 0x020'0000));
+    const uint64 last = first + ((kRamSize >> sys::SH2Bus::kCodeGranuleBits) + 1) * sizeof(uint32);
+    *base = first & ~uint64{4095};
+    *size = ((last + 4095) & ~uint64{4095}) - *base;
+}
+
 uint32 t_is_valid_opcode(uint32 word) {
     return sh2::DecodeTable::s_instance.opcodes[0][word & 0xFFFF] != sh2::OpcodeType::Illegal;
 }
@@ -117,10 +126,8 @@ void t_set_mem(void *handle, uint32 address, const uint8 *data, uint32 length) {
     auto *s = static_cast<Subject *>(handle);
     for (uint32 i = 0; i < length; ++i) {
         const uint32 a = address + i;
-        if (a >= 0x600'0000 && a < 0x600'0000 + kRamSize) {
-            s->wramHigh[a - 0x600'0000] = data[i];
-        } else if (a >= 0x020'0000 && a < 0x020'0000 + kRamSize) {
-            s->wramLow[a - 0x020'0000] = data[i];
+        if ((a >= 0x600'0000 && a < 0x600'0000 + kRamSize) || (a >= 0x020'0000 && a < 0x020'0000 + kRamSize)) {
+            s->bus.Poke<uint8>(a, data[i]); // (marks the memory as written, as every other write does)
         }
     }
 }
