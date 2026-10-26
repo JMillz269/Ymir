@@ -110,6 +110,8 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
            [cfg](int v) { cfg->video.enhancements.internalResolution = static_cast<uint32>(std::clamp(v, 1, 4)); });
     addBool("video.metalRenderer", [cfg] { return cfg->video.useMetalRenderer.Get(); },
             [cfg](bool v) { cfg->video.useMetalRenderer = v; });
+    addBool("video.metalVDP1", [cfg] { return cfg->video.useMetalVDP1.Get(); },
+            [cfg](bool v) { cfg->video.useMetalVDP1 = v; });
     addBool("video.skipNativeVDP1", [cfg] { return cfg->video.enhancements.skipNativeVDP1.Get(); },
             [cfg](bool v) { cfg->video.enhancements.skipNativeVDP1 = v; });
     addBool("video.threadedVDP1", [cfg] { return cfg->video.swRenderer.threadedVDP1.Get(); },

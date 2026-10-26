@@ -151,16 +151,18 @@ public:
     }
 
 #if defined(__APPLE__)
-    /// @brief Switches to the Metal renderer, which draws VDP2 on the GPU.
+    /// @brief Switches to the Metal renderer, which draws VDP2 (and optionally VDP1) on the GPU.
     /// @param[in] device an `id<MTLDevice>`
+    /// @param[in] gpuVDP1 whether to draw VDP1 on the GPU too. If not, the software renderer draws it.
     /// @return a pointer to the renderer, or an error message if it failed to instantiate
-    util::PointerResult<MetalVDPRenderer> UseMetalRenderer(void *device) {
-        auto result = UseRenderer<MetalVDPRenderer>(m_state, vdp2DebugRenderOptions, vdp2AccessPatternsConfig, device);
+    util::PointerResult<MetalVDPRenderer> UseMetalRenderer(void *device, bool gpuVDP1 = false) {
+        auto result =
+            UseRenderer<MetalVDPRenderer>(m_state, vdp2DebugRenderOptions, vdp2AccessPatternsConfig, device, gpuVDP1);
         if (!result) {
             return result.Error();
         }
         MetalVDPRenderer *renderer = result.Value();
-        if (renderer != nullptr) {
+        if (renderer != nullptr && !gpuVDP1) {
             renderer->EnableThreadedVDP1(m_config.swRenderer.threadedVDP1);
         }
         return renderer;

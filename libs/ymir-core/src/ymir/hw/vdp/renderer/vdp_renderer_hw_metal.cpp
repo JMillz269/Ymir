@@ -2,6 +2,7 @@
 
 #include "common_hw/common_hw_defs.hpp"
 #include "metal/metal_gpu.hpp"
+#include "metal/metal_vdp1.hpp"
 
 #include <ymir/util/bit_ops.hpp>
 #include <ymir/util/perf_counters.hpp>
@@ -60,6 +61,9 @@ struct MetalVDPRenderer::Impl {
 
     std::unique_ptr<metal::Gpu> gpu;
 
+    /// @brief VDP1 drawn on the GPU; null if the software renderer draws VDP1.
+    std::unique_ptr<MetalVDP1> vdp1;
+
     // -----------------------------------------------------------------------------------------------------------------
     // State
 
@@ -114,6 +118,10 @@ struct MetalVDPRenderer::Impl {
     // Setup and common
 
     void Reset() {
+        if (vdp1) {
+            vdp1->ResyncFromCPU();
+        }
+
         vramDirty.assign(kVRAMDirtyChunks, 1);
         vramAnyDirty = true;
         ++cramGeneration;
@@ -796,6 +804,9 @@ struct MetalVDPRenderer::Impl {
     }
 
     void VDP2SetResolution(uint32 h, uint32 v, bool exclusive) {
+        if (vdp1) {
+            vdp1->SetVRes(v);
+        }
         resChangedToInterlaced = !exclusive && v > vdp::kMaxNormalResV && v != VRes;
         HRes = h;
         VRes = v;
@@ -823,6 +834,11 @@ struct MetalVDPRenderer::Impl {
 
     /// @brief Sends the VDP1 framebuffer that is being displayed to the GPU.
     void VDP2UploadSpriteFB() {
+        if (vdp1) {
+            // (the framebuffers are on the GPU already)
+            return;
+        }
+
         // VDP2 reads the VDP1 framebuffer that was just finished. Make sure the render thread is done with it.
         owner.VDP1SyncFB();
         const uint8 displayFB = vdpState.fbIndex.display;
@@ -831,6 +847,11 @@ struct MetalVDPRenderer::Impl {
     }
 
     void VDP2RenderLayerLines(uint32 y) {
+        if (vdp1) {
+            // What VDP1 has drawn so far has to be in the framebuffers before the sprite layer is read from them
+            vdp1->FlushWork();
+        }
+
         // Bail out if there's nothing to render
         if (y < nextLayerRenderLine) {
             return;
@@ -938,7 +959,7 @@ MetalVDPRenderer::MetalVDPRenderer(VDPState &state, const config::VDP2DebugRende
 
 MetalVDPRenderer::~MetalVDPRenderer() = default;
 
-util::VoidResult<> MetalVDPRenderer::Initialize(void *device) {
+util::VoidResult<> MetalVDPRenderer::Initialize(void *device, bool gpuVDP1) {
     std::string error;
     m_impl->gpu = metal::Gpu::Create(device, error);
     if (!m_impl->gpu) {
@@ -946,18 +967,26 @@ util::VoidResult<> MetalVDPRenderer::Initialize(void *device) {
     }
     // The software renderer's own VDP2 pass is never used, so it doesn't need a thread
     EnableThreadedVDP2(false);
+    if (gpuVDP1) {
+        if (!m_impl->gpu->EnableVdp1(error)) {
+            return util::ErrorMessage{error};
+        }
+        m_impl->vdp1 = std::make_unique<MetalVDP1>(m_impl->vdpState, *m_impl->gpu);
+        // (nor is its VDP1 pass)
+        EnableThreadedVDP1(false);
+    }
     m_impl->Reset();
     return {};
 }
 
 util::ObjectResult<MetalVDPRenderer>
 MetalVDPRenderer::Create(VDPState &state, const config::VDP2DebugRender &vdp2DebugRenderOptions,
-                         const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig, void *device) {
+                         const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig, void *device, bool gpuVDP1) {
     if (device == nullptr) {
         return util::ErrorMessage{"No Metal device provided"};
     }
     std::unique_ptr<MetalVDPRenderer> renderer{new MetalVDPRenderer(state, vdp2DebugRenderOptions, vdp2AccessPatternsConfig)};
-    util::VoidResult<> result = renderer->Initialize(device);
+    util::VoidResult<> result = renderer->Initialize(device, gpuVDP1);
     if (!result) {
         return result.Error();
     }
@@ -985,9 +1014,69 @@ void MetalVDPRenderer::Reset(bool hard) {
     m_impl->Reset();
 }
 
+void MetalVDPRenderer::PreSaveStateSync() {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->SyncFB();
+    } else {
+        SoftwareVDPRenderer::PreSaveStateSync();
+    }
+}
+
 void MetalVDPRenderer::PostLoadStateSync() {
     SoftwareVDPRenderer::PostLoadStateSync();
     m_impl->Reset();
+}
+
+// -----------------------------------------------------------------------------
+// VDP1 memory and register writes
+
+void MetalVDPRenderer::VDP1WriteVRAM(uint32 address, uint8 value) {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->WriteVRAM(address);
+    } else {
+        SoftwareVDPRenderer::VDP1WriteVRAM(address, value);
+    }
+}
+
+void MetalVDPRenderer::VDP1WriteVRAM(uint32 address, uint16 value) {
+    if (m_impl->vdp1) {
+        // The address is always word-aligned
+        m_impl->vdp1->WriteVRAM(address);
+    } else {
+        SoftwareVDPRenderer::VDP1WriteVRAM(address, value);
+    }
+}
+
+void MetalVDPRenderer::VDP1SyncFB() {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->SyncFB();
+    } else {
+        SoftwareVDPRenderer::VDP1SyncFB();
+    }
+}
+
+void MetalVDPRenderer::VDP1WriteFB(uint32 address, uint8 value) {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->WriteFB(address, 1);
+    } else {
+        SoftwareVDPRenderer::VDP1WriteFB(address, value);
+    }
+}
+
+void MetalVDPRenderer::VDP1WriteFB(uint32 address, uint16 value) {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->WriteFB(address, 2);
+    } else {
+        SoftwareVDPRenderer::VDP1WriteFB(address, value);
+    }
+}
+
+void MetalVDPRenderer::VDP1WriteReg(uint32 address, uint16 value) {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->WriteReg();
+    } else {
+        SoftwareVDPRenderer::VDP1WriteReg(address, value);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1017,6 +1106,47 @@ void MetalVDPRenderer::VDP2WriteReg(uint32 address, uint16 value) {
 
 // -----------------------------------------------------------------------------
 // Rendering process
+
+void MetalVDPRenderer::VDP1EraseFramebuffer(uint64 cycles) {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->EraseFramebuffer(cycles);
+    } else {
+        SoftwareVDPRenderer::VDP1EraseFramebuffer(cycles);
+    }
+}
+
+void MetalVDPRenderer::VDP1SwapFramebuffer() {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->SwapFramebuffer();
+        Callbacks.VDP1FramebufferSwap();
+    } else {
+        SoftwareVDPRenderer::VDP1SwapFramebuffer();
+    }
+}
+
+void MetalVDPRenderer::VDP1BeginFrame() {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->BeginFrame();
+    } else {
+        SoftwareVDPRenderer::VDP1BeginFrame();
+    }
+}
+
+void MetalVDPRenderer::VDP1ExecuteCommand(uint32 cmdAddress, VDP1Command::Control control) {
+    if (m_impl->vdp1) {
+        m_impl->vdp1->ExecuteCommand(cmdAddress, control);
+    } else {
+        SoftwareVDPRenderer::VDP1ExecuteCommand(cmdAddress, control);
+    }
+}
+
+void MetalVDPRenderer::VDP1EndFrame() {
+    if (m_impl->vdp1) {
+        Callbacks.VDP1DrawFinished();
+    } else {
+        SoftwareVDPRenderer::VDP1EndFrame();
+    }
+}
 
 void MetalVDPRenderer::VDP2SetResolution(uint32 h, uint32 v, bool exclusive) {
     // (the software renderer needs the resolution for VDP1 too)

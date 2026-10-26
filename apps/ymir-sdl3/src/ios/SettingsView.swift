@@ -290,10 +290,12 @@ struct DisplaySettingsView: View {
 
             Section {
                 Toggle("Metal Renderer (Experimental)", isOn: store.bool("video.metalRenderer"))
+                Toggle("Draw Polygons and Sprites on GPU (Experimental)", isOn: store.bool("video.metalVDP1"))
+                    .disabled(!store.bool("video.metalRenderer").wrappedValue)
             } header: {
                 Text("Graphics Chip")
             } footer: {
-                Text("Draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The first video chip (polygons and sprites) is still drawn by the processor. The image arrives one frame later. Deinterlacing, Transparent Meshes and Internal Resolution don't work with it yet and are ignored while it is on.")
+                Text("The Metal renderer draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The second switch moves the first video chip (polygons, sprites and lines) to the GPU as well; it needs the Metal renderer. The image arrives one frame later. Deinterlacing, Transparent Meshes and Internal Resolution don't work with them yet and are ignored while they are on.")
             }
 
             Section {

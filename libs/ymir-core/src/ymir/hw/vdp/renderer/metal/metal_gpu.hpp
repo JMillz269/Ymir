@@ -48,6 +48,43 @@ struct ComposePassParams {
     uint32 numLines = 0;
 };
 
+/// @brief Inputs of a VDP1 polygon drawing pass: the spans of a batch of commands, followed by the merging of what they
+/// drew into the framebuffer.
+struct Vdp1DrawParams {
+    const void *constants = nullptr; ///< VDP1CommonRenderParams followed by VDP1PolyDrawParams
+    uint32 constantsSize = 0;
+    uint32 commonSize = 0; ///< size of the VDP1CommonRenderParams part of the constants (the merger only gets that)
+    const void *spans = nullptr; ///< VDP1SpanParams
+    uint32 spansSize = 0;
+    const void *prefixSums = nullptr; ///< number of spans + 1 pixel counts
+    uint32 prefixSumsSize = 0;
+    const void *commands = nullptr; ///< VDP1CommandParams
+    uint32 commandsSize = 0;
+
+    uint32 shadingMode = 0; ///< polygon drawing variant: 0 = copy, 1 = shift (shadow), 2 = OIT, 3 = MSB
+    uint32 mergeMode = 0;   ///< output merger variant: 0 = copy, 1 = shift, 2 = OIT (not used by MSB)
+    uint32 numPixels = 0;   ///< total number of pixels of the spans
+    uint32 mergeWidth = 0;  ///< size of the output merger dispatch in threads (one for every 2 or 4 pixels of a row)
+    uint32 mergeHeight = 0;
+};
+
+/// @brief Inputs of the VDP1 framebuffer erase pass.
+struct Vdp1ErasePassParams {
+    const void *constants = nullptr; ///< VDP1CommonRenderParams followed by VDP1EraseParams
+    uint32 constantsSize = 0;
+    uint32 width = 0;  ///< width of the area to erase in pixels
+    uint32 height = 0; ///< height of the area to erase in pixels
+};
+
+/// @brief Inputs of the pass that applies CPU writes to the VDP1 framebuffer.
+struct Vdp1FBWritePassParams {
+    const void *constants = nullptr; ///< VDP1CommonRenderParams followed by the number of writes
+    uint32 constantsSize = 0;
+    const void *writes = nullptr; ///< VDP1FBRAMWrite
+    uint32 writesSize = 0;
+    uint32 count = 0;
+};
+
 /// @brief A finished frame.
 struct FinishedFrame {
     const uint32 *pixels = nullptr; ///< width * height pixels, R G B A bytes, rows packed
@@ -70,6 +107,29 @@ public:
     /// @brief Replaces a part of the VDP1 framebuffer memory the sprite layer is read from. The two framebuffers are
     /// stored one after the other.
     virtual void UploadSpriteFB(uint32 offset, const void *data, uint32 size) = 0;
+
+    /// @brief Creates what the VDP1 passes need. Has to be called before any of the VDP1 functions.
+    /// @param[out] error receives a description of the problem if it fails
+    virtual bool EnableVdp1(std::string &error) = 0;
+
+    /// @brief Replaces a part of the VDP1 VRAM.
+    virtual void Vdp1UploadVRAM(uint32 offset, const void *data, uint32 size) = 0;
+
+    /// @brief Replaces a part of the VDP1 framebuffer memory. The two framebuffers are stored one after the other.
+    /// Same memory as `UploadSpriteFB`.
+    virtual void Vdp1UploadFBRAM(uint32 offset, const void *data, uint32 size) = 0;
+
+    /// @brief Draws a batch of spans and merges the result into the framebuffer.
+    virtual void Vdp1Draw(const Vdp1DrawParams &params) = 0;
+
+    /// @brief Erases the framebuffer.
+    virtual void Vdp1Erase(const Vdp1ErasePassParams &params) = 0;
+
+    /// @brief Applies writes made by the CPU to the framebuffer.
+    virtual void Vdp1WriteFB(const Vdp1FBWritePassParams &params) = 0;
+
+    /// @brief Waits for everything submitted so far to finish and copies the start of the VDP1 framebuffer memory.
+    virtual void Vdp1DownloadFBRAM(void *dst, uint32 size) = 0;
 
     /// @brief Draws the sprite layer, then the background layers, for the lines in `params`.
     virtual void RenderLayers(const LayerPassParams &params) = 0;

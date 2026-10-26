@@ -22,12 +22,34 @@ namespace {
     constexpr const char *kSpriteShaderPath = "src/vdp/cs_vdp2_render_sprite.metallib";
     constexpr const char *kBGShaderPath = "src/vdp/cs_vdp2_render_bgs.metallib";
     constexpr const char *kComposeShaderPath = "src/vdp/cs_vdp2_compose.metallib";
+    constexpr const char *kEraseShaderPath = "src/vdp/cs_vdp1_erase.metallib";
+    constexpr const char *kFBWriteShaderPath = "src/vdp/cs_vdp1_fbram_write.metallib";
+    // (the variants are named after the mesh mode and the shading or merging mode; only the checkerboard mesh mode is
+    // used, as transparent meshes aren't available with this renderer)
+    constexpr const char *kPolyDrawShaderPaths[4] = {
+        "src/vdp/cs_vdp1_polydraw_0_0.metallib",
+        "src/vdp/cs_vdp1_polydraw_0_1.metallib",
+        "src/vdp/cs_vdp1_polydraw_0_2.metallib",
+        "src/vdp/cs_vdp1_polydraw_0_3.metallib",
+    };
+    constexpr const char *kMergerShaderPaths[3] = {
+        "src/vdp/cs_vdp1_output_merger_0_0.metallib",
+        "src/vdp/cs_vdp1_output_merger_0_1.metallib",
+        "src/vdp/cs_vdp1_output_merger_0_2.metallib",
+    };
+
+    /// Texel buffers are emulated by 2D textures this wide (the default width of SPIRV-Cross)
+    constexpr NSUInteger kTexelBufferWidth = 4096;
+
+    /// Entries of the buffers with an entry for every pixel of the VDP1 framebuffer (internal sprite output and OIT list
+    /// heads); the area a shader can address in them is a multiple of the width of a texel buffer
+    constexpr NSUInteger kVDP1PixelBufferEntries = kVDP1FBRAMSize * 2 * 2;
 
     /// Frames that can be in the GPU's hands at the same time
     constexpr uint32 kNumFrameSlots = 3;
 
     /// Memory for the data of the passes of a frame
-    constexpr NSUInteger kArenaSize = 16u * 1024u * 1024u;
+    constexpr NSUInteger kArenaSize = 32u * 1024u * 1024u;
 
     /// Everything the shaders can be bound to
     enum class Res {
@@ -46,6 +68,19 @@ namespace {
         RbgLineColor,
         ColorCalcWindow,
         Composite,
+
+        // VDP1
+        Vdp1Spans,
+        Vdp1PrefixSums,
+        Vdp1Commands,
+        Vdp1FBWrites,
+        Vdp1SpriteOut,
+        Vdp1SpriteOutAtomic,
+        Vdp1ListHeads,
+        Vdp1ListHeadsAtomic,
+        Vdp1Fragments,
+        Vdp1Counter,
+        Fbram,
     };
 
     Res ResourceForName(NSString *name) {
@@ -71,6 +106,17 @@ namespace {
             {"g_colorCalcWindowOut", Res::ColorCalcWindow},
             {"g_colorCalcWindowIn", Res::ColorCalcWindow},
             {"g_compositeOut", Res::Composite},
+            {"g_spanParams", Res::Vdp1Spans},
+            {"g_spanPrefixSums", Res::Vdp1PrefixSums},
+            {"g_commandParams", Res::Vdp1Commands},
+            {"g_fbramWrites", Res::Vdp1FBWrites},
+            {"g_internalSpriteOut", Res::Vdp1SpriteOut},
+            {"g_internalSpriteOut_atomic", Res::Vdp1SpriteOutAtomic},
+            {"g_listHeads", Res::Vdp1ListHeads},
+            {"g_listHeads_atomic", Res::Vdp1ListHeadsAtomic},
+            {"g_fragments", Res::Vdp1Fragments},
+            {"g_counter", Res::Vdp1Counter},
+            {"g_fbramOut", Res::Fbram},
         };
         for (const Entry &entry : kEntries) {
             if ([name isEqualToString:[NSString stringWithUTF8String:entry.name]]) {
@@ -78,7 +124,8 @@ namespace {
             }
         }
         // The constant buffer is named after its HLSL cbuffer
-        if ([name hasPrefix:@"CommonRenderParams"] || [name hasPrefix:@"type_CommonRenderParams"]) {
+        if ([name hasPrefix:@"CommonRenderParams"] || [name hasPrefix:@"type_CommonRenderParams"] ||
+            [name hasPrefix:@"RenderParamsBuffer"] || [name hasPrefix:@"type_RenderParamsBuffer"]) {
             return Res::Common;
         }
         return Res::Unknown;
@@ -94,6 +141,7 @@ namespace {
     struct Pipeline {
         id<MTLComputePipelineState> state = nil;
         std::vector<Slot> slots;
+        bool vdp1 = false; ///< reads the VDP1 VRAM instead of the VDP2 VRAM
     };
 
     /// Data of a pass, staged in the frame's arena. It stays valid for as long as the contents are the same and the
@@ -152,8 +200,9 @@ public:
 
         // Memory the GPU reads the VDP2 VRAM and the VDP1 framebuffers from
         m_vram = [device newBufferWithLength:kVDP2VRAMSize options:MTLResourceStorageModePrivate];
-        m_spriteFB = [device newBufferWithLength:kVDP1FBRAMSize * 2 options:MTLResourceStorageModePrivate];
-        if (m_vram == nil || m_spriteFB == nil) {
+        // (laid out like the Direct3D 12 renderer's: the two framebuffers, then the same for the other fields)
+        m_fbram = [device newBufferWithLength:kVDP1FBRAMSize * 2 * 2 * 2 options:MTLResourceStorageModePrivate];
+        if (m_vram == nil || m_fbram == nil) {
             error = "Could not allocate GPU memory for VRAM";
             return false;
         }
@@ -198,7 +247,192 @@ public:
         if (size == 0 || offset + size > kVDP1FBRAMSize * 2) {
             return;
         }
-        UploadTo(m_spriteFB, offset, data, size);
+        UploadTo(m_fbram, offset, data, size);
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
+    // VDP1
+
+    bool EnableVdp1(std::string &error) override {
+        if (m_vdp1Enabled) {
+            return true;
+        }
+
+        for (uint32 i = 0; i < 4; ++i) {
+            m_polyDraw[i].vdp1 = true;
+            if (!CreatePipeline(kPolyDrawShaderPaths[i], m_polyDraw[i], error)) {
+                return false;
+            }
+        }
+        for (uint32 i = 0; i < 3; ++i) {
+            m_merger[i].vdp1 = true;
+            if (!CreatePipeline(kMergerShaderPaths[i], m_merger[i], error)) {
+                return false;
+            }
+        }
+        m_erase.vdp1 = true;
+        m_fbWrite.vdp1 = true;
+        if (!CreatePipeline(kEraseShaderPath, m_erase, error) || !CreatePipeline(kFBWriteShaderPath, m_fbWrite, error)) {
+            return false;
+        }
+
+        m_vdp1Vram = [m_device newBufferWithLength:kVDP1VRAMSize options:MTLResourceStorageModePrivate];
+        m_spriteOutBuf = [m_device newBufferWithLength:kVDP1PixelBufferEntries * sizeof(uint32)
+                                               options:MTLResourceStorageModePrivate];
+        m_listHeadsBuf = [m_device newBufferWithLength:kVDP1PixelBufferEntries * sizeof(uint32)
+                                               options:MTLResourceStorageModePrivate];
+        m_fragments = [m_device newBufferWithLength:kMaxVDP1OITFragmentsPerDispatch * sizeof(VDP1OITFragment)
+                                            options:MTLResourceStorageModePrivate];
+        m_fbramReadback = [m_device newBufferWithLength:kVDP1FBRAMSize * 2 options:MTLResourceStorageModeShared];
+        if (m_vdp1Vram == nil || m_spriteOutBuf == nil || m_listHeadsBuf == nil || m_fragments == nil ||
+            m_fbramReadback == nil) {
+            error = "Could not allocate GPU memory for VDP1";
+            return false;
+        }
+
+        // Shaders access the pixel buffers as texel buffers (and atomically, through the buffers themselves)
+        m_spriteOutTex = CreateBufferTexture(m_spriteOutBuf, kVDP1PixelBufferEntries);
+        m_listHeadsTex = CreateBufferTexture(m_listHeadsBuf, kVDP1PixelBufferEntries);
+        if (m_spriteOutTex == nil || m_listHeadsTex == nil) {
+            error = "Could not create GPU textures for VDP1";
+            return false;
+        }
+
+        // Initial contents: no output pixels, empty fragment lists, empty framebuffers
+        id<MTLCommandBuffer> cmdBuf = [m_queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+        [blit fillBuffer:m_spriteOutBuf range:NSMakeRange(0, m_spriteOutBuf.length) value:0x00];
+        [blit fillBuffer:m_listHeadsBuf range:NSMakeRange(0, m_listHeadsBuf.length) value:0xFF];
+        [blit fillBuffer:m_fbram range:NSMakeRange(0, m_fbram.length) value:0x00];
+        [blit fillBuffer:m_vdp1Vram range:NSMakeRange(0, m_vdp1Vram.length) value:0x00];
+        [blit endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+
+        m_vdp1Enabled = true;
+        return true;
+    }
+
+    void Vdp1UploadVRAM(uint32 offset, const void *data, uint32 size) override {
+        if (size == 0 || offset + size > kVDP1VRAMSize) {
+            return;
+        }
+        UploadTo(m_vdp1Vram, offset, data, size);
+    }
+
+    void Vdp1UploadFBRAM(uint32 offset, const void *data, uint32 size) override {
+        UploadSpriteFB(offset, data, size);
+    }
+
+    void Vdp1Draw(const Vdp1DrawParams &params) override {
+        if (params.numPixels == 0 || params.shadingMode > 3 || params.mergeMode > 2) {
+            return;
+        }
+        EnsureFrame();
+
+        Staged staged{};
+        uint64 generation;
+        do {
+            generation = m_arenaGeneration;
+            staged.common = StageRaw(m_blobV1Params, params.constants, params.constantsSize);
+            staged.v1Spans = StageRaw(m_blobSpans, params.spans, params.spansSize);
+            staged.v1PrefixSums = StageRaw(m_blobPrefixSums, params.prefixSums, params.prefixSumsSize,
+                                           TexelBufferBytes(params.prefixSumsSize, MTLPixelFormatR32Uint));
+            MakeTexelView(m_blobPrefixSums, params.prefixSumsSize, MTLPixelFormatR32Uint);
+            staged.v1Commands = StageRaw(m_blobCommands, params.commands, params.commandsSize);
+            if (params.shadingMode == 2) {
+                // (the counter of fragments starts at zero for every dispatch)
+                const uint32 zero = 0;
+                staged.v1Counter = StageRaw(m_blobCounter, &zero, sizeof(zero));
+            }
+        } while (generation != m_arenaGeneration);
+        EnsureCompute();
+
+        // Draw the spans
+        const Pipeline &draw = m_polyDraw[params.shadingMode];
+        [m_encoder setComputePipelineState:draw.state];
+        Bind(draw, staged);
+        [m_encoder dispatchThreadgroups:MTLSizeMake((params.numPixels + 63) / 64, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        Vdp1Barrier();
+
+        if (params.shadingMode != 3) {
+            // Merge the output into the framebuffer. The merger gets the common part of the constants only.
+            // (MSB doesn't need merging as it is applied to the framebuffer directly)
+            Staged mergeStaged{};
+            do {
+                generation = m_arenaGeneration;
+                mergeStaged.common = StageRaw(m_blobMergeCommon, params.constants, params.commonSize);
+            } while (generation != m_arenaGeneration);
+            EnsureCompute();
+            // (the draw above has been recorded already; if the arena was emptied to make room the encoder is a new one)
+
+            const Pipeline &merge = m_merger[params.mergeMode];
+            [m_encoder setComputePipelineState:merge.state];
+            Bind(merge, mergeStaged);
+            [m_encoder dispatchThreadgroups:MTLSizeMake((params.mergeWidth + 7) / 8, (params.mergeHeight + 7) / 8, 1)
+                      threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            Vdp1Barrier();
+        }
+    }
+
+    void Vdp1Erase(const Vdp1ErasePassParams &params) override {
+        if (params.width == 0 || params.height == 0) {
+            return;
+        }
+        EnsureFrame();
+
+        Staged staged{};
+        uint64 generation;
+        do {
+            generation = m_arenaGeneration;
+            staged.common = StageRaw(m_blobV1Params, params.constants, params.constantsSize);
+        } while (generation != m_arenaGeneration);
+        EnsureCompute();
+
+        [m_encoder setComputePipelineState:m_erase.state];
+        Bind(m_erase, staged);
+        // (each thread works on two pixels; the shader doesn't depend on the shape of the groups, so use fewer rows per
+        // group if the GPU can't run 32x32 threads of this shader at once)
+        const NSUInteger rows = std::max<NSUInteger>(1, std::min<NSUInteger>(32, m_erase.state.maxTotalThreadsPerThreadgroup / 32));
+        [m_encoder dispatchThreadgroups:MTLSizeMake((params.width + 63) / 64, (params.height + rows - 1) / rows, 1)
+                  threadsPerThreadgroup:MTLSizeMake(32, rows, 1)];
+        Vdp1Barrier();
+    }
+
+    void Vdp1WriteFB(const Vdp1FBWritePassParams &params) override {
+        if (params.count == 0) {
+            return;
+        }
+        EnsureFrame();
+
+        Staged staged{};
+        uint64 generation;
+        do {
+            generation = m_arenaGeneration;
+            staged.common = StageRaw(m_blobV1Params, params.constants, params.constantsSize);
+            staged.v1FBWrites = StageRaw(m_blobFBWrites, params.writes, params.writesSize);
+        } while (generation != m_arenaGeneration);
+        EnsureCompute();
+
+        [m_encoder setComputePipelineState:m_fbWrite.state];
+        Bind(m_fbWrite, staged);
+        [m_encoder dispatchThreadgroups:MTLSizeMake((params.count + 63) / 64, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        Vdp1Barrier();
+    }
+
+    void Vdp1DownloadFBRAM(void *dst, uint32 size) override {
+        size = std::min<uint32>(size, kVDP1FBRAMSize * 2);
+        EnsureFrame();
+        EndEncoder();
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:m_fbram sourceOffset:0 toBuffer:m_fbramReadback destinationOffset:0 size:size];
+        [blit endEncoding];
+
+        // Submit what has been recorded so far and wait for it
+        DrainArena();
+        std::memcpy(dst, [m_fbramReadback contents], size);
     }
 
     void RenderLayers(const LayerPassParams &params) override {
@@ -325,6 +559,11 @@ private:
         const Blob *rotParamBases = nullptr;
         const Blob *composeParams = nullptr;
         const Blob *lnclBack = nullptr;
+        const Blob *v1Spans = nullptr;
+        const Blob *v1PrefixSums = nullptr;
+        const Blob *v1Commands = nullptr;
+        const Blob *v1FBWrites = nullptr;
+        const Blob *v1Counter = nullptr;
     };
 
     id<MTLDevice> m_device = nil;
@@ -332,8 +571,21 @@ private:
 
     Pipeline m_sprite, m_bgs, m_compose;
 
+    // VDP1
+    bool m_vdp1Enabled = false;
+    std::array<Pipeline, 4> m_polyDraw;
+    std::array<Pipeline, 3> m_merger;
+    Pipeline m_erase, m_fbWrite;
+    id<MTLBuffer> m_vdp1Vram = nil;
+    id<MTLBuffer> m_spriteOutBuf = nil;
+    id<MTLBuffer> m_listHeadsBuf = nil;
+    id<MTLBuffer> m_fragments = nil;
+    id<MTLBuffer> m_fbramReadback = nil;
+    id<MTLTexture> m_spriteOutTex = nil;
+    id<MTLTexture> m_listHeadsTex = nil;
+
     id<MTLBuffer> m_vram = nil;
-    id<MTLBuffer> m_spriteFB = nil;
+    id<MTLBuffer> m_fbram = nil; ///< VDP1 framebuffer memory, shared by the VDP1 passes and the VDP2 sprite layer
     id<MTLTexture> m_layerOut = nil;
     id<MTLTexture> m_spriteAttrs = nil;
     id<MTLTexture> m_rbgLineColor = nil;
@@ -354,6 +606,9 @@ private:
 
     Blob m_blobCommon, m_blobLayerParams, m_blobCramColor, m_blobCramRot, m_blobRotBases, m_blobCompose,
         m_blobLnclBack;
+    // (the data of the VDP1 passes is never reused, so these are only places to keep the staging results)
+    Blob m_blobV1Params, m_blobSpans, m_blobPrefixSums, m_blobCommands, m_blobFBWrites, m_blobCounter,
+        m_blobMergeCommon;
 
     // -------------------------------------------------------------------------------------------------------------
     // Setup
@@ -510,6 +765,66 @@ private:
         return staged;
     }
 
+    /// Copies data into the arena, without keeping a copy of it or looking for the same data
+    const Blob *StageRaw(Blob &blob, const void *data, uint32 size, NSUInteger paddedSize = 0) {
+        if (data == nullptr || size == 0) {
+            return nullptr;
+        }
+        blob.offset = Allocate(std::max<NSUInteger>(size, paddedSize));
+        std::memcpy(static_cast<uint8 *>([m_slots[m_currentSlot].arena contents]) + blob.offset, data, size);
+        blob.generation = m_arenaGeneration;
+        blob.texture = nil;
+        return &blob;
+    }
+
+    /// Bytes per row of a texel buffer with the given number of texels
+    NSUInteger TexelBufferRowBytes(NSUInteger texels, MTLPixelFormat format) {
+        const NSUInteger width = std::min<NSUInteger>(std::max<NSUInteger>(texels, 1), kTexelBufferWidth);
+        const NSUInteger alignment = [m_device minimumLinearTextureAlignmentForPixelFormat:format];
+        return (width * 4 + alignment - 1) / alignment * alignment;
+    }
+
+    /// Bytes needed to keep the given number of bytes of 32-bit texels in a texture made from a buffer
+    NSUInteger TexelBufferBytes(uint32 size, MTLPixelFormat format) {
+        const NSUInteger texels = size / 4;
+        const NSUInteger rows = std::max<NSUInteger>((texels + kTexelBufferWidth - 1) / kTexelBufferWidth, 1);
+        return rows * TexelBufferRowBytes(texels, format);
+    }
+
+    /// Makes the staged data readable as a texel buffer of 32-bit texels, which shaders see as a 2D texture
+    void MakeTexelView(Blob &blob, uint32 size, MTLPixelFormat format) {
+        if (blob.generation != m_arenaGeneration || blob.texture != nil) {
+            return;
+        }
+        const NSUInteger texels = size / 4;
+        const NSUInteger rowBytes = TexelBufferRowBytes(texels, format);
+        MTLTextureDescriptor *desc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                               width:std::min<NSUInteger>(std::max<NSUInteger>(texels, 1), kTexelBufferWidth)
+                                                              height:std::max<NSUInteger>((texels + kTexelBufferWidth - 1) / kTexelBufferWidth, 1)
+                                                           mipmapped:NO];
+        desc.storageMode = MTLStorageModeShared;
+        desc.cpuCacheMode = MTLCPUCacheModeWriteCombined; // (has to match the buffer)
+        desc.usage = MTLTextureUsageShaderRead;
+        blob.texture = [m_slots[m_currentSlot].arena newTextureWithDescriptor:desc offset:blob.offset bytesPerRow:rowBytes];
+    }
+
+    /// Creates the view shaders see a buffer of 32-bit values as a texel buffer through
+    id<MTLTexture> CreateBufferTexture(id<MTLBuffer> buffer, NSUInteger entries) {
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
+                                                                                         width:kTexelBufferWidth
+                                                                                        height:entries / kTexelBufferWidth
+                                                                                     mipmapped:NO];
+        desc.storageMode = MTLStorageModePrivate;
+        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        return [buffer newTextureWithDescriptor:desc offset:0 bytesPerRow:kTexelBufferWidth * sizeof(uint32)];
+    }
+
+    /// Makes what a VDP1 pass wrote visible to the next one
+    void Vdp1Barrier() {
+        [m_encoder memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+    }
+
     /// Copies data to a GPU buffer in sequence with the passes
     void UploadTo(id<MTLBuffer> dst, NSUInteger dstOffset, const void *data, uint32 size) {
         EnsureFrame();
@@ -537,8 +852,19 @@ private:
             case Res::RotParamBases: blob = staged.rotParamBases; break;
             case Res::ComposeParams: blob = staged.composeParams; break;
             case Res::LnclBack: blob = staged.lnclBack; break;
-            case Res::Vram: buffer = m_vram; break;
-            case Res::SpriteFB: buffer = m_spriteFB; break;
+            case Res::Vram: buffer = pipeline.vdp1 ? m_vdp1Vram : m_vram; break;
+            case Res::SpriteFB: buffer = m_fbram; break;
+            case Res::Fbram: buffer = m_fbram; break;
+            case Res::Vdp1Spans: blob = staged.v1Spans; break;
+            case Res::Vdp1PrefixSums: blob = staged.v1PrefixSums; break;
+            case Res::Vdp1Commands: blob = staged.v1Commands; break;
+            case Res::Vdp1FBWrites: blob = staged.v1FBWrites; break;
+            case Res::Vdp1Counter: blob = staged.v1Counter; break;
+            case Res::Vdp1SpriteOut: texture = m_spriteOutTex; break;
+            case Res::Vdp1SpriteOutAtomic: buffer = m_spriteOutBuf; break;
+            case Res::Vdp1ListHeads: texture = m_listHeadsTex; break;
+            case Res::Vdp1ListHeadsAtomic: buffer = m_listHeadsBuf; break;
+            case Res::Vdp1Fragments: buffer = m_fragments; break;
             case Res::LayerOut: texture = m_layerOut; break;
             case Res::SpriteAttrs: texture = m_spriteAttrs; break;
             case Res::RbgLineColor: texture = m_rbgLineColor; break;

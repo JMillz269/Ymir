@@ -404,6 +404,7 @@ elseif (APPLE)
             src/ymir/hw/vdp/renderer/vdp_renderer_hw_metal.cpp
             src/ymir/hw/vdp/renderer/metal/metal_gpu.hpp
             src/ymir/hw/vdp/renderer/metal/metal_gpu.mm
+            src/ymir/hw/vdp/renderer/metal/metal_vdp1.hpp
     )
     set_source_files_properties(src/ymir/hw/vdp/renderer/metal/metal_gpu.mm PROPERTIES
                                 SKIP_PRECOMPILE_HEADERS ON

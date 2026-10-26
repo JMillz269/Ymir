@@ -507,6 +507,7 @@ struct Settings {
 
         util::Observable<bool> useHardwareAcceleration;
         util::Observable<bool> useMetalRenderer; // draw VDP2 on the GPU with Metal (VDP1 stays on the CPU)
+        util::Observable<bool> useMetalVDP1;     // with the Metal renderer: draw VDP1 on the GPU too
 
         struct SoftwareRenderer {
             util::Observable<bool> threadedVDP1;

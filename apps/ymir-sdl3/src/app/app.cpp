@@ -354,6 +354,8 @@ int App::Run(const CommandLineOptions &options) {
             [&](bool value) { m_context.EnqueueEvent(events::emu::SetSkipNativeVDP1(value)); });
         videoSettings.useMetalRenderer.Observe(
             [&](bool value) { m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false)); });
+        videoSettings.useMetalVDP1.Observe(
+            [&](bool value) { m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false)); });
     }
 
     // Profile priority:

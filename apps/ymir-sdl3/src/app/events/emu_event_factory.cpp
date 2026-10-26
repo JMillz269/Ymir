@@ -108,7 +108,7 @@ EmuEvent SwitchVDPRenderer(bool verbose) {
 #if YMIR_PLATFORM_HAS_METAL
         if (settings.video.useMetalRenderer) {
             if (auto *metalCtx = gfxCtx.As<gfx::MetalGraphicsContext>()) {
-                auto result = vdp.UseMetalRenderer(metalCtx->GetDevice());
+                auto result = vdp.UseMetalRenderer(metalCtx->GetDevice(), settings.video.useMetalVDP1);
                 if (result) {
                     ctx.screen.frameReadyEvent.Set(); // unblock main thread in case video sync is enabled
                     notifySuccess("Metal renderer initialized successfully");

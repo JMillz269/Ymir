@@ -67,6 +67,12 @@ layer built from VDP1's framebuffer and the final mixing of all of them) with th
 the Direct3D 12 renderer on Windows. VDP1 (polygons, sprites and lines) is still drawn by the software renderer on the
 processor. Moving VDP2 to the GPU frees a good part of the processor time a frame takes and lowers heat.
 
+**Draw Polygons and Sprites on GPU** (needs the Metal renderer) moves VDP1 to the GPU as well. The processor only turns
+the VDP1 commands into lines of pixels; the GPU draws them (all the texture, shading, shadow, half-transparency and
+MSB modes) into the framebuffer memory, which stays on the GPU. The processor gets a copy of the framebuffer only when
+the game reads it back (some games do, e.g. for effects), which makes the processor wait for the GPU, and for save
+states. This is the second step toward upscaling on the GPU; the Internal Resolution setting is still ignored.
+
 The finished image is read back from the GPU and shown through the normal display path, so all the display filters,
 upscaling and screenshots keep working. The image arrives one frame late. Deinterlacing, Transparent Meshes and
 Internal Resolution are not supported yet and are ignored while the Metal renderer is on. If it can't be created the
