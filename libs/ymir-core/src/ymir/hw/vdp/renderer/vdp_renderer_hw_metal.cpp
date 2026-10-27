@@ -114,6 +114,13 @@ struct MetalVDPRenderer::Impl {
     void CompareFramebuffers() {
         ++compareFrames;
         vdp1->FlushWork();
+        if (compareFrames <= 3 || compareFrames % 60 == 0) {
+            uint32 heads, out, firstIndex, firstValue;
+            gpu->Vdp1DebugPixelBuffers(heads, out, firstIndex, firstValue);
+            metal::LogMessage("compare: frame %u: %u fragment list heads and %u sprite outputs left over (first head: "
+                              "pixel %u -> %08X)",
+                              compareFrames, heads, out, firstIndex, firstValue);
+        }
         compareFB.resize(kVDP1FBRAMSize * 2);
         gpu->Vdp1DownloadFBRAM(compareFB.data(), static_cast<uint32>(kVDP1FBRAMSize * 2));
 

@@ -432,6 +432,21 @@ public:
                       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
             Vdp1Barrier();
             EndEncoder();
+
+            // The merger clears what it has used, but make sure of it: reset the part of the pixel buffer that a
+            // pixel of the framebuffer can have an entry in. (A fragment list left behind would be added to the next
+            // drawing's lists, which are in the same place.)
+            const NSUInteger entries =
+                std::min<NSUInteger>(kVDP1PixelBufferEntries, NSUInteger(params.mergeWidth) * 4 * params.mergeHeight);
+            id<MTLBuffer> buffer = params.shadingMode == 2 ? m_listHeadsBuf : m_spriteOutBuf;
+            id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+            if (m_fenceUpdated) {
+                [blit waitForFence:m_fence];
+            }
+            [blit fillBuffer:buffer range:NSMakeRange(0, entries * sizeof(uint32)) value:params.shadingMode == 2 ? 0xFF : 0x00];
+            [blit updateFence:m_fence];
+            m_fenceUpdated = true;
+            [blit endEncoding];
         }
     }
 
@@ -482,6 +497,40 @@ public:
         [m_encoder dispatchThreadgroups:MTLSizeMake((params.count + 63) / 64, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         Vdp1Barrier();
+    }
+
+    void Vdp1DebugPixelBuffers(uint32 &listHeads, uint32 &spriteOut, uint32 &firstHeadIndex,
+                               uint32 &firstHeadValue) override {
+        const NSUInteger bytes = kVDP1PixelBufferEntries * sizeof(uint32);
+        if (m_debugHeads == nil) {
+            m_debugHeads = [m_device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+            m_debugOut = [m_device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        }
+        EnsureFrame();
+        EndEncoder();
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:m_listHeadsBuf sourceOffset:0 toBuffer:m_debugHeads destinationOffset:0 size:bytes];
+        [blit copyFromBuffer:m_spriteOutBuf sourceOffset:0 toBuffer:m_debugOut destinationOffset:0 size:bytes];
+        [blit endEncoding];
+        DrainArena();
+
+        const uint32 *heads = static_cast<const uint32 *>([m_debugHeads contents]);
+        const uint32 *out = static_cast<const uint32 *>([m_debugOut contents]);
+        listHeads = 0;
+        spriteOut = 0;
+        firstHeadIndex = ~0u;
+        firstHeadValue = 0;
+        for (NSUInteger i = 0; i < kVDP1PixelBufferEntries; ++i) {
+            if (heads[i] != 0xFFFFFFFFu) {
+                if (listHeads++ == 0) {
+                    firstHeadIndex = static_cast<uint32>(i);
+                    firstHeadValue = heads[i];
+                }
+            }
+            if (out[i] != 0) {
+                ++spriteOut;
+            }
+        }
     }
 
     void Vdp1DownloadVRAM(void *dst, uint32 size) override {
@@ -670,6 +719,8 @@ private:
     id<MTLBuffer> m_fragments = nil;
     id<MTLBuffer> m_fbramReadback = nil;
     id<MTLBuffer> m_vramReadback = nil;
+    id<MTLBuffer> m_debugHeads = nil;
+    id<MTLBuffer> m_debugOut = nil;
     id<MTLTexture> m_spriteOutTex = nil;
     id<MTLTexture> m_listHeadsTex = nil;
 

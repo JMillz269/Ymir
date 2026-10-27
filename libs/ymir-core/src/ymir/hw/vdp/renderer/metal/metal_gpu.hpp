@@ -135,6 +135,14 @@ public:
     /// @brief Applies writes made by the CPU to the framebuffer.
     virtual void Vdp1WriteFB(const Vdp1FBWritePassParams &params) = 0;
 
+    /// @brief Waits for everything submitted so far to finish and counts the entries of the intermediate pixel buffers
+    /// that were not cleared by the merging (for diagnostics).
+    /// @param[out] listHeads receives the number of fragment list heads that are not empty
+    /// @param[out] spriteOut receives the number of sprite output entries that are not zero
+    /// @param[out] firstHead receives the pixel index of the first list head that is not empty, and its value
+    virtual void Vdp1DebugPixelBuffers(uint32 &listHeads, uint32 &spriteOut, uint32 &firstHeadIndex,
+                                       uint32 &firstHeadValue) = 0;
+
     /// @brief Waits for everything submitted so far to finish and copies the VDP1 VRAM (for diagnostics).
     virtual void Vdp1DownloadVRAM(void *dst, uint32 size) = 0;
 
