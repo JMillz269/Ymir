@@ -43,6 +43,11 @@ static const uint spriteDisplayFB = BitExtract(g_commonParams.spriteParams, 23, 
 
 static const bool deinterlace = BitTest(g_commonParams.enhancements, 0);
 
+#ifdef HR_SPRITE
+static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
+static const uint hrPlane = BitExtract(g_commonParams.enhancements, 5, 4);
+#endif
+
 static const uint colorRAMMode = BitExtract(g_commonParams.displayParams, 6, 2);
 static const uint kCRAMAddressMask = colorRAMMode == 1 ? 0x7FF : 0x3FF;
 
@@ -67,8 +72,20 @@ uint ReadSprite8(uint address, uint field) {
 }
 
 uint ReadSprite16(uint address, uint field) {
+#ifdef HR_SPRITE
+    // Internal resolution variant: g_spriteFB holds the scaled up framebuffers (two of 512x256 16-bit pixels, scaled)
+    // and every call reads the sub-pixel of the plane being drawn that belongs to the native pixel the address is for.
+    const uint pixel = address >> 1;
+    const uint nativeX = pixel % fbSize.x;
+    const uint nativeY = pixel / fbSize.x;
+    const uint hrX = nativeX * hrScale + hrPlane % hrScale;
+    const uint hrY = nativeY * hrScale + hrPlane / hrScale;
+    const uint hrAddress = spriteDisplayFB * kVDP1FBRAMSize * hrScale * hrScale + (hrY * fbSize.x * hrScale + hrX) * 2;
+    return ByteSwap16(g_spriteFB.Load(hrAddress & ~3) >> ((hrAddress & 2) * 8));
+#else
     address += kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset;
     return ByteSwap16(g_spriteFB.Load(address & ~3) >> ((address & 2) * 8));
+#endif
 }
 
 uint ReadMesh8(uint address, uint field) {

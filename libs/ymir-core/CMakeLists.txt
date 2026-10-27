@@ -437,6 +437,10 @@ set(COMPUTE_SHADER_SOURCES
     res/shaders/src/vdp/cs_vdp2_compose.hlsl
     res/shaders/src/vdp/cs_vdp2_render_bgs.hlsl
     res/shaders/src/vdp/cs_vdp2_render_sprite.hlsl
+
+    # Internal resolution variants of the VDP2 sprite layer and composition passes
+    "res/shaders/src/vdp/cs_vdp2_compose.hlsl|hr|HR_COMPOSE=1"
+    "res/shaders/src/vdp/cs_vdp2_render_sprite.hlsl|hr|HR_SPRITE=1"
 )
 
 # Generate shader specializations

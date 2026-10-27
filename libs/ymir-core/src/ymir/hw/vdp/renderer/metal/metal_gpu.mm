@@ -28,6 +28,8 @@ namespace {
     constexpr const char *kFBWriteShaderPath = "src/vdp/cs_vdp1_fbram_write.metallib";
     constexpr const char *kHRFBWriteShaderPath = "src/vdp/cs_vdp1_hr_fbram_write.metallib";
     constexpr const char *kHRResyncShaderPath = "src/vdp/cs_vdp1_hr_resync.metallib";
+    constexpr const char *kHRSpriteShaderPath = "src/vdp/cs_vdp2_render_sprite_hr.metallib";
+    constexpr const char *kHRComposeShaderPath = "src/vdp/cs_vdp2_compose_hr.metallib";
     /// Largest internal resolution scale
     constexpr uint32 kMaxHRScale = 4;
     // (the variants are named after the mesh mode and the shading or merging mode; only the checkerboard mesh mode is
@@ -51,6 +53,11 @@ namespace {
     /// heads); the area a shader can address in them is a multiple of the width of a texel buffer
     constexpr NSUInteger kVDP1PixelBufferEntries =
         std::max<NSUInteger>(kVDP1FBRAMSize * 2 * 2, 512 * 256 * kMaxHRScale * kMaxHRScale);
+
+    /// Pixels in the buffers the finished images are copied to: the largest image, scaled up by the highest internal
+    /// resolution if that is larger
+    constexpr NSUInteger kReadbackPixels =
+        std::max<NSUInteger>(kMaxResH * kMaxResV, kMaxNormalResH * kMaxNormalResV * kMaxHRScale * kMaxHRScale);
 
     /// Frames that can be in the GPU's hands at the same time
     constexpr uint32 kNumFrameSlots = 3;
@@ -277,7 +284,8 @@ public:
             FrameSlot &slot = m_slots[i];
             slot.arena = [device newBufferWithLength:kArenaSize
                                              options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
-            slot.readback = [device newBufferWithLength:kMaxResH * kMaxResV * sizeof(uint32)
+            // (large enough for the image scaled up by the highest internal resolution too)
+            slot.readback = [device newBufferWithLength:kReadbackPixels * sizeof(uint32)
                                                 options:MTLResourceStorageModeShared];
             slot.done = dispatch_semaphore_create(1);
             if (slot.arena == nil || slot.readback == nil) {
@@ -388,7 +396,15 @@ public:
         m_hrFbWrite.vdp1 = true;
         m_hrResync.vdp1 = true;
         if (!CreatePipeline(kHRFBWriteShaderPath, m_hrFbWrite, error) ||
-            !CreatePipeline(kHRResyncShaderPath, m_hrResync, error)) {
+            !CreatePipeline(kHRResyncShaderPath, m_hrResync, error) ||
+            !CreatePipeline(kHRSpriteShaderPath, m_hrSprite, error) ||
+            !CreatePipeline(kHRComposeShaderPath, m_hrCompose, error)) {
+            return false;
+        }
+        m_compositeHR = Create2DTexture(MTLPixelFormatRGBA8Unorm, kMaxNormalResH * kMaxHRScale,
+                                        kMaxNormalResV * kMaxHRScale, 1);
+        if (m_compositeHR == nil) {
+            error = "Could not allocate the GPU texture for the VDP2 internal resolution output";
             return false;
         }
         // (two framebuffers of 512x256 16-bit pixels, scaled up)
@@ -758,6 +774,18 @@ public:
     }
 
     void RenderLayers(const LayerPassParams &params) override {
+        RenderLayersPass(params, false);
+    }
+
+    void RenderSpriteHR(const LayerPassParams &params) override {
+        if (m_compositeHR != nil) {
+            RenderLayersPass(params, true);
+        }
+    }
+
+    /// Draws the sprite layer, and the background layers unless drawing for the internal resolution (where the
+    /// sprite layer is drawn again from the scaled up framebuffers)
+    void RenderLayersPass(const LayerPassParams &params, bool hr) {
         if (params.numLines == 0) {
             return;
         }
@@ -778,10 +806,16 @@ public:
         EnsureCompute();
 
         // Sprite layer
-        [m_encoder setComputePipelineState:m_sprite.state];
-        Bind(m_sprite, staged);
+        const Pipeline &sprite = hr ? m_hrSprite : m_sprite;
+        [m_encoder setComputePipelineState:sprite.state];
+        m_bindHR = hr;
+        Bind(sprite, staged);
+        m_bindHR = false;
         [m_encoder dispatchThreadgroups:MTLSizeMake((params.hres + 31) / 32, params.numLines, 1)
                   threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        if (hr) {
+            return;
+        }
 
         // Background layers
         [m_encoder setComputePipelineState:m_bgs.state];
@@ -791,6 +825,16 @@ public:
     }
 
     void Compose(const ComposePassParams &params) override {
+        ComposePass(params, false);
+    }
+
+    void ComposeHR(const ComposePassParams &params) override {
+        if (m_compositeHR != nil) {
+            ComposePass(params, true);
+        }
+    }
+
+    void ComposePass(const ComposePassParams &params, bool hr) {
         if (params.numLines == 0) {
             return;
         }
@@ -807,18 +851,31 @@ public:
         } while (generation != m_arenaGeneration);
         EnsureCompute();
 
-        [m_encoder setComputePipelineState:m_compose.state];
-        Bind(m_compose, staged);
+        const Pipeline &compose = hr ? m_hrCompose : m_compose;
+        [m_encoder setComputePipelineState:compose.state];
+        m_bindHR = hr;
+        Bind(compose, staged);
+        m_bindHR = false;
         [m_encoder dispatchThreadgroups:MTLSizeMake((params.hres + 31) / 32, params.numLines, 1)
                   threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     }
 
-    FinishedFrame FinishFrame(uint32 width, uint32 height) override {
+    FinishedFrame FinishFrame(uint32 width, uint32 height, uint32 scale) override {
         EnsureFrame();
         FrameSlot &slot = m_slots[m_currentSlot];
 
         width = std::min<uint32>(width, kMaxResH);
         height = std::min<uint32>(height, kMaxResV);
+        if (scale > 1) {
+            scale = std::min<uint32>(scale, kMaxHRScale);
+            width = std::min<uint32>(width, kMaxNormalResH);
+            height = std::min<uint32>(height, kMaxNormalResV);
+            if (m_compositeHR == nil) {
+                scale = 1;
+            }
+        } else {
+            scale = 1;
+        }
         if (++m_logFrames <= 10 || m_logFrames % 300 == 0) {
             LogMessage("frame %u (%ux%u), draws so far %u (copy %u, shadow %u, half-transparent %u, msb %u), downloads %u",
                        m_logFrames, width, height, m_logDraws, m_logDrawsByMode[0], m_logDrawsByMode[1],
@@ -829,15 +886,17 @@ public:
         EndEncoder();
         if (width > 0 && height > 0) {
             id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
-            [blit copyFromTexture:m_composite
+            const uint32 outWidth = width * scale;
+            const uint32 outHeight = height * scale;
+            [blit copyFromTexture:(scale > 1 ? m_compositeHR : m_composite)
                       sourceSlice:0
                       sourceLevel:0
                      sourceOrigin:MTLOriginMake(0, 0, 0)
-                       sourceSize:MTLSizeMake(width, height, 1)
+                       sourceSize:MTLSizeMake(outWidth, outHeight, 1)
                          toBuffer:slot.readback
                 destinationOffset:0
-           destinationBytesPerRow:width * sizeof(uint32)
-         destinationBytesPerImage:width * height * sizeof(uint32)];
+           destinationBytesPerRow:outWidth * sizeof(uint32)
+         destinationBytesPerImage:outWidth * outHeight * sizeof(uint32)];
             [blit endEncoding];
         }
 
@@ -849,6 +908,7 @@ public:
         slot.lastBuf = m_cmdBuf;
         slot.width = width;
         slot.height = height;
+        slot.scale = scale;
         m_cmdBuf = nil;
 
         // The previous frame has had a whole frame's time to finish
@@ -859,6 +919,7 @@ public:
             result.pixels = static_cast<const uint32 *>([prev.readback contents]);
             result.width = prev.width;
             result.height = prev.height;
+            result.scale = prev.scale;
         }
         m_previousSlot = m_currentSlot;
         m_hasPrevious = true;
@@ -875,6 +936,7 @@ private:
         id<MTLCommandBuffer> lastBuf = nil;
         uint32 width = 0;
         uint32 height = 0;
+        uint32 scale = 1;
     };
 
     /// Where the data of the current pass is in the arena
@@ -911,7 +973,8 @@ private:
     uint32 m_logFrames = 0;
     std::array<Pipeline, 4> m_polyDraw;
     std::array<Pipeline, 3> m_merger;
-    Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync;
+    Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrSprite, m_hrCompose;
+    id<MTLTexture> m_compositeHR = nil; ///< scaled up output image
     id<MTLBuffer> m_fbramHR = nil; ///< scaled up VDP1 framebuffers (see Vdp1EnableHR)
     id<MTLBuffer> m_hrReadback = nil;
     bool m_bindHR = false;         ///< whether VDP1 passes being recorded work on the scaled up framebuffers
@@ -1211,7 +1274,7 @@ private:
             case Res::ComposeParams: blob = staged.composeParams; break;
             case Res::LnclBack: blob = staged.lnclBack; break;
             case Res::Vram: buffer = pipeline.vdp1 ? m_vdp1Vram : m_vram; break;
-            case Res::SpriteFB: buffer = m_fbram; break;
+            case Res::SpriteFB: buffer = m_bindHR ? m_fbramHR : m_fbram; break;
             case Res::Fbram: buffer = (m_bindHR && pipeline.vdp1) ? m_fbramHR : m_fbram; break;
             case Res::FbramNative: buffer = m_fbram; break;
             case Res::Vdp1Spans: blob = staged.v1Spans; break;
@@ -1228,7 +1291,7 @@ private:
             case Res::SpriteAttrs: texture = m_spriteAttrs; break;
             case Res::RbgLineColor: texture = m_rbgLineColor; break;
             case Res::ColorCalcWindow: texture = m_colorCalcWindow; break;
-            case Res::Composite: texture = m_composite; break;
+            case Res::Composite: texture = m_bindHR ? m_compositeHR : m_composite; break;
             case Res::Unknown: break;
             }
 

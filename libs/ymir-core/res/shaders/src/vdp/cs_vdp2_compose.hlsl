@@ -485,6 +485,13 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
     const uint2 outCoord = uint2(drawCoord.x, GetOutputY(drawCoord.y));
     const uint3 outColor = Compose(drawCoord);
+#ifdef HR_COMPOSE
+    // Internal resolution variant: the output is scaled up and this is one of the sub-pixels of every pixel
+    const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
+    const uint hrPlane = BitExtract(g_commonParams.enhancements, 5, 4);
+    g_compositeOut[outCoord * hrScale + uint2(hrPlane % hrScale, hrPlane / hrScale)] = float4(outColor / 255.0, 1.0f);
+    return;
+#endif
     g_compositeOut[outCoord] = float4(outColor / 255.0, 1.0f);
     if (firstInterlacedFrame && !deinterlace && IsInterlaced()) {
         g_compositeOut[uint2(outCoord.x, outCoord.y ^ 1u)] = float4(outColor / 255.0, 1.0f);

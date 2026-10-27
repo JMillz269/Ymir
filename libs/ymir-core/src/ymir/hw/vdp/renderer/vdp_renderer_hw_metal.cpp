@@ -272,6 +272,9 @@ struct MetalVDPRenderer::Impl {
 
     /// @brief The internal resolution scale from the settings.
     uint32 internalResolution = 1;
+    /// @brief Whether the frame being drawn is composed at a higher resolution, and the scale of it.
+    bool hrFrame = false;
+    uint32 hrFrameScale = 1;
 
     void UpdateEnhancements() {
         // Deinterlacing and transparent meshes are not available with this renderer
@@ -957,6 +960,8 @@ struct MetalVDPRenderer::Impl {
     }
 
     void VDP2BeginFrame() {
+        hrFrame = false;
+        hrFrameScale = 1;
         nextLayerRenderLine = 0;
         nextComposeLine = 0;
 
@@ -1006,6 +1011,11 @@ struct MetalVDPRenderer::Impl {
 
         cpuCommonRenderParams.startY = startY;
 
+        metal::LayerPassParams pass = MakeLayerPass(numLines);
+        gpu->RenderLayers(pass);
+    }
+
+    metal::LayerPassParams MakeLayerPass(uint32 numLines) const {
         metal::LayerPassParams pass{};
         pass.common = &cpuCommonRenderParams;
         pass.commonSize = sizeof(cpuCommonRenderParams);
@@ -1019,7 +1029,34 @@ struct MetalVDPRenderer::Impl {
         pass.rotParamBasesSize = sizeof(cpuRotParamBases);
         pass.hres = HRes;
         pass.numLines = numLines;
-        gpu->RenderLayers(pass);
+        return pass;
+    }
+
+    /// @brief Decides whether the frame about to be drawn is composed at a higher resolution. Called when the
+    /// framebuffer to show is known.
+    void VDP2HRBeginFrame() {
+        hrFrame = false;
+        hrFrameScale = 1;
+        if (!vdp1 || compare) {
+            return;
+        }
+        const uint32 scale = vdp1->InternalResolution();
+        if (scale <= 1) {
+            return;
+        }
+        const VDP2Regs &regs2 = vdpState.regs2;
+        if (!regs2.TVMD.DISP || regs2.TVMD.IsInterlaced() || exclusiveMonitor || (regs2.TVMD.HRESOn & 0b110) != 0) {
+            return;
+        }
+        if (HRes > kMaxNormalResH || VRes > kMaxNormalResV) {
+            return;
+        }
+        // The scaled up framebuffer has to be in line with the one VDP2 reads
+        if (!vdp1->HRFramebufferValid(vdpState.fbIndex.display)) {
+            return;
+        }
+        hrFrame = true;
+        hrFrameScale = scale;
     }
 
     void VDP2ComposeLines(uint32 y) {
@@ -1042,7 +1079,24 @@ struct MetalVDPRenderer::Impl {
         pass.lnclBackSize = sizeof(cpuLnclBack);
         pass.hres = HRes;
         pass.numLines = numLines;
-        gpu->Compose(pass);
+
+        if (!hrFrame) {
+            gpu->Compose(pass);
+            return;
+        }
+
+        // Compose the lines once for every sub-pixel of the scaled up image: the layers are the same for all of them
+        // (drawn at the native resolution) but for the sprite layer, which is drawn again from the scaled up VDP1
+        // framebuffer for each sub-pixel
+        const metal::LayerPassParams layerPass = MakeLayerPass(numLines);
+        cpuCommonRenderParams.enhancements.vdp1Scale = hrFrameScale - 1;
+        for (uint32 plane = 0; plane < hrFrameScale * hrFrameScale; ++plane) {
+            cpuCommonRenderParams.enhancements.hrPlane = plane;
+            gpu->RenderSpriteHR(layerPass);
+            gpu->ComposeHR(pass);
+        }
+        cpuCommonRenderParams.enhancements.vdp1Scale = 0;
+        cpuCommonRenderParams.enhancements.hrPlane = 0;
     }
 
     void VDP2RenderLine(uint32 y) {
@@ -1050,6 +1104,7 @@ struct MetalVDPRenderer::Impl {
             // The frame starts before VDP1 swaps its framebuffers (at the end of the last line of the vertical blank),
             // so the framebuffer to show is only known now
             VDP2UploadSpriteFB();
+            VDP2HRBeginFrame();
         }
 
         VDP2CalcAccessPatterns();
@@ -1067,7 +1122,9 @@ struct MetalVDPRenderer::Impl {
             const bool layerRenderParamsDirty = layerRenderParamsGeneration != appliedLayerRenderParamsGeneration;
             const bool composeParamsDirty = composeParamsGeneration != appliedComposeParamsGeneration;
             const bool renderLayers = vramAnyDirty || cramDirty || layerRenderParamsDirty || composeParamsDirty;
-            const bool compose = composeParamsDirty;
+            // (a frame composed at a higher resolution draws the sprite layer again for the composition, so it
+            // composes what it renders, in step)
+            const bool compose = composeParamsDirty || (hrFrame && renderLayers);
             if (renderLayers) {
                 VDP2RenderLayerLines(y - 1);
             }
@@ -1086,9 +1143,10 @@ struct MetalVDPRenderer::Impl {
         VDP2ComposeLines(VRes - 1);
 
         // The image of the previous frame is ready by now; this one follows
-        const metal::FinishedFrame finished = gpu->FinishFrame(HRes, VRes);
+        const metal::FinishedFrame finished = gpu->FinishFrame(HRes, VRes, hrFrame ? hrFrameScale : 1);
         if (finished.pixels != nullptr) {
-            owner.SwCallbacks.FrameComplete(const_cast<uint32 *>(finished.pixels), finished.width, finished.height, 1);
+            owner.SwCallbacks.FrameComplete(const_cast<uint32 *>(finished.pixels), finished.width, finished.height,
+                                            finished.scale);
         }
     }
 };

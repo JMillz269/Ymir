@@ -71,7 +71,13 @@ processor. Moving VDP2 to the GPU frees a good part of the processor time a fram
 the VDP1 commands into lines of pixels; the GPU draws them (all the texture, shading, shadow, half-transparency and
 MSB modes) into the framebuffer memory, which stays on the GPU. The processor gets a copy of the framebuffer only when
 the game reads it back (some games do, e.g. for effects), which makes the processor wait for the GPU, and for save
-states. This is the second step toward upscaling on the GPU; the Internal Resolution setting is still ignored.
+states.
+
+**Internal Resolution** works with it too (2x to 4x): every VDP1 command is drawn a second time on the GPU with scaled-up
+coordinates into larger framebuffers (the normal-size one stays what the emulated CPU reads), and VDP2 composes each
+screen line once per sub-pixel, drawing the sprite layer again from the large framebuffer for each of them. This costs
+GPU time that grows with the square of the scale (4x draws and composes sixteen times). Frames in modes that can't be
+enlarged are composed at the normal size. Skip Native Drawing is not supported by the Metal renderer yet.
 
 Diagnostics: the Metal renderer writes `metal-vdp-log.txt` to the Documents folder (started anew at every launch).
 Creating a folder named `metal-vdp-compare` there makes the software renderer draw VDP1 as well, and the log then lists
@@ -80,8 +86,8 @@ and a few more details). That is much slower; delete the folder for normal play.
 runs the VDP1 compute shaders ported to C++ against the software renderer on a desktop machine.
 
 The finished image is read back from the GPU and shown through the normal display path, so all the display filters,
-upscaling and screenshots keep working. The image arrives one frame late. Deinterlacing, Transparent Meshes and
-Internal Resolution are not supported yet and are ignored while the Metal renderer is on. If it can't be created the
+upscaling and screenshots keep working. The image arrives one frame late. Deinterlacing and Transparent Meshes are not supported yet and are ignored while the Metal renderer is on, and
+Internal Resolution needs the GPU VDP1 option. If it can't be created the
 setting is turned off again and the software renderer is used.
 
 `tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer

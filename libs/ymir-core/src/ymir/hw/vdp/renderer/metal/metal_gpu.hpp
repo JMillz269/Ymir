@@ -105,9 +105,10 @@ struct Vdp1ResyncPassParams {
 
 /// @brief A finished frame.
 struct FinishedFrame {
-    const uint32 *pixels = nullptr; ///< width * height pixels, R G B A bytes, rows packed
+    const uint32 *pixels = nullptr; ///< (width * scale) * (height * scale) pixels, R G B A bytes, rows packed
     uint32 width = 0;
     uint32 height = 0;
+    uint32 scale = 1; ///< internal resolution scale of the image
 };
 
 class Gpu {
@@ -177,12 +178,22 @@ public:
     /// @brief Composes the layers drawn so far into the output image for the lines in `params`.
     virtual void Compose(const ComposePassParams &params) = 0;
 
+    /// @brief Internal resolution: draws the sprite layer for the lines in `params` again, from the scaled up VDP1
+    /// framebuffers, for one of the sub-pixels of every pixel (the plane the common parameters name). Replaces the
+    /// sprite layer drawn by `RenderLayers`.
+    virtual void RenderSpriteHR(const LayerPassParams &params) = 0;
+
+    /// @brief Internal resolution: composes the layers (the sprite layer as drawn by `RenderSpriteHR`) into the sub-pixels
+    /// of the plane the common parameters name of the scaled up output image.
+    virtual void ComposeHR(const ComposePassParams &params) = 0;
+
     /// @brief Ends the frame: copies the composed image out of the GPU and submits everything.
     /// @param[in] width the width of the image
     /// @param[in] height the height of the image
+    /// @param[in] scale the internal resolution scale of the image (the lines composed with `ComposeHR`), or 1
     /// @return the image of the frame before this one (the pixels stay valid until the next call), or an empty result
     /// if it isn't available
-    virtual FinishedFrame FinishFrame(uint32 width, uint32 height) = 0;
+    virtual FinishedFrame FinishFrame(uint32 width, uint32 height, uint32 scale) = 0;
 };
 
 } // namespace ymir::vdp::metal

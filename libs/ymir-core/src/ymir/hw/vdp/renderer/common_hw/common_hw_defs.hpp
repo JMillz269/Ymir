@@ -94,7 +94,9 @@ static_assert(sizeof(HLSLint3) == sizeof(HLSLint) * 3);
 struct EnhancementsParams {
     HLSLuint deinterlace : 1;       //     0  Deinterlace
     HLSLuint transparentMeshes : 1; //     1  Render mesh sprites as transparent
-    HLSLuint vdp1Scale : 3;         //   2-4  VDP1 internal resolution scale minus one (VDP1 shaders only)
+    HLSLuint vdp1Scale : 3;         //   2-4  VDP1 internal resolution scale minus one
+    HLSLuint hrPlane : 4;           //   5-8  Scaled up plane being composed: sub-pixel row * scale + column (the VDP2
+                                    //        sprite and composition shaders of the internal resolution variants)
 };
 static_assert(sizeof(EnhancementsParams) == sizeof(HLSLuint));
 
