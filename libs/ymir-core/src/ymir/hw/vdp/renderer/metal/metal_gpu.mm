@@ -415,6 +415,11 @@ public:
         // each side sees what the other wrote.
         EndEncoder();
 
+        if (params.shadingMode == 2 && m_debugClearCheck && m_logChains < 30) {
+            ++m_logChains;
+            DebugLogFragmentChains(params);
+        }
+
         if (params.shadingMode != 3) {
             // Merge the output into the framebuffer. The merger gets the common part of the constants only.
             // (MSB doesn't need merging as it is applied to the framebuffer directly)
@@ -434,7 +439,7 @@ public:
             Vdp1Barrier();
             EndEncoder();
 
-            if (m_debugClearCheck && m_logClearChecks < 40) {
+            if (m_debugClearCheck && m_logClearChecks < 40 && params.shadingMode != 0) {
                 ++m_logClearChecks;
                 uint32 heads, out, firstIndex, firstValue;
                 Vdp1DebugPixelBuffers(heads, out, firstIndex, firstValue);
@@ -541,6 +546,54 @@ public:
             if (out[i] != 0) {
                 ++spriteOut;
             }
+        }
+    }
+
+    /// Logs the fragment lists of some pixels (for diagnostics)
+    void DebugLogFragmentChains(const Vdp1DrawParams &params) {
+        const NSUInteger headBytes = kVDP1PixelBufferEntries * sizeof(uint32);
+        const NSUInteger fragBytes = kMaxVDP1OITFragmentsPerDispatch * sizeof(VDP1OITFragment);
+        if (m_debugHeads == nil) {
+            m_debugHeads = [m_device newBufferWithLength:headBytes options:MTLResourceStorageModeShared];
+            m_debugOut = [m_device newBufferWithLength:headBytes options:MTLResourceStorageModeShared];
+        }
+        if (m_debugFrags == nil) {
+            m_debugFrags = [m_device newBufferWithLength:fragBytes options:MTLResourceStorageModeShared];
+        }
+        EndEncoder();
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        if (m_fenceUpdated) {
+            [blit waitForFence:m_fence];
+        }
+        [blit copyFromBuffer:m_listHeadsBuf sourceOffset:0 toBuffer:m_debugHeads destinationOffset:0 size:headBytes];
+        [blit copyFromBuffer:m_fragments sourceOffset:0 toBuffer:m_debugFrags destinationOffset:0 size:fragBytes];
+        [blit updateFence:m_fence];
+        m_fenceUpdated = true;
+        [blit endEncoding];
+        DrainArena();
+
+        const uint32 *heads = static_cast<const uint32 *>([m_debugHeads contents]);
+        const VDP1OITFragment *frags = static_cast<const VDP1OITFragment *>([m_debugFrags contents]);
+        uint32 nonEmpty = 0;
+        for (NSUInteger i = 0; i < kVDP1PixelBufferEntries; ++i) {
+            nonEmpty += heads[i] != 0xFFFFFFFFu;
+        }
+        LogMessage("OIT draw #%u: %u pixels with fragments, %u spans, %u pixels", m_logChains, nonEmpty,
+                   params.spansSize / 48, params.numPixels);
+        for (uint32 pixel : {9226u, 9227u, 9738u, 13322u}) {
+            char text[400];
+            int n = std::snprintf(text, sizeof(text), "  pixel (%u,%u):", pixel % 512, pixel / 512);
+            uint32 node = heads[pixel];
+            for (uint32 count = 0; node != 0xFFFFFFFFu && count < 8 && n < 350; ++count) {
+                if (node >= kMaxVDP1OITFragmentsPerDispatch) {
+                    n += std::snprintf(text + n, sizeof(text) - n, " [bad node %08X]", node);
+                    break;
+                }
+                n += std::snprintf(text + n, sizeof(text) - n, " node %u: seq %u color %04X;", node,
+                                   frags[node].data >> 16, frags[node].data & 0xFFFF);
+                node = frags[node].next;
+            }
+            LogMessage("%s", text);
         }
     }
 
@@ -734,6 +787,8 @@ private:
     id<MTLBuffer> m_vramReadback = nil;
     id<MTLBuffer> m_debugHeads = nil;
     id<MTLBuffer> m_debugOut = nil;
+    id<MTLBuffer> m_debugFrags = nil;
+    uint32 m_logChains = 0;
     id<MTLTexture> m_spriteOutTex = nil;
     id<MTLTexture> m_listHeadsTex = nil;
 
