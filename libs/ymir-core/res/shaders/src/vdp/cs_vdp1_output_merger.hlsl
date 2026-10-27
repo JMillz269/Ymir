@@ -300,14 +300,21 @@ uint HalfTransparentBlend(uint baseColor, uint listHead) {
     }
 
     // Sort by sequence number in descending order (latest to oldest)
+    // NOTE: written so that the array is never accessed out of range, not even in a condition that doesn't matter
+    // because of an earlier part of it. HLSL doesn't short-circuit && and some compilers (Metal's) take an access out of
+    // range to mean that the index can't be, and drop the check that would have prevented it.
     for (uint i = 1; i < count; ++i) {
         OITFragment key = frags[i];
-        int j = i - 1;
-        while (j >= 0 && BitExtract(frags[j].data, 16, 16) < BitExtract(key.data, 16, 16)) {
-            frags[j + 1] = frags[j];
-            j--;
+        const uint keySeq = BitExtract(key.data, 16, 16);
+        uint j = i;
+        while (j > 0) {
+            if (BitExtract(frags[j - 1].data, 16, 16) >= keySeq) {
+                break;
+            }
+            frags[j] = frags[j - 1];
+            --j;
         }
-        frags[j + 1] = key;
+        frags[j] = key;
     }
 
     // Blend colors, starting from the oldest fragment (the last one), as the pixels would have been drawn
