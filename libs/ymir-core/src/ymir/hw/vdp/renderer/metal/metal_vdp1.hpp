@@ -9,7 +9,11 @@ drawing compute shader draws in parallel into an intermediate buffer, and the ou
 the framebuffer memory. The framebuffer memory lives on the GPU; the CPU copy is brought up to date only when something
 reads it (see SyncFB).
 
-Not available (yet): deinterlacing, transparent meshes and internal resolutions above 1x.
+Internal resolutions above 1x: commands are drawn twice, once into the native framebuffer (which stays authoritative:
+the CPU reads it and VDP2 falls back on it) and once with coordinates scaled up into a larger framebuffer, like the
+software renderer does.
+
+Not available (yet): deinterlacing and transparent meshes.
 */
 
 #include "../common_hw/common_hw_defs.hpp"
@@ -24,6 +28,7 @@ Not available (yet): deinterlacing, transparent meshes and internal resolutions 
 #include <ymir/util/dirty_bitmap.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cassert>
 #include <cstring>
@@ -39,6 +44,9 @@ public:
         m_batch.cpuSpanParams.resize(kMaxVDP1Spans);
         m_batch.cpuSpanPrefixSums.resize(kMaxVDP1Spans + 1);
         m_batch.cpuCmdParams.resize(kMaxVDP1Commands);
+        m_hrBatch.cpuSpanParams.resize(kMaxVDP1Spans);
+        m_hrBatch.cpuSpanPrefixSums.resize(kMaxVDP1Spans + 1);
+        m_hrBatch.cpuCmdParams.resize(kMaxVDP1Commands);
         std::memset(&cpuCommonRenderParams, 0, sizeof(cpuCommonRenderParams));
         std::memset(&cpuEraseParams, 0, sizeof(cpuEraseParams));
         std::memset(&cpuPolyDrawParams, 0, sizeof(cpuPolyDrawParams));
@@ -56,6 +64,11 @@ public:
         cpuFBRAMWritesList.clear();
         fbramDirty.ClearAll();
         action = Action::None;
+        m_hrBatch.cpuSpanCount = 0;
+        m_hrBatch.cpuCmdCount = 0;
+        m_hrBatch.cpuSpanPrefixSums[0] = 0;
+        m_hrValid.fill(false);
+        m_hrPass = false;
 
         std::memcpy(vramShadow.data(), vdpState.mem1.VRAM.data(), vramShadow.size());
         vramDirty.SetAll();
@@ -148,6 +161,22 @@ public:
 
     void SwapFramebuffer() {
         VDP1UpdateAction(Action::Swap);
+        VDP1HRLatch();
+    }
+
+    /// @brief Sets the internal resolution scale to use from the next framebuffer swap on (1 = native).
+    void SetInternalResolution(uint32 scale) {
+        m_hrRequested = std::clamp<uint32>(scale, 1, kHRMaxScale);
+    }
+
+    /// @brief The scale VDP1 is currently drawn at in the scaled up framebuffers (1 = they aren't in use).
+    uint32 InternalResolution() const {
+        return m_hrScale;
+    }
+
+    /// @brief Whether the scaled up framebuffer of the given index holds what the native one holds (at a larger scale).
+    bool HRFramebufferValid(uint8 fbIndex) const {
+        return m_hrScale > 1 && m_hrValid[fbIndex] && HRSupportsTVMR();
     }
 
     void BeginFrame() {
@@ -161,15 +190,26 @@ public:
         VDP1UpdateAction(Action::Draw);
 
         switch (control.command) {
-        case VDP1Command::CommandType::DrawNormalSprite: VDP1Cmd_DrawNormalSprite(cmdAddress, control); break;
-        case VDP1Command::CommandType::DrawScaledSprite: VDP1Cmd_DrawScaledSprite(cmdAddress, control); break;
+        case VDP1Command::CommandType::DrawNormalSprite: [[fallthrough]];
+        case VDP1Command::CommandType::DrawScaledSprite: [[fallthrough]];
         case VDP1Command::CommandType::DrawDistortedSprite: [[fallthrough]];
-        case VDP1Command::CommandType::DrawDistortedSpriteAlt: VDP1Cmd_DrawDistortedSprite(cmdAddress, control); break;
-
-        case VDP1Command::CommandType::DrawPolygon: VDP1Cmd_DrawPolygon(cmdAddress); break;
+        case VDP1Command::CommandType::DrawDistortedSpriteAlt: [[fallthrough]];
+        case VDP1Command::CommandType::DrawPolygon: [[fallthrough]];
         case VDP1Command::CommandType::DrawPolylines: [[fallthrough]];
-        case VDP1Command::CommandType::DrawPolylinesAlt: VDP1Cmd_DrawPolylines(cmdAddress); break;
-        case VDP1Command::CommandType::DrawLine: VDP1Cmd_DrawLine(cmdAddress); break;
+        case VDP1Command::CommandType::DrawPolylinesAlt: [[fallthrough]];
+        case VDP1Command::CommandType::DrawLine: {
+            // (prepared first as it may need what has been drawn so far)
+            const bool replay = m_hrScale > 1 && VDP1HRShouldReplay();
+            m_hrPass = false;
+            VDP1DrawCommand(cmdAddress, control);
+            if (replay) {
+                // Draw the command again with scaled up coordinates into the scaled up framebuffer
+                m_hrPass = true;
+                VDP1DrawCommand(cmdAddress, control);
+                m_hrPass = false;
+            }
+            break;
+        }
 
         case VDP1Command::CommandType::UserClipping: [[fallthrough]];
         case VDP1Command::CommandType::UserClippingAlt: VDP1Cmd_SetUserClipping(cmdAddress); break;
@@ -197,6 +237,9 @@ private:
     };
     Action action = Action::None;
 
+    /// @brief Largest internal resolution scale.
+    static constexpr uint32 kHRMaxScale = 4;
+
     /// @brief The spans and commands waiting to be drawn.
     struct Batch {
         std::vector<VDP1SpanParams> cpuSpanParams;
@@ -205,6 +248,23 @@ private:
         uint32 cpuSpanCount = 0;
         uint32 cpuCmdCount = 0;
     } m_batch;
+
+    /// @brief The same for the scaled up framebuffer (internal resolution above 1x only).
+    Batch m_hrBatch;
+    /// @brief Whether the commands being added are for the scaled up framebuffer.
+    bool m_hrPass = false;
+    /// @brief The scale requested through the settings, and the one in use (see VDP1HRLatch).
+    uint32 m_hrRequested = 1;
+    uint32 m_hrScale = 1;
+    /// @brief Whether the GPU resources of the scaled up framebuffers exist (or creating them has failed).
+    bool m_hrCreated = false;
+    bool m_hrFailed = false;
+    /// @brief Whether the scaled up framebuffers are in line with the native ones.
+    std::array<bool, 2> m_hrValid{};
+
+    Batch &ActiveBatch() {
+        return m_hrPass ? m_hrBatch : m_batch;
+    }
 
     /// @brief Bit shift for the granularity for VRAM dirty bitmap chunks.
     static constexpr size_t kVRAMDirtyBitmapChunkSizeShift = 8;
@@ -235,6 +295,108 @@ private:
     bool m_doubleV = false;
 
     uint32 VRes = kDefaultResV;
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // Internal resolution
+
+    /// @brief Whether the VDP1 mode allows drawing at a higher resolution.
+    bool HRSupportsTVMR() const {
+        const VDP1RegTVMR &tvmr = vdpState.regs1.tvmr;
+        return !tvmr.hdtvEnable && !tvmr.fbRotEnable && !tvmr.pixel8Bits;
+    }
+
+    /// @brief Takes the requested scale into use. Called when the framebuffers swap, when nothing is pending.
+    void VDP1HRLatch() {
+        uint32 scale = m_hrRequested;
+        if (scale > 1 && !m_hrCreated && !m_hrFailed) {
+            std::string error;
+            if (gpu.Vdp1EnableHR(error)) {
+                m_hrCreated = true;
+            } else {
+                m_hrFailed = true;
+                metal::LogMessage("Internal resolution not available: %s", error.c_str());
+            }
+        }
+        if (m_hrFailed) {
+            scale = 1;
+        }
+        if (scale != m_hrScale) {
+            m_hrScale = scale;
+            m_hrValid.fill(false);
+        }
+    }
+
+    /// @brief Makes sure the scaled up framebuffer of the given index is in line with the native one.
+    /// @return whether the framebuffer can be drawn to
+    bool HRPrepare(uint8 fbIndex) {
+        if (m_hrScale <= 1) {
+            return false;
+        }
+        if (!HRSupportsTVMR()) {
+            m_hrValid[fbIndex] = false;
+            return false;
+        }
+        if (!m_hrValid[fbIndex]) {
+            // What has been drawn natively so far is what the scaled up framebuffer is made from
+            VDP1SubmitSpans();
+            VDP1FlushFBRAM();
+
+            VDP1CommonRenderParams params = cpuCommonRenderParams;
+            params.displayParams.drawFB = fbIndex;
+            params.enhancements.vdp1Scale = m_hrScale - 1;
+            metal::Vdp1ResyncPassParams pass{};
+            pass.constants = &params;
+            pass.constantsSize = sizeof(params);
+            gpu.Vdp1ResyncHR(pass);
+            m_hrValid[fbIndex] = true;
+        }
+        return true;
+    }
+
+    /// @brief Whether the command about to be drawn natively is to be drawn into the scaled up framebuffer too.
+    bool VDP1HRShouldReplay() {
+        if (m_doubleV || vdpState.regs1.dblInterlaceEnable) {
+            return false;
+        }
+        if (vdpState.regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity) {
+            return false;
+        }
+        return HRPrepare(vdpState.fbIndex.draw);
+    }
+
+    /// @brief Scales up the coordinates of a quad. Native coordinates are inclusive pixel indices, so a quad covers its
+    /// pixels' whole area. Each vertex is scaled and pushed outwards by the part of a native pixel that lies beyond the
+    /// vertex, proportionally to its position along each axis, so that axis-aligned quads cover exactly the scaled up
+    /// pixels and neighbors still tile.
+    void HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c, CoordS32 &d) const {
+        const sint32 s = m_hrScale;
+        CoordS32 *pts[4] = {&a, &b, &c, &d};
+        sint32 minX = a.x(), maxX = a.x(), minY = a.y(), maxY = a.y();
+        for (auto *p : pts) {
+            minX = std::min(minX, p->x());
+            maxX = std::max(maxX, p->x());
+            minY = std::min(minY, p->y());
+            maxY = std::max(maxY, p->y());
+        }
+        const sint32 spanX = maxX - minX;
+        const sint32 spanY = maxY - minY;
+        for (auto *p : pts) {
+            const sint32 ox = spanX == 0 ? (s - 1) / 2 : ((p->x() - minX) * (s - 1)) / spanX;
+            const sint32 oy = spanY == 0 ? (s - 1) / 2 : ((p->y() - minY) * (s - 1)) / spanY;
+            p->x() = p->x() * s + ox;
+            p->y() = p->y() * s + oy;
+        }
+    }
+
+    /// @brief Scales up the coordinates of a line: it stays one (large) pixel thin and goes through the center of the
+    /// native pixels.
+    void HRScaleLine(CoordS32 &a, CoordS32 &b) const {
+        const sint32 s = m_hrScale;
+        a.x() = a.x() * s + s / 2;
+        a.y() = a.y() * s + s / 2;
+        b.x() = b.x() * s + s / 2;
+        b.y() = b.y() * s + s / 2;
+    }
 
     // -----------------------------------------------------------------------------------------------------------------
     // Shader selection
@@ -381,12 +543,25 @@ private:
         pass.count = constants.writeCount;
         gpu.Vdp1WriteFB(pass);
 
+        // The scaled up framebuffer gets the pixels that were written
+        const uint8 drawFB = vdpState.fbIndex.draw;
+        if (m_hrScale > 1 && m_hrValid[drawFB]) {
+            if (HRSupportsTVMR()) {
+                constants.common.enhancements.vdp1Scale = m_hrScale - 1;
+                pass.hr = true;
+                gpu.Vdp1WriteFB(pass);
+            } else {
+                m_hrValid[drawFB] = false;
+            }
+        }
+
         fbramGpuDirty = true;
         cpuFBRAMWritesList.clear();
     }
 
     void VDP1EraseFramebuffer(uint64 cycles) {
         VDP1UpdateAction(Action::Erase);
+        VDP1HRLatch();
 
         const VDP1Regs &regs1 = vdpState.regs1;
 
@@ -435,6 +610,14 @@ private:
         constants.common = cpuCommonRenderParams;
         constants.erase = cpuEraseParams;
 
+        // The scaled up framebuffer is erased too, if it's in use and the erase area is one it can follow (it has to be
+        // brought in line with the native one first)
+        const uint8 eraseFB = vdpState.fbIndex.display;
+        const bool hrErase = m_hrScale > 1 && !doubleDensity && regs1.tvmr.eraseOffsetShift == 9 && HRPrepare(eraseFB);
+        if (m_hrScale > 1 && !hrErase) {
+            m_hrValid[eraseFB] = false;
+        }
+
         metal::Vdp1ErasePassParams pass{};
         pass.constants = &constants;
         pass.constantsSize = sizeof(constants);
@@ -442,21 +625,36 @@ private:
         pass.height = cpuEraseParams.coords.y3 - cpuEraseParams.coords.y1 + 1;
         gpu.Vdp1Erase(pass);
 
+        if (hrErase) {
+            constants.common.enhancements.vdp1Scale = m_hrScale - 1;
+            pass.hr = true;
+            pass.width *= m_hrScale;
+            pass.height *= m_hrScale;
+            gpu.Vdp1Erase(pass);
+        }
+
         fbramGpuDirty = true;
     }
 
-    /// @brief Draws the batch of spans.
+    /// @brief Draws the batches of spans.
     void VDP1SubmitSpans() {
-        if (m_batch.cpuSpanCount == 0) {
+        VDP1SubmitBatch(m_batch, false);
+        VDP1SubmitBatch(m_hrBatch, true);
+        vramTexUsageTracker.Clear();
+    }
+
+    /// @brief Draws a batch of spans, into the scaled up framebuffer if `hr`.
+    void VDP1SubmitBatch(Batch &batch, bool hr) {
+        if (batch.cpuSpanCount == 0) {
             // No spans to dispatch
-            m_batch.cpuCmdCount = 0;
+            batch.cpuCmdCount = 0;
             return;
         }
 
         // We should have a shader selected by now
         assert(currPolyDrawShaderIndex != static_cast<size_t>(-1));
 
-        cpuPolyDrawParams.numSpans = m_batch.cpuSpanCount;
+        cpuPolyDrawParams.numSpans = batch.cpuSpanCount;
 
         VDP1FlushVRAM();
 
@@ -466,7 +664,9 @@ private:
         } constants{};
         static_assert(offsetof(Constants, polyDraw) == sizeof(VDP1CommonRenderParams));
         constants.common = cpuCommonRenderParams;
+        constants.common.enhancements.vdp1Scale = hr ? m_hrScale - 1 : 0;
         constants.polyDraw = cpuPolyDrawParams;
+        const uint32 scale = hr ? m_hrScale : 1;
 
         const VDP1Regs &regs1 = vdpState.regs1;
         const uint32 pixelsPerEntry = regs1.tvmr.pixel8Bits ? 4u : 2u; // each entry is 32 bits
@@ -475,28 +675,44 @@ private:
         pass.constants = &constants;
         pass.constantsSize = sizeof(constants);
         pass.commonSize = sizeof(VDP1CommonRenderParams);
-        pass.spans = m_batch.cpuSpanParams.data();
-        pass.spansSize = static_cast<uint32>(sizeof(VDP1SpanParams) * m_batch.cpuSpanCount);
-        pass.prefixSums = m_batch.cpuSpanPrefixSums.data();
-        pass.prefixSumsSize = static_cast<uint32>(sizeof(HLSLuint) * (m_batch.cpuSpanCount + 1));
-        pass.commands = m_batch.cpuCmdParams.data();
-        pass.commandsSize = static_cast<uint32>(sizeof(VDP1CommandParams) * m_batch.cpuCmdCount);
+        pass.spans = batch.cpuSpanParams.data();
+        pass.spansSize = static_cast<uint32>(sizeof(VDP1SpanParams) * batch.cpuSpanCount);
+        pass.prefixSums = batch.cpuSpanPrefixSums.data();
+        pass.prefixSumsSize = static_cast<uint32>(sizeof(HLSLuint) * (batch.cpuSpanCount + 1));
+        pass.commands = batch.cpuCmdParams.data();
+        pass.commandsSize = static_cast<uint32>(sizeof(VDP1CommandParams) * batch.cpuCmdCount);
         pass.shadingMode = static_cast<uint32>(bit::extract<1, 2>(currPolyDrawShaderIndex));
         pass.mergeMode = static_cast<uint32>(bit::extract<1, 2>(currOutputMergerShaderIndex));
-        pass.numPixels = m_batch.cpuSpanPrefixSums[m_batch.cpuSpanCount];
-        pass.mergeWidth = regs1.tvmr.fbSizeH / pixelsPerEntry;
-        pass.mergeHeight = regs1.tvmr.fbSizeV;
+        pass.numPixels = batch.cpuSpanPrefixSums[batch.cpuSpanCount];
+        pass.mergeWidth = regs1.tvmr.fbSizeH * scale / pixelsPerEntry;
+        pass.mergeHeight = regs1.tvmr.fbSizeV * scale;
+        pass.hr = hr;
         gpu.Vdp1Draw(pass);
 
         fbramGpuDirty = true;
 
-        m_batch.cpuSpanCount = 0;
-        m_batch.cpuCmdCount = 0;
-        vramTexUsageTracker.Clear();
+        batch.cpuSpanCount = 0;
+        batch.cpuCmdCount = 0;
     }
 
     // -----------------------------------------------------------------------------------------------------------------
     // Commands
+
+    /// @brief Adds the spans of a drawing command, for the native or the scaled up framebuffer (see m_hrPass).
+    void VDP1DrawCommand(uint32 cmdAddress, VDP1Command::Control control) {
+        switch (control.command) {
+        case VDP1Command::CommandType::DrawNormalSprite: VDP1Cmd_DrawNormalSprite(cmdAddress, control); break;
+        case VDP1Command::CommandType::DrawScaledSprite: VDP1Cmd_DrawScaledSprite(cmdAddress, control); break;
+        case VDP1Command::CommandType::DrawDistortedSprite: [[fallthrough]];
+        case VDP1Command::CommandType::DrawDistortedSpriteAlt: VDP1Cmd_DrawDistortedSprite(cmdAddress, control); break;
+
+        case VDP1Command::CommandType::DrawPolygon: VDP1Cmd_DrawPolygon(cmdAddress); break;
+        case VDP1Command::CommandType::DrawPolylines: [[fallthrough]];
+        case VDP1Command::CommandType::DrawPolylinesAlt: VDP1Cmd_DrawPolylines(cmdAddress); break;
+        case VDP1Command::CommandType::DrawLine: VDP1Cmd_DrawLine(cmdAddress); break;
+        default: break;
+        }
+    }
 
     struct VDP1CommandData {
         VDP1Command::DrawMode mode;
@@ -548,25 +764,38 @@ private:
 
     uint16 VDP1AddCommand(const VDP1CommandData &data, bool textured) {
 
+        Batch &batch = ActiveBatch();
+
         // If list is full, flush it
-        if (m_batch.cpuCmdCount + 1 >= kMaxVDP1Commands) {
+        if (batch.cpuCmdCount + 1 >= kMaxVDP1Commands) {
             VDP1SubmitSpans();
         }
 
         // Switch polygon drawing shader based on the current settings
         VDP1SelectPolyDrawShader(data.mode);
 
-        const uint16 cmdIndex = m_batch.cpuCmdCount++;
-        VDP1CommandParams &cmdParams = m_batch.cpuCmdParams[cmdIndex];
+        const uint16 cmdIndex = batch.cpuCmdCount++;
+        VDP1CommandParams &cmdParams = batch.cpuCmdParams[cmdIndex];
 
         const VDP1State &state = vdpState.state1;
         const sint32 doubleV = m_doubleV ? 1 : 0;
-        cmdParams.userClip0.x = state.userClipX0;
-        cmdParams.userClip0.y = (state.userClipY0 << doubleV) | doubleV;
-        cmdParams.userClip1.x = state.userClipX1;
-        cmdParams.userClip1.y = (state.userClipY1 << doubleV) | doubleV;
-        cmdParams.sysClip.h = state.sysClipH;
-        cmdParams.sysClip.v = (state.sysClipV << doubleV) | doubleV;
+        if (m_hrPass) {
+            // Clipping areas cover whole native pixels, so they end at the last scaled up pixel of the last one
+            const uint32 scale = m_hrScale;
+            cmdParams.userClip0.x = state.userClipX0 * scale;
+            cmdParams.userClip0.y = state.userClipY0 * scale;
+            cmdParams.userClip1.x = (state.userClipX1 + 1u) * scale - 1u;
+            cmdParams.userClip1.y = (state.userClipY1 + 1u) * scale - 1u;
+            cmdParams.sysClip.h = (state.sysClipH + 1u) * scale - 1u;
+            cmdParams.sysClip.v = (state.sysClipV + 1u) * scale - 1u;
+        } else {
+            cmdParams.userClip0.x = state.userClipX0;
+            cmdParams.userClip0.y = (state.userClipY0 << doubleV) | doubleV;
+            cmdParams.userClip1.x = state.userClipX1;
+            cmdParams.userClip1.y = (state.userClipY1 << doubleV) | doubleV;
+            cmdParams.sysClip.h = state.sysClipH;
+            cmdParams.sysClip.v = (state.sysClipV << doubleV) | doubleV;
+        }
 
         cmdParams.cmdcolr = data.color;
         cmdParams.cmdpmod = data.mode.u16;
@@ -586,12 +815,16 @@ private:
         if (coord0.y() < 0 && coord1.y() < 0) {
             return false;
         }
-        const sint32 sysClipH = vdpState.state1.sysClipH;
+        const sint32 doubleV = m_doubleV ? 1 : 0;
+        const sint32 sysClipH =
+            m_hrPass ? (static_cast<sint32>(vdpState.state1.sysClipH) + 1) * static_cast<sint32>(m_hrScale) - 1
+                     : vdpState.state1.sysClipH;
         if (coord0.x() > sysClipH && coord1.x() > sysClipH) {
             return false;
         }
-        const sint32 doubleV = m_doubleV ? 1 : 0;
-        const sint32 sysClipV = (vdpState.state1.sysClipV << doubleV) | doubleV;
+        const sint32 sysClipV =
+            m_hrPass ? (static_cast<sint32>(vdpState.state1.sysClipV) + 1) * static_cast<sint32>(m_hrScale) - 1
+                     : (vdpState.state1.sysClipV << doubleV) | doubleV;
         if (coord0.y() > sysClipV && coord1.y() > sysClipV) {
             return false;
         }
@@ -606,21 +839,24 @@ private:
             return false;
         }
 
+        Batch &batch = ActiveBatch();
+
         const bool isOIT = IsVDP1PolyDrawShaderOIT(currPolyDrawShaderIndex);
-        const uint32 fragLimit = isOIT ? kMaxVDP1OITFragmentsPerDispatch : kMaxVDP1FragmentsPerDispatch;
+        // (spans that are antialiased can produce two fragments for a pixel)
+        const uint32 fragLimit = isOIT ? kMaxVDP1OITFragmentsPerDispatch / 2 : kMaxVDP1FragmentsPerDispatch;
 
         // Submit spans now if the total fragment count would exceed the limit
-        if (m_batch.cpuSpanPrefixSums[m_batch.cpuSpanCount] + length >= fragLimit) {
+        if (batch.cpuSpanPrefixSums[batch.cpuSpanCount] + length >= fragLimit) {
             VDP1SubmitSpans();
 
             // Readd command
-            m_batch.cpuCmdParams[0] = m_batch.cpuCmdParams[data.cmdIndex];
-            m_batch.cpuCmdCount = 1;
+            batch.cpuCmdParams[0] = batch.cpuCmdParams[data.cmdIndex];
+            batch.cpuCmdCount = 1;
             data.cmdIndex = 0;
         }
 
         // Append span to list
-        VDP1SpanParams &spanParams = m_batch.cpuSpanParams[m_batch.cpuSpanCount];
+        VDP1SpanParams &spanParams = batch.cpuSpanParams[batch.cpuSpanCount];
 
         const auto [x0, y0] = coord0;
         const auto [x1, y1] = coord1;
@@ -648,18 +884,18 @@ private:
         }
 
         // Update prefix sum
-        HLSLuint &nextSum = m_batch.cpuSpanPrefixSums[m_batch.cpuSpanCount + 1];
-        const HLSLuint currSum = m_batch.cpuSpanPrefixSums[m_batch.cpuSpanCount];
+        HLSLuint &nextSum = batch.cpuSpanPrefixSums[batch.cpuSpanCount + 1];
+        const HLSLuint currSum = batch.cpuSpanPrefixSums[batch.cpuSpanCount];
         nextSum = currSum + length;
 
         // If list is full, flush it
-        ++m_batch.cpuSpanCount;
-        if (m_batch.cpuSpanCount >= m_batch.cpuSpanParams.size()) {
+        ++batch.cpuSpanCount;
+        if (batch.cpuSpanCount >= batch.cpuSpanParams.size()) {
             VDP1SubmitSpans();
 
             // Readd command
-            m_batch.cpuCmdParams[0] = m_batch.cpuCmdParams[data.cmdIndex];
-            m_batch.cpuCmdCount = 1;
+            batch.cpuCmdParams[0] = batch.cpuCmdParams[data.cmdIndex];
+            batch.cpuCmdCount = 1;
             data.cmdIndex = 0;
         }
 
@@ -732,7 +968,7 @@ private:
         vramTexUsageTracker.MarkRange(data.charAddr, texSize);
         if (data.mode.colorMode == 1) {
             // The color lookup table is read from VRAM by the GPU too
-            vramTexUsageTracker.MarkRange(static_cast<uint32>(m_batch.cpuCmdParams[data.cmdIndex].cmdcolr) * 8u, 32);
+            vramTexUsageTracker.MarkRange(static_cast<uint32>(ActiveBatch().cpuCmdParams[data.cmdIndex].cmdcolr) * 8u, 32);
         }
 
         // TODO: cache this
@@ -858,10 +1094,13 @@ private:
         const sint32 doubleV = m_doubleV ? 1 : 0;
         const sint32 yAdd = kDeinterlace ? doubleV : 0;
 
-        const CoordS32 coordA{xa, ya << doubleV};
-        const CoordS32 coordB{xb, ya << doubleV};
-        const CoordS32 coordC{xb, (yb << doubleV) + yAdd};
-        const CoordS32 coordD{xa, (yb << doubleV) + yAdd};
+        CoordS32 coordA{xa, ya << doubleV};
+        CoordS32 coordB{xb, ya << doubleV};
+        CoordS32 coordC{xb, (yb << doubleV) + yAdd};
+        CoordS32 coordD{xa, (yb << doubleV) + yAdd};
+        if (m_hrPass) {
+            HRScaleQuad(coordA, coordB, coordC, coordD);
+        }
 
         const VDP1CommandData cmdData{
             .mode = mode,
@@ -973,10 +1212,13 @@ private:
         const sint32 doubleV = m_doubleV ? 1 : 0;
         const sint32 yAdd = kDeinterlace ? doubleV : 0;
 
-        const CoordS32 coordA{qxa, qya << doubleV};
-        const CoordS32 coordB{qxb, qyb << doubleV};
-        const CoordS32 coordC{qxc, (qyc << doubleV) + yAdd};
-        const CoordS32 coordD{qxd, (qyd << doubleV) + yAdd};
+        CoordS32 coordA{qxa, qya << doubleV};
+        CoordS32 coordB{qxb, qyb << doubleV};
+        CoordS32 coordC{qxc, (qyc << doubleV) + yAdd};
+        CoordS32 coordD{qxd, (qyd << doubleV) + yAdd};
+        if (m_hrPass) {
+            HRScaleQuad(coordA, coordB, coordC, coordD);
+        }
 
         const VDP1CommandData cmdData{
             .mode = mode,
@@ -1023,10 +1265,13 @@ private:
         const sint32 yAddAB = kDeinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
         const sint32 yAddCD = kDeinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
 
-        const CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
-        const CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
-        const CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
-        const CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+        CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
+        CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
+        CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
+        CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+        if (m_hrPass) {
+            HRScaleQuad(coordA, coordB, coordC, coordD);
+        }
 
         const VDP1CommandData cmdData{
             .mode = mode,
@@ -1072,10 +1317,13 @@ private:
         const sint32 yAddAB = kDeinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
         const sint32 yAddCD = kDeinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
 
-        const CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
-        const CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
-        const CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
-        const CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+        CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
+        CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
+        CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
+        CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+        if (m_hrPass) {
+            HRScaleQuad(coordA, coordB, coordC, coordD);
+        }
 
         Color555 gouraudA;
         Color555 gouraudB;
@@ -1180,10 +1428,14 @@ private:
         const sint32 yAddAB = kDeinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
         const sint32 yAddCD = kDeinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
 
-        const CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
-        const CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
-        const CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
-        const CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+        CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
+        CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
+        CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
+        CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
+        if (m_hrPass) {
+            HRScaleLine(coordA, coordB);
+            HRScaleLine(coordC, coordD);
+        }
 
         Color555 gouraudA;
         Color555 gouraudB;
@@ -1243,8 +1495,11 @@ private:
         const sint32 xb = bit::sign_extend<13>(vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x10)) + state.localCoordX;
         const sint32 yb = bit::sign_extend<13>(vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x12)) + state.localCoordY;
 
-        const CoordS32 coordA{xa, ya};
-        const CoordS32 coordB{xb, yb};
+        CoordS32 coordA{xa, ya};
+        CoordS32 coordB{xb, yb};
+        if (m_hrPass) {
+            HRScaleLine(coordA, coordB);
+        }
 
         const VDP1CommandData cmdData{
             .mode = mode,

@@ -26,6 +26,10 @@ namespace {
     constexpr const char *kComposeShaderPath = "src/vdp/cs_vdp2_compose.metallib";
     constexpr const char *kEraseShaderPath = "src/vdp/cs_vdp1_erase.metallib";
     constexpr const char *kFBWriteShaderPath = "src/vdp/cs_vdp1_fbram_write.metallib";
+    constexpr const char *kHRFBWriteShaderPath = "src/vdp/cs_vdp1_hr_fbram_write.metallib";
+    constexpr const char *kHRResyncShaderPath = "src/vdp/cs_vdp1_hr_resync.metallib";
+    /// Largest internal resolution scale
+    constexpr uint32 kMaxHRScale = 4;
     // (the variants are named after the mesh mode and the shading or merging mode; only the checkerboard mesh mode is
     // used, as transparent meshes aren't available with this renderer)
     constexpr const char *kPolyDrawShaderPaths[4] = {
@@ -45,7 +49,8 @@ namespace {
 
     /// Entries of the buffers with an entry for every pixel of the VDP1 framebuffer (internal sprite output and OIT list
     /// heads); the area a shader can address in them is a multiple of the width of a texel buffer
-    constexpr NSUInteger kVDP1PixelBufferEntries = kVDP1FBRAMSize * 2 * 2;
+    constexpr NSUInteger kVDP1PixelBufferEntries =
+        std::max<NSUInteger>(kVDP1FBRAMSize * 2 * 2, 512 * 256 * kMaxHRScale * kMaxHRScale);
 
     /// Frames that can be in the GPU's hands at the same time
     constexpr uint32 kNumFrameSlots = 3;
@@ -83,6 +88,7 @@ namespace {
         Vdp1Fragments,
         Vdp1Counter,
         Fbram,
+        FbramNative,
     };
 
     Res ResourceForName(NSString *name) {
@@ -119,6 +125,7 @@ namespace {
             {"g_fragments", Res::Vdp1Fragments},
             {"g_counter", Res::Vdp1Counter},
             {"g_fbramOut", Res::Fbram},
+            {"g_fbramNative", Res::FbramNative},
         };
         for (const Entry &entry : kEntries) {
             if ([name isEqualToString:[NSString stringWithUTF8String:entry.name]]) {
@@ -374,7 +381,74 @@ public:
         UploadSpriteFB(offset, data, size);
     }
 
+    bool Vdp1EnableHR(std::string &error) override {
+        if (m_fbramHR != nil) {
+            return true;
+        }
+        m_hrFbWrite.vdp1 = true;
+        m_hrResync.vdp1 = true;
+        if (!CreatePipeline(kHRFBWriteShaderPath, m_hrFbWrite, error) ||
+            !CreatePipeline(kHRResyncShaderPath, m_hrResync, error)) {
+            return false;
+        }
+        // (two framebuffers of 512x256 16-bit pixels, scaled up)
+        const NSUInteger bytes = kVDP1FBRAMSize * 2 * kMaxHRScale * kMaxHRScale;
+        m_fbramHR = [m_device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+        m_hrReadback = [m_device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        if (m_fbramHR == nil || m_hrReadback == nil) {
+            m_fbramHR = nil;
+            m_hrReadback = nil;
+            error = "Could not allocate GPU memory for the VDP1 internal resolution framebuffers";
+            return false;
+        }
+        EnsureFrame();
+        EndEncoder();
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        [blit fillBuffer:m_fbramHR range:NSMakeRange(0, m_fbramHR.length) value:0x00];
+        [blit endEncoding];
+        return true;
+    }
+
+    void Vdp1ResyncHR(const Vdp1ResyncPassParams &params) override {
+        if (m_fbramHR == nil) {
+            return;
+        }
+        EnsureFrame();
+        Staged staged{};
+        uint64 generation;
+        do {
+            generation = m_arenaGeneration;
+            staged.common = StageRaw(m_blobV1Params, params.constants, params.constantsSize);
+        } while (generation != m_arenaGeneration);
+        EnsureCompute();
+
+        m_bindHR = true;
+        [m_encoder setComputePipelineState:m_hrResync.state];
+        Bind(m_hrResync, staged);
+        m_bindHR = false;
+        [m_encoder dispatchThreadgroups:MTLSizeMake((512 * 256 / 2 + 63) / 64, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        Vdp1Barrier();
+    }
+
+    void Vdp1DownloadHRFBRAM(void *dst, uint32 size) override {
+        if (m_fbramHR == nil) {
+            return;
+        }
+        size = std::min<uint32>(size, static_cast<uint32>(m_fbramHR.length));
+        EnsureFrame();
+        EndEncoder();
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:m_fbramHR sourceOffset:0 toBuffer:m_hrReadback destinationOffset:0 size:size];
+        [blit endEncoding];
+        DrainArena();
+        std::memcpy(dst, [m_hrReadback contents], size);
+    }
+
     void Vdp1Draw(const Vdp1DrawParams &params) override {
+        if (params.hr && m_fbramHR == nil) {
+            return;
+        }
         if (params.numPixels == 0 || params.shadingMode > 3 || params.mergeMode > 2) {
             return;
         }
@@ -416,7 +490,9 @@ public:
         // Draw the spans
         const Pipeline &draw = m_polyDraw[params.shadingMode];
         [m_encoder setComputePipelineState:draw.state];
+        m_bindHR = params.hr;
         Bind(draw, staged);
+        m_bindHR = false;
         [m_encoder dispatchThreadgroups:MTLSizeMake((params.numPixels + 63) / 64, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         Vdp1Barrier();
@@ -443,7 +519,9 @@ public:
 
             const Pipeline &merge = m_merger[params.mergeMode];
             [m_encoder setComputePipelineState:merge.state];
+            m_bindHR = params.hr;
             Bind(merge, mergeStaged);
+            m_bindHR = false;
             [m_encoder dispatchThreadgroups:MTLSizeMake((params.mergeWidth + 7) / 8, (params.mergeHeight + 7) / 8, 1)
                       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
             Vdp1Barrier();
@@ -468,7 +546,7 @@ public:
     }
 
     void Vdp1Erase(const Vdp1ErasePassParams &params) override {
-        if (params.width == 0 || params.height == 0) {
+        if (params.width == 0 || params.height == 0 || (params.hr && m_fbramHR == nil)) {
             return;
         }
         if (m_traceCalls > 0) {
@@ -489,7 +567,9 @@ public:
         EnsureCompute();
 
         [m_encoder setComputePipelineState:m_erase.state];
+        m_bindHR = params.hr;
         Bind(m_erase, staged);
+        m_bindHR = false;
         // (each thread works on two pixels; the shader doesn't depend on the shape of the groups, so use fewer rows per
         // group if the GPU can't run 32x32 threads of this shader at once)
         const NSUInteger rows = std::max<NSUInteger>(1, std::min<NSUInteger>(32, m_erase.state.maxTotalThreadsPerThreadgroup / 32));
@@ -499,7 +579,7 @@ public:
     }
 
     void Vdp1WriteFB(const Vdp1FBWritePassParams &params) override {
-        if (params.count == 0) {
+        if (params.count == 0 || (params.hr && m_fbramHR == nil)) {
             return;
         }
         if (m_traceCalls > 0) {
@@ -517,9 +597,14 @@ public:
         } while (generation != m_arenaGeneration);
         EnsureCompute();
 
-        [m_encoder setComputePipelineState:m_fbWrite.state];
-        Bind(m_fbWrite, staged);
-        [m_encoder dispatchThreadgroups:MTLSizeMake((params.count + 63) / 64, 1, 1)
+        const Pipeline &write = params.hr ? m_hrFbWrite : m_fbWrite;
+        [m_encoder setComputePipelineState:write.state];
+        m_bindHR = params.hr;
+        Bind(write, staged);
+        m_bindHR = false;
+        // (the scaled up variant has a thread for each of the two pixels of an entry)
+        const uint32 threads = params.hr ? params.count * 2 : params.count;
+        [m_encoder dispatchThreadgroups:MTLSizeMake((threads + 63) / 64, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         Vdp1Barrier();
     }
@@ -826,7 +911,10 @@ private:
     uint32 m_logFrames = 0;
     std::array<Pipeline, 4> m_polyDraw;
     std::array<Pipeline, 3> m_merger;
-    Pipeline m_erase, m_fbWrite;
+    Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync;
+    id<MTLBuffer> m_fbramHR = nil; ///< scaled up VDP1 framebuffers (see Vdp1EnableHR)
+    id<MTLBuffer> m_hrReadback = nil;
+    bool m_bindHR = false;         ///< whether VDP1 passes being recorded work on the scaled up framebuffers
     id<MTLBuffer> m_vdp1Vram = nil;
     id<MTLBuffer> m_spriteOutBuf = nil;
     id<MTLBuffer> m_listHeadsBuf = nil;
@@ -1124,7 +1212,8 @@ private:
             case Res::LnclBack: blob = staged.lnclBack; break;
             case Res::Vram: buffer = pipeline.vdp1 ? m_vdp1Vram : m_vram; break;
             case Res::SpriteFB: buffer = m_fbram; break;
-            case Res::Fbram: buffer = m_fbram; break;
+            case Res::Fbram: buffer = (m_bindHR && pipeline.vdp1) ? m_fbramHR : m_fbram; break;
+            case Res::FbramNative: buffer = m_fbram; break;
             case Res::Vdp1Spans: blob = staged.v1Spans; break;
             case Res::Vdp1PrefixSums: blob = staged.v1PrefixSums; break;
             case Res::Vdp1Commands: blob = staged.v1Commands; break;

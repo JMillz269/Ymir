@@ -4,14 +4,36 @@
 // below and plugged into MetalVDP1 in place of a GPU. The same scene is drawn by the software renderer and the
 // framebuffers are compared. Threads of the polygon drawing shader run in random order, like on a GPU.
 //
-// Usage: vdp1_gpu_emu_test [seed]
+// Usage: vdp1_gpu_emu_test [seed] [scale]
+//
+// With a scale above 1 the scaled up framebuffers (internal resolution) are compared with those of the software renderer.
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <span>
+#include <sstream>
+#include <unordered_map>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
+// (the scaled up framebuffers of the software renderer are what the GPU's are compared with)
+#define private public
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
+#undef private
 
 #include "ymir/hw/vdp/renderer/metal/metal_vdp1.hpp"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +43,16 @@
 
 using namespace ymir;
 using namespace ymir::vdp;
+
+namespace ymir::vdp::metal {
+void LogMessage(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    std::fputc('\n', stderr);
+    va_end(args);
+}
+} // namespace ymir::vdp::metal
 
 namespace {
 
@@ -226,8 +258,11 @@ struct LineStepperH {
 struct EmuGpu final : metal::Gpu {
     std::vector<uint8> vram = std::vector<uint8>(kVDP1VRAMSize);
     std::vector<uint8> fbram = std::vector<uint8>(kVDP1FBRAMSize * 2 * 2 * 2);
-    std::vector<uint32> spriteOut = std::vector<uint32>(1u << 20);
-    std::vector<uint32> listHeads = std::vector<uint32>(1u << 20, 0xFFFFFFFF);
+    std::vector<uint8> fbramHR = std::vector<uint8>(kVDP1FBRAMSize * 32);
+    uint8 *cur = nullptr; // framebuffer memory of the pass being run
+    uint32 hrScale = 1;   // scale of the pass being run
+    std::vector<uint32> spriteOut = std::vector<uint32>(1u << 21);
+    std::vector<uint32> listHeads = std::vector<uint32>(1u << 21, 0xFFFFFFFF);
     struct Frag {
         uint32 data, next;
     };
@@ -260,11 +295,53 @@ struct EmuGpu final : metal::Gpu {
 
     uint32 FbLoad(uint32 address) const {
         uint32 v;
-        std::memcpy(&v, &fbram[address & ~3u], 4);
+        std::memcpy(&v, &cur[address & ~3u], 4);
         return v;
     }
     void FbStore(uint32 address, uint32 v) {
-        std::memcpy(&fbram[address & ~3u], &v, 4);
+        std::memcpy(&cur[address & ~3u], &v, 4);
+    }
+    void Select(bool hr, const void *constants) {
+        VDP1CommonRenderParams common;
+        std::memcpy(&common, constants, sizeof(common));
+        uint32 enh;
+        std::memcpy(&enh, &common.enhancements, 4);
+        hrScale = hr ? BitExtract(enh, 2, 3) + 1 : 1;
+        cur = hr ? fbramHR.data() : fbram.data();
+    }
+
+    bool Vdp1EnableHR(std::string &) override {
+        return true;
+    }
+    void Vdp1DownloadHRFBRAM(void *dst, uint32 size) override {
+        std::memcpy(dst, fbramHR.data(), size);
+    }
+    void Vdp1ResyncHR(const metal::Vdp1ResyncPassParams &p) override {
+        Select(true, p.constants);
+        VDP1CommonRenderParams common;
+        std::memcpy(&common, p.constants, sizeof(common));
+        uint32 dp;
+        std::memcpy(&dp, &common.displayParams, 4);
+        const uint32 drawFB = BitExtract(dp, 7, 1);
+        for (uint32 id = 0; id < 512 * 256 / 2; ++id) {
+            uint32 word;
+            std::memcpy(&word, &fbram[drawFB * 256 * 1024 + id * 4], 4);
+            const uint32 nx = (id * 2) & 511, ny = (id * 2) >> 9;
+            for (uint32 px = 0; px < 2; ++px) {
+                const uint32 raw = BitExtract(word, px * 16, 16);
+                for (uint32 dy = 0; dy < hrScale; ++dy) {
+                    for (uint32 dx = 0; dx < hrScale; ++dx) {
+                        const uint32 address = drawFB * 256 * 1024 * hrScale * hrScale +
+                                               ((ny * hrScale + dy) * 512 * hrScale + (nx + px) * hrScale + dx) * 2;
+                        const uint32 shift = (address & 2) * 8;
+                        uint32 w = FbLoad(address & ~3u);
+                        w &= ~(0xFFFFu << shift);
+                        w |= raw << shift;
+                        FbStore(address & ~3u, w);
+                    }
+                }
+            }
+        }
     }
     uint32 ReadVRAM8(uint32 a) const {
         return vram[a & 0x7FFFF];
@@ -285,8 +362,9 @@ struct EmuGpu final : metal::Gpu {
         std::memcpy(&coords, &erase.coords, 4);
         std::memcpy(&ev, &erase.erase, 4);
         std::memcpy(&vb, &erase.vblank, 4);
+        Select(p.hr, p.constants);
         const uint32 drawFB = BitExtract(dp, 7, 1);
-        const uint32 drawFBOffset = (drawFB ^ 1) * 256 * 1024;
+        const uint32 drawFBOffset = (drawFB ^ 1) * 256 * 1024 * hrScale * hrScale;
         const bool vblankErase = BitTest(vb, 0);
         const uint32 vblankEraseMaxY = BitExtract(vb, 1, 9);
         const uint32 vblankEraseMaxX = BitExtract(vb, 10, 10);
@@ -298,6 +376,21 @@ struct EmuGpu final : metal::Gpu {
         const uint32 eraseY3 = BitExtract(coords, 22, 9) << eraseScaleV;
         for (uint32 idy = 0; idy < 32 * ((p.height + 31) / 32); ++idy) {
             for (uint32 idx = 0; idx < 32 * ((p.width + 63) / 64); ++idx) {
+                if (hrScale > 1) {
+                    const uint32 hx = idx * 2 + eraseX1 * hrScale, hy = idy + eraseY1 * hrScale;
+                    if (hx >= eraseX3 * hrScale || hy >= (eraseY3 + 1) * hrScale) {
+                        continue;
+                    }
+                    if (vblankErase) {
+                        const uint32 nx = hx / hrScale, ny = hy / hrScale;
+                        if (ny > vblankEraseMaxY || (ny == vblankEraseMaxY && nx > vblankEraseMaxX)) {
+                            continue;
+                        }
+                    }
+                    const uint32 wv = BitExtract(ev, 0, 16);
+                    FbStore(drawFBOffset + (hy * 512u * hrScale + hx) * 2, (wv << 16) | wv);
+                    continue;
+                }
                 const uint32 posx = idx * 2 + eraseX1, posy = idy + eraseY1;
                 if (posx >= eraseX3 + 1 || posy > eraseY3 + 1) {
                     continue;
@@ -334,6 +427,39 @@ struct EmuGpu final : metal::Gpu {
         std::memcpy(&dp, &common.displayParams, 4);
         const uint32 drawFBOffset = BitExtract(dp, 7, 1) * 256 * 1024;
         const VDP1FBRAMWrite *w = (const VDP1FBRAMWrite *)p.writes;
+        if (p.hr) {
+            Select(true, p.constants);
+            const uint32 drawFB = BitExtract(dp, 7, 1);
+            for (uint32 id = 0; id < p.count * 2; ++id) {
+                const uint32 index = id >> 1, px = id & 1;
+                const uint32 mask = BitExtract(w[index].andMask, px * 16, 16);
+                if (mask == 0xFFFF) {
+                    continue;
+                }
+                const uint32 nativeAddress = w[index].address + px * 2;
+                uint32 word;
+                std::memcpy(&word, &fbram[drawFB * 256 * 1024 + (nativeAddress & ~3u)], 4);
+                const uint32 raw = BitExtract(word, (nativeAddress & 2) * 8, 16);
+                const uint32 pixelIndex = nativeAddress >> 1;
+                const uint32 nx = pixelIndex & 511, ny = pixelIndex >> 9;
+                if (ny >= 256) {
+                    continue;
+                }
+                for (uint32 dy = 0; dy < hrScale; ++dy) {
+                    for (uint32 dx = 0; dx < hrScale; ++dx) {
+                        const uint32 address = drawFB * 256 * 1024 * hrScale * hrScale +
+                                               ((ny * hrScale + dy) * 512 * hrScale + nx * hrScale + dx) * 2;
+                        const uint32 shift = (address & 2) * 8;
+                        uint32 v = FbLoad(address & ~3u);
+                        v &= ~(0xFFFFu << shift);
+                        v |= raw << shift;
+                        FbStore(address & ~3u, v);
+                    }
+                }
+            }
+            return;
+        }
+        Select(false, p.constants);
         for (uint32 i = 0; i < p.count; ++i) {
             const uint32 address = w[i].address + drawFBOffset;
             uint32 value = FbLoad(address);
@@ -372,14 +498,17 @@ struct EmuGpu final : metal::Gpu {
             }
         }
         const bool meshEnable = BitTest(pmodcolr, 8);
-        if (meshEnable && ((cx ^ cy) & 1)) {
+        if (meshEnable && (((cx / int(hrScale)) ^ (cy / int(hrScale))) & 1)) {
+            return;
+        }
+        if (hrScale > 1 && (cx >= int(512 * hrScale) || cy >= int(256 * hrScale))) {
             return;
         }
         const bool doubleDensity = BitTest(dpBits, 3);
         const bool dblInterlaceEnable = BitTest(dpBits, 4);
         const uint32 dblInterlaceDrawLine = BitExtract(dpBits, 5, 1);
-        const uint32 fbW = 512u << BitExtract(dpBits, 0, 1);
-        const uint32 fbOffsetFB = BitExtract(dpBits, 7, 1) * 256 * 1024;
+        const uint32 fbW = (512u << BitExtract(dpBits, 0, 1)) * hrScale;
+        const uint32 fbOffsetFB = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale;
         if (doubleDensity && dblInterlaceEnable && (uint32(cy) & 1) != dblInterlaceDrawLine) {
             return;
         }
@@ -609,8 +738,8 @@ struct EmuGpu final : metal::Gpu {
 
     void MergeThread(uint32 px, uint32 py, uint32 mode) {
         const bool pixel8Bits = BitTest(dpBits, 2);
-        const uint32 fbW = 512u << BitExtract(dpBits, 0, 1);
-        const uint32 fbOffset = BitExtract(dpBits, 7, 1) * 256 * 1024;
+        const uint32 fbW = (512u << BitExtract(dpBits, 0, 1)) * hrScale;
+        const uint32 fbOffset = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale;
         if (pixel8Bits) {
             if (mode != 0) {
                 return;
@@ -710,6 +839,7 @@ struct EmuGpu final : metal::Gpu {
         VDP1CommonRenderParams common;
         std::memcpy(&common, p.constants, sizeof(common));
         std::memcpy(&dpBits, &common.displayParams, 4);
+        Select(p.hr, p.constants);
         VDP1PolyDrawParams pd;
         std::memcpy(&pd, (const uint8 *)p.constants + sizeof(common), sizeof(pd));
         numSpans = pd.numSpans;
@@ -745,6 +875,7 @@ void W16(auto &mem, uint32 addr, uint16 v) {
 
 int main(int argc, char **argv) {
     const uint32 seed = argc > 1 ? std::atoi(argv[1]) : 1;
+    const uint32 scale = argc > 2 ? std::atoi(argv[2]) : 1;
     auto stateSW = std::make_unique<VDPState>();
     auto stateGPU = std::make_unique<VDPState>();
     config::VDP2DebugRender dbg;
@@ -755,6 +886,12 @@ int main(int argc, char **argv) {
     EmuGpu gpu;
     gpu.rng.seed(seed);
     MetalVDP1 vdp1(*stateGPU, gpu);
+    {
+        config::Enhancements enh{};
+        enh.internalResolution = scale;
+        sw.ConfigureEnhancements(enh);
+        vdp1.SetInternalResolution(scale);
+    }
 
     auto w2 = [&](uint32 addr, uint16 v) {
         stateSW->regs2.Write(addr, v);
@@ -860,16 +997,52 @@ int main(int argc, char **argv) {
     put(0x8000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
     vdp1.ResyncFromCPU();
+    if (std::getenv("WARMUP")) {
+        // Two erase + swap cycles with nothing drawn so that the scaled up framebuffers are in line when drawing starts
+        for (int i = 0; i < 2; i++) {
+            sw.VDP1EraseFramebuffer(0);
+            vdp1.EraseFramebuffer(0);
+            sw.VDP1SwapFramebuffer();
+            vdp1.SwapFramebuffer();
+            stateSW->fbIndex.Flip();
+            stateGPU->fbIndex.Flip();
+        }
+    }
     int badFrames = 0;
     for (int frame = 0; frame < 4; frame++) {
-        sw.VDP1EraseFramebuffer(0);
-        vdp1.EraseFramebuffer(0);
+        // (the erase of the third frame runs out of time)
+        const uint64 eraseCycles = frame == 2 ? 20000 : 0;
+        sw.VDP1EraseFramebuffer(eraseCycles);
+        vdp1.EraseFramebuffer(eraseCycles);
         sw.VDP1BeginFrame();
         vdp1.BeginFrame();
+        int cmdNumber = 0;
         for (uint32 a = 0;; a += 0x20) {
             VDP1Command::Control ctrl{.u16 = util::ReadBE<uint16>(&stateSW->mem1.VRAM[a])};
             if (ctrl.end) {
                 break;
+            }
+            if (cmdNumber++ == 9 && frame >= 1) {
+                // The CPU writes to the framebuffer while drawing: a word, then a byte, then a word at an odd pixel
+                const uint8 fb = stateGPU->fbIndex.draw;
+                auto cpuWrite16 = [&](uint32 addr, uint16 v) {
+                    util::WriteBE<uint16>(&stateSW->mem1.FBRAM[fb][addr], v);
+                    util::WriteBE<uint16>(&stateGPU->mem1.FBRAM[fb][addr], v);
+                    sw.VDP1WriteFB(addr, v);
+                    vdp1.WriteFB(addr, 2);
+                };
+                auto cpuWrite8 = [&](uint32 addr, uint8 v) {
+                    stateSW->mem1.FBRAM[fb][addr] = v;
+                    stateGPU->mem1.FBRAM[fb][addr] = v;
+                    sw.VDP1WriteFB(addr, v);
+                    vdp1.WriteFB(addr, 1);
+                };
+                for (uint32 i = 0; i < 40; i++) {
+                    cpuWrite16(((100 + i / 8) * 512 + 60 + i) * 2, uint16(0xFC00 + i * 37));
+                }
+                cpuWrite8(((120) * 512 + 80) * 2 + 1, 0x5A);
+                cpuWrite8(((121) * 512 + 81) * 2, 0xC3);
+                cpuWrite16(((130) * 512 + 99) * 2, 0x8421);
             }
             if (!ctrl.skip) {
                 sw.VDP1ExecuteCommand(a, ctrl);
@@ -910,6 +1083,36 @@ int main(int argc, char **argv) {
             ++badFrames;
         }
         std::printf("\n");
+        if (scale > 1) {
+            // The scaled up framebuffer of the draw framebuffer
+            const uint16 *swHr = sw.m_hrDraw[fbi].data();
+            const size_t stride = size_t(512) * scale;
+            uint32 hdiffs = 0, hfilled = 0, hminx = ~0u, hminy = ~0u, hmaxx = 0, hmaxy = 0;
+            for (uint32 y = 0; y < 224 * scale; ++y) {
+                for (uint32 x = 0; x < 320 * scale; ++x) {
+                    const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * scale * scale + (size_t(y) * stride + x) * 2];
+                    const uint16 gv = (uint16(g[0]) << 8) | g[1];
+                    const uint16 sv = swHr[size_t(y) * stride + x];
+                    hfilled += sv != 0;
+                    if (gv != sv) {
+                        if (hdiffs < 8) {
+                            std::printf("  hr (%u,%u): GPU %04X sw %04X\n", x, y, gv, sv);
+                        }
+                        ++hdiffs;
+                        hminx = std::min(hminx, x);
+                        hmaxx = std::max(hmaxx, x);
+                        hminy = std::min(hminy, y);
+                        hmaxy = std::max(hmaxy, y);
+                    }
+                }
+            }
+            std::printf("  scaled up %ux (%u pixels drawn): %u pixels differ", scale, hfilled, hdiffs);
+            if (hdiffs) {
+                std::printf(" in x %u..%u y %u..%u", hminx, hmaxx, hminy, hmaxy);
+                ++badFrames;
+            }
+            std::printf("\n");
+        }
         sw.VDP1SwapFramebuffer();
         vdp1.SwapFramebuffer();
         stateSW->fbIndex.Flip();

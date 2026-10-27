@@ -270,10 +270,18 @@ struct MetalVDPRenderer::Impl {
         VDP2UpdateEnabledLayers();
     }
 
+    /// @brief The internal resolution scale from the settings.
+    uint32 internalResolution = 1;
+
     void UpdateEnhancements() {
         // Deinterlacing and transparent meshes are not available with this renderer
         cpuCommonRenderParams.enhancements.deinterlace = 0;
         cpuCommonRenderParams.enhancements.transparentMeshes = 0;
+        cpuCommonRenderParams.enhancements.vdp1Scale = 0;
+        if (vdp1) {
+            // (the comparison with the software renderer is at the native resolution)
+            vdp1->SetInternalResolution(compare ? 1 : internalResolution);
+        }
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -1113,6 +1121,7 @@ util::VoidResult<> MetalVDPRenderer::Initialize(void *device, bool gpuVDP1) {
         if (m_impl->compare) {
             metal::LogMessage("comparing the GPU's VDP1 with the software renderer's");
         }
+        m_impl->vdp1->SetInternalResolution(m_impl->compare ? 1 : m_impl->internalResolution);
     }
     m_impl->Reset();
     return {};
@@ -1136,7 +1145,9 @@ MetalVDPRenderer::Create(VDPState &state, const config::VDP2DebugRender &vdp2Deb
 // Configuration
 
 void MetalVDPRenderer::UpdateEnhancements() {
-    // These aren't available with the Metal renderer yet; VDP1 is drawn at the native resolution only
+    // Deinterlacing and transparent meshes aren't available with the Metal renderer yet, and the software renderer's
+    // way of drawing at a higher resolution isn't used: the GPU does it
+    m_impl->internalResolution = m_enhancements.internalResolution;
     m_enhancements.deinterlace = false;
     m_enhancements.transparentMeshes = false;
     m_enhancements.internalResolution = 1;

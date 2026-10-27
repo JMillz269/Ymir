@@ -73,6 +73,8 @@ struct Vdp1DrawParams {
     uint32 numPixels = 0;   ///< total number of pixels of the spans
     uint32 mergeWidth = 0;  ///< size of the output merger dispatch in threads (one for every 2 or 4 pixels of a row)
     uint32 mergeHeight = 0;
+
+    bool hr = false; ///< draw into the scaled up (internal resolution) framebuffer instead of the native one
 };
 
 /// @brief Inputs of the VDP1 framebuffer erase pass.
@@ -81,6 +83,7 @@ struct Vdp1ErasePassParams {
     uint32 constantsSize = 0;
     uint32 width = 0;  ///< width of the area to erase in pixels
     uint32 height = 0; ///< height of the area to erase in pixels
+    bool hr = false;   ///< erase the scaled up (internal resolution) framebuffer instead of the native one
 };
 
 /// @brief Inputs of the pass that applies CPU writes to the VDP1 framebuffer.
@@ -90,6 +93,14 @@ struct Vdp1FBWritePassParams {
     const void *writes = nullptr; ///< VDP1FBRAMWrite
     uint32 writesSize = 0;
     uint32 count = 0;
+    bool hr = false; ///< bring the scaled up (internal resolution) framebuffer up to date with writes already applied
+                     ///< to the native one, instead of applying the writes to the native one
+};
+
+/// @brief Inputs of the pass that fills the scaled up framebuffer from the native one.
+struct Vdp1ResyncPassParams {
+    const void *constants = nullptr; ///< VDP1CommonRenderParams (the draw framebuffer index selects the framebuffer)
+    uint32 constantsSize = 0;
 };
 
 /// @brief A finished frame.
@@ -134,6 +145,17 @@ public:
 
     /// @brief Applies writes made by the CPU to the framebuffer.
     virtual void Vdp1WriteFB(const Vdp1FBWritePassParams &params) = 0;
+
+    /// @brief Creates the scaled up (internal resolution) VDP1 framebuffers, large enough for the highest scale (4x).
+    /// Has to be called after `EnableVdp1` and before any of the passes that work with them.
+    virtual bool Vdp1EnableHR(std::string &error) = 0;
+
+    /// @brief Fills a scaled up framebuffer from the native one.
+    virtual void Vdp1ResyncHR(const Vdp1ResyncPassParams &params) = 0;
+
+    /// @brief Waits for everything submitted so far to finish and copies the start of the scaled up framebuffer memory
+    /// (the two framebuffers one after the other, each `512 * 256 * scale * scale` 16-bit pixels).
+    virtual void Vdp1DownloadHRFBRAM(void *dst, uint32 size) = 0;
 
     /// @brief Waits for everything submitted so far to finish and counts the entries of the intermediate pixel buffers
     /// that were not cleared by the merging (for diagnostics).

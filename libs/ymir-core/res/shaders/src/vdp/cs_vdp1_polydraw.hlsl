@@ -86,10 +86,14 @@ RWBuffer<uint> g_internalSpriteOut : register(u1);
 // ---------------------------------------------------------------------------------------------------------------------
 // Parameters
 
+// Internal resolution scale; the framebuffer is then a larger one drawn with scaled coordinates
+static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
 static const uint2 fbSize = uint2(
     512u << BitExtract(g_commonParams.displayParams, 0, 1),
     256u << BitExtract(g_commonParams.displayParams, 1, 1)
-);
+) * hrScale;
+// Size of one framebuffer in bytes
+static const uint fbBytes = kVDP1FBSize * hrScale * hrScale;
 static const bool pixel8Bits = BitTest(g_commonParams.displayParams, 2);
 static const bool doubleDensity = BitTest(g_commonParams.displayParams, 3);
 static const bool dblInterlaceEnable = BitTest(g_commonParams.displayParams, 4);
@@ -523,7 +527,12 @@ void WriteOutput(int2 coord, OutData data) {
 
     // Mesh checkerboard test
     const bool meshEnable = BitTest(cmdParams.cmdpmodcolr, 8);
-    if (!POLYSPEC_TRANSPARENT_MESH && meshEnable && BitTest(coord.x ^ coord.y, 0)) {
+    if (!POLYSPEC_TRANSPARENT_MESH && meshEnable && BitTest((coord.x / (int)hrScale) ^ (coord.y / (int)hrScale), 0)) {
+        return;
+    }
+
+    // The scaled framebuffer doesn't wrap around
+    if (hrScale > 1 && (coord.x >= (int)fbSize.x || coord.y >= (int)fbSize.y)) {
         return;
     }
 
@@ -531,7 +540,7 @@ void WriteOutput(int2 coord, OutData data) {
 
 #if POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_MSB
     const uint drawFB = BitExtract(g_commonParams.displayParams, 7, 1);
-    uint fbOffset = drawFB * kVDP1FBSize;
+    uint fbOffset = drawFB * fbBytes;
 #endif
 
     // Interlace line selection
@@ -582,6 +591,10 @@ void WriteOutput(int2 coord, OutData data) {
 
     uint nodeIndex;
     g_counter.InterlockedAdd(0, 1, nodeIndex);
+    if (nodeIndex >= kMaxOITFragments) {
+        // Out of fragments (the host code keeps this from happening)
+        return;
+    }
 
     uint oldHead;
     InterlockedExchange(g_listHeads[outOffset], nodeIndex, oldHead);

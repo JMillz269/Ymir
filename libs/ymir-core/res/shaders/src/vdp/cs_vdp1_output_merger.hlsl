@@ -47,14 +47,17 @@ RWBuffer<uint> g_internalSpriteOut : register(u2);
 // ---------------------------------------------------------------------------------------------------------------------
 // Parameters
 
+static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
 static const uint2 fbSize = uint2(
     512u << BitExtract(g_commonParams.displayParams, 0, 1),
     256u << BitExtract(g_commonParams.displayParams, 1, 1)
-);
+) * hrScale;
+static const uint fbBytes = kVDP1FBSize * hrScale * hrScale;
+static const uint fbramBytes = fbBytes * 2;
 static const bool pixel8Bits = BitTest(g_commonParams.displayParams, 2);
 static const uint drawFB = BitExtract(g_commonParams.displayParams, 7, 1);
 
-static const uint fbOffset = drawFB * kVDP1FBSize;
+static const uint fbOffset = drawFB * fbBytes;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Mergers
@@ -114,7 +117,7 @@ void Merge8(uint2 pos, uint field) {
     g_internalSpriteOut[inMeshOffset + 3] = 0;
 #endif
 
-    const uint outOffset = inPos.x + inPos.y * fbSize.x + field * kVDP1FBRAMSize;
+    const uint outOffset = inPos.x + inPos.y * fbSize.x + field * fbramBytes;
     uint fbramValue = g_fbramOut.Load(outOffset + fbOffset);
     if (seqNum0 != 0) {
         fbramValue &= ~0xFFu;
@@ -134,7 +137,7 @@ void Merge8(uint2 pos, uint field) {
     }
     g_fbramOut.Store(outOffset + fbOffset, fbramValue);
 #if POLYSPEC_TRANSPARENT_MESH
-    const uint outMeshOffset = outOffset + kVDP1FBRAMSize * 2;
+    const uint outMeshOffset = outOffset + fbramBytes * 2;
     fbramValue = g_fbramOut.Load(outMeshOffset + fbOffset);
     if (hasPixel0) {
         fbramValue &= ~0xFFu;
@@ -199,7 +202,7 @@ void Merge16(uint2 pos, uint field) {
     g_internalSpriteOut[inMeshOffset + 1] = 0;
 #endif
 
-    const uint outOffset = (inPos.x + inPos.y * fbSize.x) * 2 + field * kVDP1FBRAMSize;
+    const uint outOffset = (inPos.x + inPos.y * fbSize.x) * 2 + field * fbramBytes;
     uint fbramValue = g_fbramOut.Load(outOffset + fbOffset);
     if (seqNum0 != 0) {
         fbramValue &= ~0xFFFFu;
@@ -211,7 +214,7 @@ void Merge16(uint2 pos, uint field) {
     }
     g_fbramOut.Store(outOffset + fbOffset, fbramValue);
 #if POLYSPEC_TRANSPARENT_MESH
-    const uint outMeshOffset = outOffset + kVDP1FBRAMSize * 2;
+    const uint outMeshOffset = outOffset + fbramBytes * 2;
     fbramValue = g_fbramOut.Load(outMeshOffset + fbOffset);
     if (hasPixel0) {
         fbramValue &= ~0xFFFFu;
@@ -247,7 +250,7 @@ void Merge16Single(uint2 pos, uint field) {
     g_internalSpriteOut[inOffset + 0] = 0;
     g_internalSpriteOut[inOffset + 1] = 0;
 
-    const uint outOffset = (inPos.x + inPos.y * fbSize.x) * 2 + field * kVDP1FBRAMSize;
+    const uint outOffset = (inPos.x + inPos.y * fbSize.x) * 2 + field * fbramBytes;
     uint fbramValue = g_fbramOut.Load(outOffset + fbOffset);
     if (shift0 != 0) {
         uint4 color = Uint16ToColor555(ByteSwap16(fbramValue));
@@ -352,7 +355,7 @@ void Merge16Single(uint2 pos, uint field) {
     g_listHeads[inOffset + 1] = 0xFFFFFFFF;
 
     // Get base FBRAM value
-    const uint fbramAddress = (inPos.x + inPos.y * fbSize.x) * 2 + fbOffset + field * kVDP1FBRAMSize;
+    const uint fbramAddress = (inPos.x + inPos.y * fbSize.x) * 2 + fbOffset + field * fbramBytes;
     uint fbramValue = g_fbramOut.Load(fbramAddress);
 
     // Modify

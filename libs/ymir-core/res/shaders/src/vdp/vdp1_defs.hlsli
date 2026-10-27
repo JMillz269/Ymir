@@ -12,6 +12,9 @@ static const uint kColorBlendModeShadow = 1;
 static const uint kColorBlendModeHalfLuminance = 2;
 static const uint kColorBlendModeHalfTransparency = 3;
 
+// Maximum number of order-independent transparency fragments per dispatch
+static const uint kMaxOITFragments = 524288;
+
 struct OITFragment {
     uint data; // packed sprite data + sequence number
     uint next; // pointer to next fragment; 0xFFFFFFFF = end of list
