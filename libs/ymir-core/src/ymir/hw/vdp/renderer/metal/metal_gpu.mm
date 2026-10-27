@@ -382,8 +382,10 @@ public:
         if (m_debugClearCheck && params.shadingMode == 2 && m_traceCalls == 0 && m_logChains == 0) {
             m_traceCalls = 60;
         }
+        bool traceThis = false;
         if (m_traceCalls > 0) {
             --m_traceCalls;
+            traceThis = true;
             LogMessage("trace: draw shade %u merge %u pixels %u spans %u cmds %u", params.shadingMode, params.mergeMode,
                        params.numPixels, params.spansSize / 48, params.commandsSize / 20);
         }
@@ -471,6 +473,12 @@ public:
             [blit updateFence:m_fence];
             m_fenceUpdated = true;
             [blit endEncoding];
+        }
+
+        if (traceThis) {
+            uint32 dp;
+            std::memcpy(&dp, params.constants, 4);
+            DebugLogSamplePixels("after this draw", (dp >> 7) & 1);
         }
     }
 
@@ -563,6 +571,28 @@ public:
                 ++spriteOut;
             }
         }
+    }
+
+    /// Logs the framebuffer under some pixels (for diagnostics)
+    void DebugLogSamplePixels(const char *when, uint32 drawFB) {
+        EndEncoder();
+        id<MTLBlitCommandEncoder> fbBlit = [m_cmdBuf blitCommandEncoder];
+        if (m_fenceUpdated) {
+            [fbBlit waitForFence:m_fence];
+        }
+        [fbBlit copyFromBuffer:m_fbram sourceOffset:0 toBuffer:m_fbramReadback destinationOffset:0 size:kVDP1FBRAMSize * 2];
+        [fbBlit updateFence:m_fence];
+        m_fenceUpdated = true;
+        [fbBlit endEncoding];
+        DrainArena();
+        const uint8 *fb = static_cast<const uint8 *>([m_fbramReadback contents]) + drawFB * kVDP1FBRAMSize;
+        char text[300];
+        int n = std::snprintf(text, sizeof(text), "  %s, framebuffer %u:", when, drawFB);
+        for (uint32 pixel : {9226u, 9227u, 9738u, 13322u}) {
+            n += std::snprintf(text + n, sizeof(text) - n, " (%u,%u)=%02X%02X", pixel % 512, pixel / 512, fb[pixel * 2],
+                               fb[pixel * 2 + 1]);
+        }
+        LogMessage("%s", text);
     }
 
     /// Logs the fragment lists of some pixels (for diagnostics)
