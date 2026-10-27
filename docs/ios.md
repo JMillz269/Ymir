@@ -85,6 +85,11 @@ the frames where the GPU's framebuffer differs from the software renderer's (wit
 and a few more details). That is much slower; delete the folder for normal play. `tools/render-tests/vdp1_gpu_emu_test.cpp`
 runs the VDP1 compute shaders ported to C++ against the software renderer on a desktop machine.
 
+Creating a folder named `metal-vdp-profile` in the Documents folder makes the log also list, every 300 frames, how
+many milliseconds per frame the GPU spent on each kind of pass (VDP1 drawing and merging, at the normal and the scaled up
+size, erasing and writes, the VDP2 layers and composition, and the passes of the internal resolution). That runs the
+passes in separate encoders, so it is a little slower; delete the folder for normal play.
+
 The finished image is read back from the GPU and shown through the normal display path, so all the display filters,
 upscaling and screenshots keep working. The image arrives one frame late. Deinterlacing and Transparent Meshes are not supported yet and are ignored while the Metal renderer is on, and
 Internal Resolution needs the GPU VDP1 option. If it can't be created the

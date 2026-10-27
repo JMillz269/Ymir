@@ -255,6 +255,25 @@ public:
         m_device = device;
         m_queue = [device newCommandQueue];
         m_fence = [device newFence];
+        if (DiagnosticSwitch("metal-vdp-profile") && [device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+            id<MTLCounterSet> timestamps = nil;
+            for (id<MTLCounterSet> set in device.counterSets) {
+                if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+                    timestamps = set;
+                }
+            }
+            if (timestamps != nil) {
+                MTLCounterSampleBufferDescriptor *descriptor = [[MTLCounterSampleBufferDescriptor alloc] init];
+                descriptor.counterSet = timestamps;
+                descriptor.storageMode = MTLStorageModeShared;
+                descriptor.sampleCount = kNumFrameSlots * kProfileSamplesPerSlot;
+                NSError *profileError = nil;
+                m_profileBuf = [device newCounterSampleBufferWithDescriptor:descriptor error:&profileError];
+                LogMessage("profiling the passes: %s", m_profileBuf != nil ? "on" : "could not create the sample buffer");
+            } else {
+                LogMessage("profiling the passes: the GPU has no timestamp counters");
+            }
+        }
         if (m_queue == nil) {
             error = "Could not create a Metal command queue";
             return false;
@@ -443,6 +462,7 @@ public:
             generation = m_arenaGeneration;
             staged.common = StageRaw(m_blobV1Params, params.constants, params.constantsSize);
         } while (generation != m_arenaGeneration);
+        Profile(4);
         EnsureCompute();
 
         m_bindHR = true;
@@ -508,6 +528,7 @@ public:
                 staged.v1Counter = StageRaw(m_blobCounter, &zero, sizeof(zero));
             }
         } while (generation != m_arenaGeneration);
+        Profile((params.hr ? 2 : 0));
         EnsureCompute();
 
         // Draw the spans
@@ -537,6 +558,7 @@ public:
                 generation = m_arenaGeneration;
                 mergeStaged.common = StageRaw(m_blobMergeCommon, params.constants, params.commonSize);
             } while (generation != m_arenaGeneration);
+            Profile((params.hr ? 3 : 1));
             EnsureCompute();
             // (the draw above has been recorded already; if the arena was emptied to make room the encoder is a new one)
 
@@ -587,6 +609,7 @@ public:
             generation = m_arenaGeneration;
             staged.common = StageRaw(m_blobV1Params, params.constants, params.constantsSize);
         } while (generation != m_arenaGeneration);
+        Profile(4);
         EnsureCompute();
 
         [m_encoder setComputePipelineState:m_erase.state];
@@ -618,6 +641,7 @@ public:
             staged.common = StageRaw(m_blobV1Params, params.constants, params.constantsSize);
             staged.v1FBWrites = StageRaw(m_blobFBWrites, params.writes, params.writesSize);
         } while (generation != m_arenaGeneration);
+        Profile(4);
         EnsureCompute();
 
         const Pipeline &write = params.hr ? m_hrFbWrite : m_fbWrite;
@@ -804,6 +828,7 @@ public:
             staged.cramRotCoeff = Stage(m_blobCramRot, params.cramRotCoeffs, params.cramRotCoeffsSize);
             staged.rotParamBases = Stage(m_blobRotBases, params.rotParamBases, params.rotParamBasesSize);
         } while (generation != m_arenaGeneration);
+        Profile(5);
         EnsureCompute();
 
         // Sprite layer
@@ -855,6 +880,7 @@ public:
                 generation = m_arenaGeneration;
                 staged.common = Stage(m_blobCommon, common.data(), layers.commonSize);
             } while (generation != m_arenaGeneration);
+            Profile(7);
             EnsureCompute();
 
             m_bindHR = true;
@@ -894,6 +920,7 @@ public:
                 }
                 staged.common = Stage(m_blobCommon, common.data(), layers.commonSize);
             } while (generation != m_arenaGeneration);
+            Profile(8);
             EnsureCompute();
 
             m_bindHR = true;
@@ -924,6 +951,7 @@ public:
             staged.lnclBack =
                 StageTexels(m_blobLnclBack, params.lnclBack, params.lnclBackSize, MTLPixelFormatRGBA8Uint);
         } while (generation != m_arenaGeneration);
+        Profile(6);
         EnsureCompute();
 
         const Pipeline &compose = hr ? m_hrCompose : m_compose;
@@ -958,6 +986,17 @@ public:
                        "per frame (scale %u)",
                        micros / 300.0 / 1000.0, maxMicros / 1000.0, m_waitMicros / 300.0 / 1000.0, scale);
             m_waitMicros = 0;
+            if (m_profileBuf != nil) {
+                char text[512];
+                int n = std::snprintf(text, sizeof(text), "last 300 frames, ms per frame by pass (encoders per frame):");
+                for (uint32 kind = 0; kind < kProfileKinds && n > 0 && n < static_cast<int>(sizeof(text)); ++kind) {
+                    const uint64_t kindMicros = m_profileMicros[kind].exchange(0);
+                    const uint64_t kindCount = m_profileCount[kind].exchange(0);
+                    n += std::snprintf(text + n, sizeof(text) - n, " %s %.2f (%.1f);", kProfileNames[kind],
+                                       kindMicros / 300.0 / 1000.0, kindCount / 300.0);
+                }
+                LogMessage("%s", text);
+            }
         }
         if (++m_logFrames <= 10 || m_logFrames % 300 == 0) {
             LogMessage("frame %u (%ux%u), draws so far %u (copy %u, shadow %u, half-transparent %u, msb %u), downloads %u",
@@ -986,7 +1025,47 @@ public:
         dispatch_semaphore_t done = slot.done;
         std::atomic<uint64_t> *gpuMicros = &m_gpuMicros;
         std::atomic<uint64_t> *gpuMaxMicros = &m_gpuMaxMicros;
+        id<MTLCounterSampleBuffer> profileBuf = m_profileBuf;
+        std::vector<std::pair<uint32, uint32>> profileEncoders;
+        if (profileBuf != nil && !m_profileDrained) {
+            profileEncoders = m_profileEncoders;
+        }
+        m_profileEncoders.clear();
+        m_profileDrained = false;
+        auto *profileMicros = &m_profileMicros;
+        auto *profileCount = &m_profileCount;
         [m_cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+            if (profileBuf != nil && !profileEncoders.empty()) {
+                const NSUInteger first = profileEncoders.front().second;
+                const NSUInteger last = profileEncoders.back().second + 2;
+                NSData *data = [profileBuf resolveCounterRange:NSMakeRange(first, last - first)];
+                if (data != nil && data.length >= (last - first) * sizeof(MTLCounterResultTimestamp)) {
+                    const auto *stamps = static_cast<const MTLCounterResultTimestamp *>(data.bytes);
+                    // (the time between the first and the last timestamp is what the whole of the encoders took)
+                    uint64_t minStamp = UINT64_MAX, maxStamp = 0;
+                    for (const auto &enc : profileEncoders) {
+                        const uint64_t a = stamps[enc.second - first].timestamp;
+                        const uint64_t b = stamps[enc.second - first + 1].timestamp;
+                        if (a != MTLCounterErrorValue && b != MTLCounterErrorValue && b >= a) {
+                            minStamp = std::min(minStamp, a);
+                            maxStamp = std::max(maxStamp, b);
+                        }
+                    }
+                    const double seconds = buffer.GPUEndTime - buffer.GPUStartTime;
+                    if (maxStamp > minStamp && seconds > 0) {
+                        const double secondsPerTick = seconds / static_cast<double>(maxStamp - minStamp);
+                        for (const auto &enc : profileEncoders) {
+                            const uint64_t a = stamps[enc.second - first].timestamp;
+                            const uint64_t b = stamps[enc.second - first + 1].timestamp;
+                            if (a != MTLCounterErrorValue && b != MTLCounterErrorValue && b >= a) {
+                                (*profileMicros)[enc.first].fetch_add(
+                                    static_cast<uint64_t>((b - a) * secondsPerTick * 1e6), std::memory_order_relaxed);
+                                (*profileCount)[enc.first].fetch_add(1, std::memory_order_relaxed);
+                            }
+                        }
+                    }
+                }
+            }
             // (how long the GPU spent on the frame)
             const double seconds = buffer.GPUEndTime - buffer.GPUStartTime;
             if (seconds > 0) {
@@ -1074,6 +1153,20 @@ private:
     id<MTLTexture> m_compositeHR = nil; ///< scaled up output image
     id<MTLBuffer> m_fbramHR = nil; ///< scaled up VDP1 framebuffers (see Vdp1EnableHR)
     id<MTLBuffer> m_hrReadback = nil;
+    // Profiling (a folder named metal-vdp-profile in the Documents folder turns it on): the time the GPU spends on each
+    // kind of pass, from timestamps taken at the start and the end of the compute encoders
+    static constexpr uint32 kProfileKinds = 9;
+    static constexpr uint32 kProfileSamplesPerSlot = 256; // two for each encoder
+    inline static const char *const kProfileNames[kProfileKinds] = {
+        "vdp1 draw",       "vdp1 merge",     "vdp1 draw (scaled up)", "vdp1 merge (scaled up)", "vdp1 erase and writes",
+        "vdp2 layers",     "vdp2 compose",   "scaled up fill",        "scaled up recompose",
+    };
+    id<MTLCounterSampleBuffer> m_profileBuf = nil;
+    uint32 m_profileKind = 0;
+    std::vector<std::pair<uint32, uint32>> m_profileEncoders; // kind and first sample index (within the buffer)
+    bool m_profileDrained = false;
+    std::array<std::atomic<uint64_t>, kProfileKinds> m_profileMicros{};
+    std::array<std::atomic<uint64_t>, kProfileKinds> m_profileCount{};
     int64_t m_waitMicros = 0;
     std::atomic<uint64_t> m_gpuMicros{0};
     std::atomic<uint64_t> m_gpuMaxMicros{0};
@@ -1215,9 +1308,28 @@ private:
         }
     }
 
+    /// Notes the kind of the passes about to be recorded; when profiling each kind gets encoders of its own
+    void Profile(uint32 kind) {
+        if (m_profileBuf != nil && kind != m_profileKind) {
+            EndEncoder();
+        }
+        m_profileKind = kind;
+    }
+
     void EnsureCompute() {
         if (m_encoder == nil) {
-            m_encoder = [m_cmdBuf computeCommandEncoder];
+            if (m_profileBuf != nil && m_profileEncoders.size() < kProfileSamplesPerSlot / 2) {
+                const uint32 index = m_currentSlot * kProfileSamplesPerSlot +
+                                     static_cast<uint32>(m_profileEncoders.size()) * 2;
+                MTLComputePassDescriptor *descriptor = [MTLComputePassDescriptor computePassDescriptor];
+                descriptor.sampleBufferAttachments[0].sampleBuffer = m_profileBuf;
+                descriptor.sampleBufferAttachments[0].startOfEncoderSampleIndex = index;
+                descriptor.sampleBufferAttachments[0].endOfEncoderSampleIndex = index + 1;
+                m_encoder = [m_cmdBuf computeCommandEncoderWithDescriptor:descriptor];
+                m_profileEncoders.emplace_back(m_profileKind, index);
+            } else {
+                m_encoder = [m_cmdBuf computeCommandEncoder];
+            }
             // Metal doesn't necessarily know that a texture made from a buffer and the buffer are the same memory, and
             // runs encoders that don't seem to depend on each other at the same time. The shaders use the same memory
             // both ways (atomics on the buffer, reads and writes through the texture), so make every encoder wait for
@@ -1230,6 +1342,7 @@ private:
 
     /// Submits the work recorded so far and waits for it, to make room in the arena
     void DrainArena() {
+        m_profileDrained = true;
         EndEncoder();
         [m_cmdBuf commit];
         [m_cmdBuf waitUntilCompleted];
