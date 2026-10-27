@@ -1,6 +1,9 @@
 #include "vdp2_common_params.hlsli"
 #include "vdp2_render_params_layer.hlsli"
 #include "vdp2_render_params_rotation.hlsli"
+#ifdef HR_SPRITE
+#include "vdp2_compose_params.hlsli"
+#endif
 
 #include "vdp2_defs.hlsli"
 
@@ -18,10 +21,15 @@ StructuredBuffer<RotParamBase> g_rotParamBases : register(t4);
 ByteAddressBuffer g_spriteFB : register(t5);
 #ifdef HR_SPRITE
 ByteAddressBuffer g_spriteFBNative : register(t6); // the native framebuffers, for telling which pixels changed
+StructuredBuffer<ComposeParams> g_composeParams : register(t7);
+Texture2DArray<uint4> g_layerIn : register(t8); // the other layers (the same texture as g_layerOut)
 #endif
 
 RWTexture2DArray<uint4> g_layerOut : register(u1);
 RWTexture2DArray<uint> g_spriteAttrsOut : register(u2);
+#ifdef HR_SPRITE
+RWTexture2D<float4> g_compositeOut : register(u3); // the scaled up image
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Parameters
@@ -546,6 +554,44 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
 
 // TODO: 32 threads might be suboptimal on AMD GPUs
 #ifdef HR_SPRITE
+// When the sprite pixel ends up as the topmost pixel of the composed image as it is (no color calculation or color
+// offset for the sprite layer, not a shadow, and at least the priority of every other layer), the composed pixel is the
+// sprite pixel and the composition pass is not needed for it. Sets the flag the composition pass checks and writes
+// the pixel in that case.
+void HRFastCompose(SpriteOutput output, uint2 outCoord) {
+    bool done = false;
+    const uint priority = BitExtract(output.layer.a, 0, 3);
+    if (BitTest(g_commonParams.displayParams, 0) && BitTest(g_commonParams.layerParams, 0) && priority > 0 &&
+        output.special == kSpriteDataNormal && !BitTest(g_composeParams[0].colorCalcEnable, 0) &&
+        !BitTest(g_composeParams[0].colorOffsetEnable, 0) && !BitTest(g_commonParams.enhancements, 1)) {
+        // The other layers: RBG0, NBG0 or RBG1, NBG1, NBG2, NBG3
+        uint maxOtherPriority = 0;
+        for (uint layer = 1; layer < 6; layer++) {
+            if (!BitTest(g_commonParams.layerParams, layer)) {
+                continue;
+            }
+            uint bgLayer;
+            switch (layer) {
+                case 1: bgLayer = 4; break;
+                case 2: bgLayer = BitTest(g_commonParams.layerParams, 5 + 6) ? 5 : 0; break;
+                case 3: bgLayer = 1; break;
+                case 4: bgLayer = 2; break;
+                default: bgLayer = 3; break;
+            }
+            maxOtherPriority = max(maxOtherPriority, BitExtract(g_layerIn[uint3(outCoord, bgLayer)].a, 0, 3));
+        }
+        if (priority >= maxOtherPriority) {
+            uint3 color = output.layer.rgb;
+            if (!useSpriteWindow && output.shadowOrWindow) {
+                color >>= 1;
+            }
+            g_compositeOut[outCoord * hrScale + uint2(hrPlane % hrScale, hrPlane / hrScale)] = float4(color / 255.0, 1.0f);
+            done = true;
+        }
+    }
+    g_spriteAttrsOut[uint3(outCoord, 1)] = done ? 1 : 0;
+}
+
 // Whether the sprite data of the pixel in this plane differs from the native sprite data. Pixels that don't come out
 // the same as the native image, which is composed already, so they are skipped.
 bool HRPixelDiffers(uint2 pos) {
@@ -569,6 +615,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 #endif
     const uint2 outCoord = uint2(drawCoord.x, GetY(drawCoord.y));
     const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, id.z);
+#ifdef HR_SPRITE
+    HRFastCompose(output, outCoord);
+#endif
     g_layerOut[uint3(outCoord.xy, id.z + 6)] = output.layer;
     g_spriteAttrsOut[uint3(outCoord.xy, id.z)] =
         output.colorCalcRatio |
