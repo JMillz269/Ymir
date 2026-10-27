@@ -358,6 +358,7 @@ public:
         [cmdBuf commit];
         [cmdBuf waitUntilCompleted];
 
+        m_debugClearCheck = DiagnosticSwitch("metal-vdp-compare");
         m_vdp1Enabled = true;
         return true;
     }
@@ -432,6 +433,16 @@ public:
                       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
             Vdp1Barrier();
             EndEncoder();
+
+            if (m_debugClearCheck && m_logClearChecks < 40) {
+                ++m_logClearChecks;
+                uint32 heads, out, firstIndex, firstValue;
+                Vdp1DebugPixelBuffers(heads, out, firstIndex, firstValue);
+                LogMessage("after merge (shade %u, merge %u): %u fragment list heads and %u sprite outputs left over "
+                           "(first head: pixel %u -> %08X)",
+                           params.shadingMode, params.mergeMode, heads, out, firstIndex, firstValue);
+                EndEncoder();
+            }
 
             // The merger clears what it has used, but make sure of it: reset the part of the pixel buffer that a
             // pixel of the framebuffer can have an entry in. (A fragment list left behind would be added to the next
@@ -708,6 +719,8 @@ private:
     uint32 m_logDraws = 0;
     uint32 m_logDownloads = 0;
     uint32 m_logErases = 0;
+    uint32 m_logClearChecks = 0;
+    bool m_debugClearCheck = false;
     std::array<uint32, 4> m_logDrawsByMode{};
     uint32 m_logFrames = 0;
     std::array<Pipeline, 4> m_polyDraw;
