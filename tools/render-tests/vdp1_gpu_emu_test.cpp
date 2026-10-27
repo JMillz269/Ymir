@@ -701,36 +701,46 @@ struct EmuGpu final : metal::Gpu {
     }
 
     // ---- Output merger ----
+    static Color555x HalfBlendOne(Color555x finalColor, uint32 data) {
+        Color555x fc = Uint16ToColor555(data);
+        if (finalColor.a != 0) {
+            finalColor.r = (finalColor.r + fc.r) >> 1u;
+            finalColor.g = (finalColor.g + fc.g) >> 1u;
+            finalColor.b = (finalColor.b + fc.b) >> 1u;
+            return finalColor;
+        }
+        return fc;
+    }
     uint32 HalfTransparentBlend(uint32 baseColor, uint32 listHead) {
         if (listHead == 0xFFFFFFFF) {
             return baseColor;
         }
-        Frag f[32];
-        uint32 count = 0;
-        uint32 curr = listHead;
-        while (curr != 0xFFFFFFFF && count < 32) {
-            f[count++] = frags[curr];
-            curr = f[count - 1].next;
-        }
-        for (uint32 i = 1; i < count; ++i) {
-            Frag key = f[i];
-            int j = i - 1;
-            while (j >= 0 && BitExtract(f[j].data, 16, 16) < BitExtract(key.data, 16, 16)) {
-                f[j + 1] = f[j];
-                j--;
-            }
-            f[j + 1] = key;
-        }
         Color555x finalColor = Uint16ToColor555(baseColor);
-        for (uint32 n = 0; n < count; ++n) {
-            Color555x fc = Uint16ToColor555(f[std::getenv("NEWEST_FIRST") ? n : count - 1 - n].data);
-            if (finalColor.a != 0) {
-                finalColor.r = (finalColor.r + fc.r) >> 1u;
-                finalColor.g = (finalColor.g + fc.g) >> 1u;
-                finalColor.b = (finalColor.b + fc.b) >> 1u;
-            } else {
-                finalColor = fc;
+        if (frags[listHead].next == 0xFFFFFFFF) {
+            return Color555ToUint16(HalfBlendOne(finalColor, frags[listHead].data));
+        }
+        uint32 lastSeq = 0, lastNode = 0;
+        for (uint32 round = 0; round < 32; ++round) {
+            uint32 bestNode = 0xFFFFFFFF, bestSeq = 0, bestData = 0;
+            uint32 curr = listHead;
+            for (uint32 visited = 0; curr != 0xFFFFFFFF && visited < 32; ++visited) {
+                const Frag &frag = frags[curr];
+                const uint32 seq = BitExtract(frag.data, 16, 16);
+                const bool after = seq > lastSeq || (seq == lastSeq && curr > lastNode);
+                const bool better = bestNode == 0xFFFFFFFF || seq < bestSeq || (seq == bestSeq && curr < bestNode);
+                if (after && better) {
+                    bestNode = curr;
+                    bestSeq = seq;
+                    bestData = frag.data;
+                }
+                curr = frag.next;
             }
+            if (bestNode == 0xFFFFFFFF) {
+                break;
+            }
+            finalColor = HalfBlendOne(finalColor, bestData);
+            lastSeq = bestSeq;
+            lastNode = bestNode;
         }
         return Color555ToUint16(finalColor);
     }

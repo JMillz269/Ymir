@@ -286,51 +286,59 @@ void Merge16(uint2 pos, uint field) {
 // ----------------------------------------------------------------------------
 // OIT (Half-Transparency)
 
+uint4 HalfTransparentBlendOne(uint4 finalColor, uint fragmentData) {
+    const uint4 fragColor = Uint16ToColor555(fragmentData);
+    if (finalColor.a != 0) {
+        finalColor.rgb = (finalColor.rgb + fragColor.rgb) >> 1u;
+        return finalColor;
+    }
+    return fragColor;
+}
+
 uint HalfTransparentBlend(uint baseColor, uint listHead) {
     // Early exit if nothing was written to the pixel
     if (listHead == 0xFFFFFFFF) {
         return baseColor;
     }
 
-    // Collect fragments (the sequence number and the color are all that is needed of them)
-    // TODO: what if the cap is exceeded?
-    uint frags[32];
-    uint count = 0;
-    uint curr = listHead;
-    while (curr != 0xFFFFFFFF && count < 32) {
-        const OITFragment frag = g_fragments[curr];
-        frags[count] = frag.data;
-        ++count;
-        curr = frag.next;
-    }
-
-    // Sort by sequence number in descending order (latest to oldest)
-    // NOTE: written so that the array is never accessed out of range, not even in a condition that doesn't matter
-    // because of an earlier part of it. HLSL doesn't short-circuit && and some compilers (Metal's) take an access out of
-    // range to mean that the index can't be, and drop the check that would have prevented it.
-    for (uint i = 1; i < count; ++i) {
-        const uint key = frags[i];
-        const uint keySeq = BitExtract(key, 16, 16);
-        uint j = i;
-        while (j > 0) {
-            if (BitExtract(frags[j - 1], 16, 16) >= keySeq) {
-                break;
-            }
-            frags[j] = frags[j - 1];
-            --j;
-        }
-        frags[j] = key;
-    }
-
-    // Blend colors, starting from the oldest fragment (the last one), as the pixels would have been drawn
     uint4 finalColor = Uint16ToColor555(baseColor);
-    for (uint n = 0; n < count; ++n) {
-        uint4 fragColor = Uint16ToColor555(frags[count - 1 - n]);
-        if (finalColor.a != 0) {
-            finalColor.rgb = (finalColor.rgb + fragColor.rgb) >> 1u;
-        } else {
-            finalColor = fragColor;
+
+    // Most pixels have a single fragment
+    const OITFragment firstFrag = g_fragments[listHead];
+    if (firstFrag.next == 0xFFFFFFFF) {
+        return Color555ToUint16(HalfTransparentBlendOne(finalColor, firstFrag.data));
+    }
+
+    // Blend the fragments from the oldest to the latest, as the pixels would have been drawn: by sequence number, and
+    // by slot (which follows the order of the pixels in the span) when they have the same one. The fragments are not
+    // copied and sorted, which needs an array per thread that the GPU keeps in slow memory; each round looks through
+    // the list for the next fragment instead.
+    // TODO: what if the cap is exceeded?
+    uint lastSeq = 0;
+    uint lastNode = 0;
+    for (uint round = 0; round < 32; ++round) {
+        uint bestNode = 0xFFFFFFFF;
+        uint bestSeq = 0;
+        uint bestData = 0;
+        uint curr = listHead;
+        for (uint visited = 0; curr != 0xFFFFFFFF && visited < 32; ++visited) {
+            const OITFragment frag = g_fragments[curr];
+            const uint seq = BitExtract(frag.data, 16, 16);
+            const bool after = seq > lastSeq || (seq == lastSeq && curr > lastNode);
+            const bool better = bestNode == 0xFFFFFFFF || seq < bestSeq || (seq == bestSeq && curr < bestNode);
+            if (after && better) {
+                bestNode = curr;
+                bestSeq = seq;
+                bestData = frag.data;
+            }
+            curr = frag.next;
         }
+        if (bestNode == 0xFFFFFFFF) {
+            break;
+        }
+        finalColor = HalfTransparentBlendOne(finalColor, bestData);
+        lastSeq = bestSeq;
+        lastNode = bestNode;
     }
 
     return Color555ToUint16(finalColor);
