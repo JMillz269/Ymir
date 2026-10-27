@@ -19,6 +19,14 @@ Texture2D<uint> g_colorCalcWindowIn : register(t6);
 
 RWTexture2D<float4> g_compositeOut : register(u1);
 
+#ifdef HR_COMPOSE
+// Internal resolution variant inputs: the scaled up and native VDP1 framebuffers (to tell which pixels of the plane
+// differ from the native image) and the native image, composed already
+ByteAddressBuffer g_spriteFB : register(t7);
+ByteAddressBuffer g_spriteFBNative : register(t8);
+Texture2D<float4> g_compositeNative : register(t9);
+#endif
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Definitions
 
@@ -484,14 +492,37 @@ uint3 Compose(uint2 basePos) {
 void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
     const uint2 outCoord = uint2(drawCoord.x, GetOutputY(drawCoord.y));
-    const uint3 outColor = Compose(drawCoord);
 #ifdef HR_COMPOSE
     // Internal resolution variant: the output is scaled up and this is one of the sub-pixels of every pixel
     const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
     const uint hrPlane = BitExtract(g_commonParams.enhancements, 5, 4);
-    g_compositeOut[outCoord * hrScale + uint2(hrPlane % hrScale, hrPlane / hrScale)] = float4(outColor / 255.0, 1.0f);
+    const uint2 hrOutCoord = outCoord * hrScale + uint2(hrPlane % hrScale, hrPlane / hrScale);
+
+    // Pixels with the same sprite data as the native image come out the same as the native image
+    bool differs = true;
+    if (!BitTest(g_commonParams.spriteParams, 0) && !BitTest(g_commonParams.spriteParams, 8) &&
+        !BitTest(g_commonParams.spriteParams, 9) && !BitTest(g_commonParams.enhancements, 0)) {
+        const uint fbWidth = 512u << BitExtract(g_commonParams.spriteParams, 6, 1);
+        const uint address = (drawCoord.x + drawCoord.y * fbWidth) * 2;
+        const uint displayFB = BitExtract(g_commonParams.spriteParams, 23, 1);
+        const uint nativeAddress = address + displayFB * kVDP1FBRAMSize;
+        const uint nativeWord = ByteSwap16(g_spriteFBNative.Load(nativeAddress & ~3) >> ((nativeAddress & 2) * 8));
+        // (the same pixel of this plane in the scaled up framebuffer)
+        const uint hrX = drawCoord.x * hrScale + hrPlane % hrScale;
+        const uint hrY = drawCoord.y * hrScale + hrPlane / hrScale;
+        const uint hrAddress = displayFB * kVDP1FBRAMSize * hrScale * hrScale + (hrY * fbWidth * hrScale + hrX) * 2;
+        const uint hrWord = ByteSwap16(g_spriteFB.Load(hrAddress & ~3) >> ((hrAddress & 2) * 8));
+        differs = nativeWord != hrWord;
+    }
+    if (!differs) {
+        g_compositeOut[hrOutCoord] = g_compositeNative[outCoord];
+        return;
+    }
+    const uint3 hrColor = Compose(drawCoord);
+    g_compositeOut[hrOutCoord] = float4(hrColor / 255.0, 1.0f);
     return;
 #endif
+    const uint3 outColor = Compose(drawCoord);
     g_compositeOut[outCoord] = float4(outColor / 255.0, 1.0f);
     if (firstInterlacedFrame && !deinterlace && IsInterlaced()) {
         g_compositeOut[uint2(outCoord.x, outCoord.y ^ 1u)] = float4(outColor / 255.0, 1.0f);

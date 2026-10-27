@@ -282,8 +282,7 @@ struct EmuGpu final : metal::Gpu {
     void UploadSpriteFB(uint32, const void *, uint32) override {}
     void RenderLayers(const metal::LayerPassParams &) override {}
     void Compose(const metal::ComposePassParams &) override {}
-    void RenderSpriteHR(const metal::LayerPassParams &) override {}
-    void ComposeHR(const metal::ComposePassParams &) override {}
+    void ComposeHR(const metal::LayerPassParams &, const metal::ComposePassParams &, uint32, uint32) override {}
     metal::FinishedFrame FinishFrame(uint32, uint32, uint32) override {
         return {};
     }
@@ -862,7 +861,7 @@ struct EmuGpu final : metal::Gpu {
         if (shading != 3) {
             for (uint32 y = 0; y < p.mergeHeight; ++y) {
                 for (uint32 x = 0; x < p.mergeWidth; ++x) {
-                    MergeThread(x, y, p.mergeMode);
+                    MergeThread(x + common.mergeOriginX, y + common.mergeOriginY, p.mergeMode);
                 }
             }
         }

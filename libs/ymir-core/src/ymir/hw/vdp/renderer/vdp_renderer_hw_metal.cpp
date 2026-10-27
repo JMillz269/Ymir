@@ -1080,23 +1080,15 @@ struct MetalVDPRenderer::Impl {
         pass.hres = HRes;
         pass.numLines = numLines;
 
-        if (!hrFrame) {
-            gpu->Compose(pass);
-            return;
+        gpu->Compose(pass);
+        if (hrFrame) {
+            // The scaled up image is the native one where the sprite data didn't change, and composed again for each
+            // sub-pixel where it did: the layers are the same for all of them (drawn at the native resolution) but for
+            // the sprite layer, which is drawn again from the scaled up VDP1 framebuffer
+            const metal::LayerPassParams layerPass = MakeLayerPass(numLines);
+            gpu->ComposeHR(layerPass, pass, hrFrameScale,
+                           static_cast<uint32>(offsetof(VDP2CommonRenderParams, enhancements)));
         }
-
-        // Compose the lines once for every sub-pixel of the scaled up image: the layers are the same for all of them
-        // (drawn at the native resolution) but for the sprite layer, which is drawn again from the scaled up VDP1
-        // framebuffer for each sub-pixel
-        const metal::LayerPassParams layerPass = MakeLayerPass(numLines);
-        cpuCommonRenderParams.enhancements.vdp1Scale = hrFrameScale - 1;
-        for (uint32 plane = 0; plane < hrFrameScale * hrFrameScale; ++plane) {
-            cpuCommonRenderParams.enhancements.hrPlane = plane;
-            gpu->RenderSpriteHR(layerPass);
-            gpu->ComposeHR(pass);
-        }
-        cpuCommonRenderParams.enhancements.vdp1Scale = 0;
-        cpuCommonRenderParams.enhancements.hrPlane = 0;
     }
 
     void VDP2RenderLine(uint32 y) {

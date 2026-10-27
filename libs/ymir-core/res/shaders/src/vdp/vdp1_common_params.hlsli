@@ -6,6 +6,7 @@
 struct CommonRenderParams {
     uint displayParams;
     uint enhancements;
+    uint2 mergeOrigin;
 };
 
 #endif

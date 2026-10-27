@@ -16,6 +16,9 @@ ByteAddressBuffer g_vram : register(t2);
 Buffer<uint4> g_cramColor : register(t3);
 StructuredBuffer<RotParamBase> g_rotParamBases : register(t4);
 ByteAddressBuffer g_spriteFB : register(t5);
+#ifdef HR_SPRITE
+ByteAddressBuffer g_spriteFBNative : register(t6); // the native framebuffers, for telling which pixels changed
+#endif
 
 RWTexture2DArray<uint4> g_layerOut : register(u1);
 RWTexture2DArray<uint> g_spriteAttrsOut : register(u2);
@@ -542,9 +545,28 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
 // Entrypoint
 
 // TODO: 32 threads might be suboptimal on AMD GPUs
+#ifdef HR_SPRITE
+// Whether the sprite data of the pixel in this plane differs from the native sprite data. Pixels that don't come out
+// the same as the native image, which is composed already, so they are skipped.
+bool HRPixelDiffers(uint2 pos) {
+    if (rotate || inHalfResH || outHalfResH || deinterlace) {
+        return true;
+    }
+    const uint address = (pos.x + pos.y * fbSize.x) * 2;
+    const uint nativeAddress = address + kSpriteFBBaseOffset;
+    const uint nativeWord = ByteSwap16(g_spriteFBNative.Load(nativeAddress & ~3) >> ((nativeAddress & 2) * 8));
+    return nativeWord != ReadSprite16(address, 0);
+}
+#endif
+
 [numthreads(32, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
+#ifdef HR_SPRITE
+    if (!HRPixelDiffers(drawCoord)) {
+        return;
+    }
+#endif
     const uint2 outCoord = uint2(drawCoord.x, GetY(drawCoord.y));
     const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, id.z);
     g_layerOut[uint3(outCoord.xy, id.z + 6)] = output.layer;

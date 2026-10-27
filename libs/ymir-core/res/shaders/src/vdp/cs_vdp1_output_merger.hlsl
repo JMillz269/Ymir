@@ -385,9 +385,10 @@ void Merge16(uint2 pos, uint field) {
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
+    const uint2 pos = id.xy + g_commonParams.mergeOrigin;
     if (pixel8Bits) {
-        Merge8(id.xy, id.z);
+        Merge8(pos, id.z);
     } else {
-        Merge16(id.xy, id.z);
+        Merge16(pos, id.z);
     }
 }

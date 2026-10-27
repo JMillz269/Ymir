@@ -130,6 +130,11 @@ struct alignas(16) VDP1CommonRenderParams {
     static_assert(sizeof(DisplayParams) == sizeof(HLSLuint));
 
     EnhancementsParams enhancements;
+
+    // First thread of the output merger dispatch, in units of the dispatch (a thread works on two or four pixels of a
+    // row). Lets the dispatch cover only the area that was drawn to.
+    HLSLuint mergeOriginX;
+    HLSLuint mergeOriginY;
 };
 
 /// @brief VDP1 erase parameters, appended to common rendering parameters in the erase shader.

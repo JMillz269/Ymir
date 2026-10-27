@@ -178,14 +178,16 @@ public:
     /// @brief Composes the layers drawn so far into the output image for the lines in `params`.
     virtual void Compose(const ComposePassParams &params) = 0;
 
-    /// @brief Internal resolution: draws the sprite layer for the lines in `params` again, from the scaled up VDP1
-    /// framebuffers, for one of the sub-pixels of every pixel (the plane the common parameters name). Replaces the
-    /// sprite layer drawn by `RenderLayers`.
-    virtual void RenderSpriteHR(const LayerPassParams &params) = 0;
-
-    /// @brief Internal resolution: composes the layers (the sprite layer as drawn by `RenderSpriteHR`) into the sub-pixels
-    /// of the plane the common parameters name of the scaled up output image.
-    virtual void ComposeHR(const ComposePassParams &params) = 0;
+    /// @brief Internal resolution: fills the scaled up output image for the lines in `layers` and `compose` (the same
+    /// lines, with the layers drawn and the lines composed at the native resolution already). For every sub-pixel
+    /// plane of the pixels (`scale * scale` of them) the pixels whose sprite data in the scaled up VDP1 framebuffer
+    /// differs from the native one are drawn again (their sprite layer) and composed; the others are copied from the
+    /// native image.
+    /// @param[in] scale the internal resolution scale
+    /// @param[in] enhancementsOffset where the enhancements word is in the common parameters; the scale and the plane
+    /// are set there for each plane
+    virtual void ComposeHR(const LayerPassParams &layers, const ComposePassParams &compose, uint32 scale,
+                           uint32 enhancementsOffset) = 0;
 
     /// @brief Ends the frame: copies the composed image out of the GPU and submits everything.
     /// @param[in] width the width of the image

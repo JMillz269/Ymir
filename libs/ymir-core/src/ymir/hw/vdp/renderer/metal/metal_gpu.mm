@@ -96,6 +96,8 @@ namespace {
         Vdp1Counter,
         Fbram,
         FbramNative,
+        SpriteFBNative,
+        CompositeNative,
     };
 
     Res ResourceForName(NSString *name) {
@@ -133,6 +135,8 @@ namespace {
             {"g_counter", Res::Vdp1Counter},
             {"g_fbramOut", Res::Fbram},
             {"g_fbramNative", Res::FbramNative},
+            {"g_spriteFBNative", Res::SpriteFBNative},
+            {"g_compositeNative", Res::CompositeNative},
         };
         for (const Entry &entry : kEntries) {
             if ([name isEqualToString:[NSString stringWithUTF8String:entry.name]]) {
@@ -777,12 +781,6 @@ public:
         RenderLayersPass(params, false);
     }
 
-    void RenderSpriteHR(const LayerPassParams &params) override {
-        if (m_compositeHR != nil) {
-            RenderLayersPass(params, true);
-        }
-    }
-
     /// Draws the sprite layer, and the background layers unless drawing for the internal resolution (where the
     /// sprite layer is drawn again from the scaled up framebuffers)
     void RenderLayersPass(const LayerPassParams &params, bool hr) {
@@ -828,9 +826,55 @@ public:
         ComposePass(params, false);
     }
 
-    void ComposeHR(const ComposePassParams &params) override {
-        if (m_compositeHR != nil) {
-            ComposePass(params, true);
+    void ComposeHR(const LayerPassParams &layers, const ComposePassParams &compose, uint32 scale,
+                   uint32 enhancementsOffset) override {
+        if (m_compositeHR == nil || layers.numLines == 0 || compose.numLines == 0 || scale < 2 || scale > kMaxHRScale ||
+            enhancementsOffset + sizeof(uint32) > layers.commonSize) {
+            return;
+        }
+        EnsureFrame();
+
+        std::vector<uint8> common(static_cast<const uint8 *>(layers.common),
+                                  static_cast<const uint8 *>(layers.common) + layers.commonSize);
+        uint32 enhancements;
+        std::memcpy(&enhancements, &common[enhancementsOffset], sizeof(enhancements));
+        enhancements &= ~((7u << 2) | (15u << 5));
+        enhancements |= (scale - 1) << 2;
+
+        // (everything but the common parameters is staged once, again if the arena is emptied to make room)
+        Staged staged{};
+        uint64 othersGeneration = ~0ull;
+        for (uint32 plane = 0; plane < scale * scale; ++plane) {
+            const uint32 planeEnhancements = enhancements | (plane << 5);
+            std::memcpy(&common[enhancementsOffset], &planeEnhancements, sizeof(planeEnhancements));
+            uint64 generation;
+            do {
+                generation = m_arenaGeneration;
+                if (othersGeneration != generation) {
+                    staged.layerParams = Stage(m_blobLayerParams, layers.layerParams, layers.layerParamsSize);
+                    staged.cramColor = StageTexels(m_blobCramColor, layers.cramColors, layers.cramColorsSize,
+                                                   MTLPixelFormatRGBA8Uint);
+                    staged.cramRotCoeff = Stage(m_blobCramRot, layers.cramRotCoeffs, layers.cramRotCoeffsSize);
+                    staged.rotParamBases = Stage(m_blobRotBases, layers.rotParamBases, layers.rotParamBasesSize);
+                    staged.composeParams = Stage(m_blobCompose, compose.composeParams, compose.composeParamsSize);
+                    staged.lnclBack =
+                        StageTexels(m_blobLnclBack, compose.lnclBack, compose.lnclBackSize, MTLPixelFormatRGBA8Uint);
+                    othersGeneration = m_arenaGeneration;
+                }
+                staged.common = Stage(m_blobCommon, common.data(), layers.commonSize);
+            } while (generation != m_arenaGeneration);
+            EnsureCompute();
+
+            m_bindHR = true;
+            [m_encoder setComputePipelineState:m_hrSprite.state];
+            Bind(m_hrSprite, staged);
+            [m_encoder dispatchThreadgroups:MTLSizeMake((layers.hres + 31) / 32, layers.numLines, 1)
+                      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [m_encoder setComputePipelineState:m_hrCompose.state];
+            Bind(m_hrCompose, staged);
+            [m_encoder dispatchThreadgroups:MTLSizeMake((compose.hres + 31) / 32, compose.numLines, 1)
+                      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            m_bindHR = false;
         }
     }
 
@@ -1277,6 +1321,8 @@ private:
             case Res::SpriteFB: buffer = m_bindHR ? m_fbramHR : m_fbram; break;
             case Res::Fbram: buffer = (m_bindHR && pipeline.vdp1) ? m_fbramHR : m_fbram; break;
             case Res::FbramNative: buffer = m_fbram; break;
+            case Res::SpriteFBNative: buffer = m_fbram; break;
+            case Res::CompositeNative: texture = m_composite; break;
             case Res::Vdp1Spans: blob = staged.v1Spans; break;
             case Res::Vdp1PrefixSums: blob = staged.v1PrefixSums; break;
             case Res::Vdp1Commands: blob = staged.v1Commands; break;

@@ -67,6 +67,8 @@ public:
         m_hrBatch.cpuSpanCount = 0;
         m_hrBatch.cpuCmdCount = 0;
         m_hrBatch.cpuSpanPrefixSums[0] = 0;
+        m_batch.ResetBounds();
+        m_hrBatch.ResetBounds();
         m_hrValid.fill(false);
         m_hrPass = false;
 
@@ -247,6 +249,14 @@ private:
         std::vector<VDP1CommandParams> cpuCmdParams;
         uint32 cpuSpanCount = 0;
         uint32 cpuCmdCount = 0;
+
+        /// Area the spans draw to (the pixels, including the ones antialiasing adds)
+        sint32 minX = INT32_MAX, minY = INT32_MAX, maxX = INT32_MIN, maxY = INT32_MIN;
+
+        void ResetBounds() {
+            minX = minY = INT32_MAX;
+            maxX = maxY = INT32_MIN;
+        }
     } m_batch;
 
     /// @brief The same for the scaled up framebuffer (internal resolution above 1x only).
@@ -686,6 +696,28 @@ private:
         pass.numPixels = batch.cpuSpanPrefixSums[batch.cpuSpanCount];
         pass.mergeWidth = regs1.tvmr.fbSizeH * scale / pixelsPerEntry;
         pass.mergeHeight = regs1.tvmr.fbSizeV * scale;
+        if (hr) {
+            // The scaled up framebuffer is large and its pixels don't wrap around, so only merge the area drawn to
+            // (pixels, antialiasing adds one more around the line)
+            const sint32 fbW = static_cast<sint32>(regs1.tvmr.fbSizeH * scale);
+            const sint32 fbH = static_cast<sint32>(regs1.tvmr.fbSizeV * scale);
+            const sint32 x0 = std::clamp(batch.minX - 1, 0, fbW - 1);
+            const sint32 x1 = std::clamp(batch.maxX + 1, 0, fbW - 1);
+            const sint32 y0 = std::clamp(batch.minY - 1, 0, fbH - 1);
+            const sint32 y1 = std::clamp(batch.maxY + 1, 0, fbH - 1);
+            if (x1 < x0 || y1 < y0) {
+                batch.cpuSpanCount = 0;
+                batch.cpuCmdCount = 0;
+                batch.ResetBounds();
+                return;
+            }
+            const sint32 entryX0 = x0 / static_cast<sint32>(pixelsPerEntry);
+            const sint32 entryX1 = x1 / static_cast<sint32>(pixelsPerEntry);
+            constants.common.mergeOriginX = entryX0;
+            constants.common.mergeOriginY = y0;
+            pass.mergeWidth = entryX1 - entryX0 + 1;
+            pass.mergeHeight = y1 - y0 + 1;
+        }
         pass.hr = hr;
         gpu.Vdp1Draw(pass);
 
@@ -693,6 +725,7 @@ private:
 
         batch.cpuSpanCount = 0;
         batch.cpuCmdCount = 0;
+        batch.ResetBounds();
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -882,6 +915,11 @@ private:
             spanParams.attrs.flipH = data.flipH;
             spanParams.attrs.endCodeIndex = data.endCodeIndex;
         }
+
+        batch.minX = std::min({batch.minX, x0, x1});
+        batch.maxX = std::max({batch.maxX, x0, x1});
+        batch.minY = std::min({batch.minY, y0, y1});
+        batch.maxY = std::max({batch.maxY, y0, y1});
 
         // Update prefix sum
         HLSLuint &nextSum = batch.cpuSpanPrefixSums[batch.cpuSpanCount + 1];
