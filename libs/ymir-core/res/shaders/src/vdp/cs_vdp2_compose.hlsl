@@ -20,11 +20,10 @@ Texture2D<uint> g_colorCalcWindowIn : register(t6);
 RWTexture2D<float4> g_compositeOut : register(u1);
 
 #ifdef HR_COMPOSE
-// Internal resolution variant inputs: the scaled up and native VDP1 framebuffers (to tell which pixels of the plane
-// differ from the native image) and the native image, composed already
+// Internal resolution variant inputs: the scaled up and native VDP1 framebuffers, to tell which pixels of the plane
+// differ from the native image (the output has been filled with the native image already)
 ByteAddressBuffer g_spriteFB : register(t7);
 ByteAddressBuffer g_spriteFBNative : register(t8);
-Texture2D<float4> g_compositeNative : register(t9);
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -515,7 +514,6 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         differs = nativeWord != hrWord;
     }
     if (!differs) {
-        g_compositeOut[hrOutCoord] = g_compositeNative[outCoord];
         return;
     }
     const uint3 hrColor = Compose(drawCoord);

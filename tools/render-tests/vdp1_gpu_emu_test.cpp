@@ -282,7 +282,8 @@ struct EmuGpu final : metal::Gpu {
     void UploadSpriteFB(uint32, const void *, uint32) override {}
     void RenderLayers(const metal::LayerPassParams &) override {}
     void Compose(const metal::ComposePassParams &) override {}
-    void ComposeHR(const metal::LayerPassParams &, const metal::ComposePassParams &, uint32, uint32) override {}
+    void ComposeHR(const metal::LayerPassParams &, const metal::ComposePassParams &, uint32, uint32, uint32, uint32,
+                   uint32) override {}
     metal::FinishedFrame FinishFrame(uint32, uint32, uint32) override {
         return {};
     }
@@ -328,22 +329,19 @@ struct EmuGpu final : metal::Gpu {
             uint32 word;
             std::memcpy(&word, &fbram[drawFB * 256 * 1024 + id * 4], 4);
             const uint32 nx = (id * 2) & 511, ny = (id * 2) >> 9;
-            for (uint32 px = 0; px < 2; ++px) {
-                const uint32 raw = BitExtract(word, px * 16, 16);
-                for (uint32 dy = 0; dy < hrScale; ++dy) {
-                    for (uint32 dx = 0; dx < hrScale; ++dx) {
-                        const uint32 address = drawFB * 256 * 1024 * hrScale * hrScale +
-                                               ((ny * hrScale + dy) * 512 * hrScale + (nx + px) * hrScale + dx) * 2;
-                        const uint32 shift = (address & 2) * 8;
-                        uint32 w = FbLoad(address & ~3u);
-                        w &= ~(0xFFFFu << shift);
-                        w |= raw << shift;
-                        FbStore(address & ~3u, w);
-                    }
+            const uint32 raw0 = BitExtract(word, 0, 16), raw1 = BitExtract(word, 16, 16);
+            for (uint32 dy = 0; dy < hrScale; ++dy) {
+                const uint32 rowAddress = drawFB * 256 * 1024 * hrScale * hrScale +
+                                          ((ny * hrScale + dy) * 512 * hrScale + nx * hrScale) * 2;
+                for (uint32 m = 0; m < hrScale; ++m) {
+                    const uint32 lo = (m * 2) < hrScale ? raw0 : raw1;
+                    const uint32 hi = (m * 2 + 1) < hrScale ? raw0 : raw1;
+                    FbStore(rowAddress + m * 4, lo | (hi << 16));
                 }
             }
         }
     }
+
     uint32 ReadVRAM8(uint32 a) const {
         return vram[a & 0x7FFFF];
     }
@@ -1105,6 +1103,26 @@ int main(int argc, char **argv) {
                         hminy = std::min(hminy, y);
                         hmaxy = std::max(hmaxy, y);
                     }
+                }
+            }
+            // Every line where the scaled up framebuffer is not the native one scaled up has to be one the renderer
+            // reports as changed (VDP2 only composes those again)
+            {
+                uint32 first = 0, last = 0;
+                const bool any = vdp1.HRDirtyLines(fbi, first, last);
+                uint32 outside = 0;
+                for (uint32 y = 0; y < 224 * scale; ++y) {
+                    for (uint32 x = 0; x < 320 * scale; ++x) {
+                        const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * scale * scale + (size_t(y) * stride + x) * 2];
+                        const uint8 *n = &gpu.fbram[fbi * 256 * 1024 + (size_t(y / scale) * 512 + x / scale) * 2];
+                        if (std::memcmp(g, n, 2) != 0 && !(any && y / scale >= first && y / scale <= last)) {
+                            ++outside;
+                        }
+                    }
+                }
+                if (outside) {
+                    std::printf("  %u pixels differ from the native ones scaled up outside the reported lines\n", outside);
+                    ++badFrames;
                 }
             }
             std::printf("  scaled up %ux (%u pixels drawn): %u pixels differ", scale, hfilled, hdiffs);

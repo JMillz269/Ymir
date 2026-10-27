@@ -272,6 +272,11 @@ struct MetalVDPRenderer::Impl {
 
     /// @brief The internal resolution scale from the settings.
     uint32 internalResolution = 1;
+    uint32 statFrames = 0;
+    uint32 statHrFrames = 0;
+    uint32 statHrChunks = 0;
+    uint32 statHrPlaneLines = 0;
+    uint32 statHrLines = 0;
     /// @brief Whether the frame being drawn is composed at a higher resolution, and the scale of it.
     bool hrFrame = false;
     uint32 hrFrameScale = 1;
@@ -1084,10 +1089,26 @@ struct MetalVDPRenderer::Impl {
         if (hrFrame) {
             // The scaled up image is the native one where the sprite data didn't change, and composed again for each
             // sub-pixel where it did: the layers are the same for all of them (drawn at the native resolution) but for
-            // the sprite layer, which is drawn again from the scaled up VDP1 framebuffer
+            // the sprite layer, which is drawn again from the scaled up VDP1 framebuffer. The sprite data can only
+            // differ on the lines VDP1 has drawn to.
+            const uint32 firstLine = cpuCommonRenderParams.startY;
+            const uint32 lastLine = firstLine + numLines - 1;
+            uint32 dirtyFirst, dirtyLast;
+            uint32 planeStart = 0, planeLines = 0;
+            if (vdp1->HRDirtyLines(vdpState.fbIndex.display, dirtyFirst, dirtyLast)) {
+                planeStart = std::max(firstLine, dirtyFirst);
+                const uint32 planeEnd = std::min(lastLine, dirtyLast);
+                if (planeEnd >= planeStart) {
+                    planeLines = planeEnd - planeStart + 1;
+                }
+            }
+            ++statHrChunks;
+            statHrPlaneLines += planeLines;
+            statHrLines += numLines;
             const metal::LayerPassParams layerPass = MakeLayerPass(numLines);
             gpu->ComposeHR(layerPass, pass, hrFrameScale,
-                           static_cast<uint32>(offsetof(VDP2CommonRenderParams, enhancements)));
+                           static_cast<uint32>(offsetof(VDP2CommonRenderParams, enhancements)),
+                           static_cast<uint32>(offsetof(VDP2CommonRenderParams, startY)), planeStart, planeLines);
         }
     }
 
@@ -1133,6 +1154,20 @@ struct MetalVDPRenderer::Impl {
         const uint32 vres = VRes >> vShift;
         VDP2RenderLayerLines(vres - 1);
         VDP2ComposeLines(VRes - 1);
+
+        ++statFrames;
+        statHrFrames += hrFrame ? 1 : 0;
+        if (statFrames % 300 == 0) {
+            MetalVDP1::Stats stats{};
+            if (vdp1) {
+                stats = vdp1->TakeStats();
+            }
+            metal::LogMessage("last 300 frames: %u composed at the internal resolution (%u chunks, %u lines composed "
+                              "again of %u); scaled up framebuffers: %u refills, %u batches, %u CPU write entries",
+                              statHrFrames, statHrChunks, statHrPlaneLines, statHrLines, stats.resyncs, stats.hrBatches,
+                              stats.hrWriteEntries);
+            statHrFrames = statHrChunks = statHrPlaneLines = statHrLines = 0;
+        }
 
         // The image of the previous frame is ready by now; this one follows
         const metal::FinishedFrame finished = gpu->FinishFrame(HRes, VRes, hrFrame ? hrFrameScale : 1);

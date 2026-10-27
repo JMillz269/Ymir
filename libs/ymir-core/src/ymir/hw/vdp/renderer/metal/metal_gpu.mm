@@ -31,6 +31,7 @@ namespace {
     constexpr const char *kHRResyncShaderPath = "src/vdp/cs_vdp1_hr_resync.metallib";
     constexpr const char *kHRSpriteShaderPath = "src/vdp/cs_vdp2_render_sprite_hr.metallib";
     constexpr const char *kHRComposeShaderPath = "src/vdp/cs_vdp2_compose_hr.metallib";
+    constexpr const char *kHRReplicateShaderPath = "src/vdp/cs_vdp2_hr_replicate.metallib";
     /// Largest internal resolution scale
     constexpr uint32 kMaxHRScale = 4;
     // (the variants are named after the mesh mode and the shading or merging mode; only the checkerboard mesh mode is
@@ -403,7 +404,8 @@ public:
         if (!CreatePipeline(kHRFBWriteShaderPath, m_hrFbWrite, error) ||
             !CreatePipeline(kHRResyncShaderPath, m_hrResync, error) ||
             !CreatePipeline(kHRSpriteShaderPath, m_hrSprite, error) ||
-            !CreatePipeline(kHRComposeShaderPath, m_hrCompose, error)) {
+            !CreatePipeline(kHRComposeShaderPath, m_hrCompose, error) ||
+            !CreatePipeline(kHRReplicateShaderPath, m_hrReplicate, error)) {
             return false;
         }
         m_compositeHR = Create2DTexture(MTLPixelFormatRGBA8Unorm, kMaxNormalResH * kMaxHRScale,
@@ -828,9 +830,11 @@ public:
     }
 
     void ComposeHR(const LayerPassParams &layers, const ComposePassParams &compose, uint32 scale,
-                   uint32 enhancementsOffset) override {
+                   uint32 enhancementsOffset, uint32 startYOffset, uint32 planeStartY,
+                   uint32 planeNumLines) override {
         if (m_compositeHR == nil || layers.numLines == 0 || compose.numLines == 0 || scale < 2 || scale > kMaxHRScale ||
-            enhancementsOffset + sizeof(uint32) > layers.commonSize) {
+            enhancementsOffset + sizeof(uint32) > layers.commonSize ||
+            startYOffset + sizeof(uint32) > layers.commonSize) {
             return;
         }
         EnsureFrame();
@@ -841,6 +845,32 @@ public:
         std::memcpy(&enhancements, &common[enhancementsOffset], sizeof(enhancements));
         enhancements &= ~((7u << 2) | (15u << 5));
         enhancements |= (scale - 1) << 2;
+
+        // Fill the lines of the scaled up image with the native image
+        {
+            std::memcpy(&common[enhancementsOffset], &enhancements, sizeof(enhancements));
+            Staged staged{};
+            uint64 generation;
+            do {
+                generation = m_arenaGeneration;
+                staged.common = Stage(m_blobCommon, common.data(), layers.commonSize);
+            } while (generation != m_arenaGeneration);
+            EnsureCompute();
+
+            m_bindHR = true;
+            [m_encoder setComputePipelineState:m_hrReplicate.state];
+            Bind(m_hrReplicate, staged);
+            m_bindHR = false;
+            [m_encoder dispatchThreadgroups:MTLSizeMake((compose.hres * scale + 7) / 8,
+                                                        (compose.numLines * scale + 7) / 8, 1)
+                      threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        }
+        if (planeNumLines == 0) {
+            return;
+        }
+
+        // Compose the lines again for every sub-pixel, where the sprite data changed
+        std::memcpy(&common[startYOffset], &planeStartY, sizeof(planeStartY));
 
         // (everything but the common parameters is staged once, again if the arena is emptied to make room)
         Staged staged{};
@@ -869,11 +899,11 @@ public:
             m_bindHR = true;
             [m_encoder setComputePipelineState:m_hrSprite.state];
             Bind(m_hrSprite, staged);
-            [m_encoder dispatchThreadgroups:MTLSizeMake((layers.hres + 31) / 32, layers.numLines, 1)
+            [m_encoder dispatchThreadgroups:MTLSizeMake((layers.hres + 31) / 32, planeNumLines, 1)
                       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
             [m_encoder setComputePipelineState:m_hrCompose.state];
             Bind(m_hrCompose, staged);
-            [m_encoder dispatchThreadgroups:MTLSizeMake((compose.hres + 31) / 32, compose.numLines, 1)
+            [m_encoder dispatchThreadgroups:MTLSizeMake((compose.hres + 31) / 32, planeNumLines, 1)
                       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
             m_bindHR = false;
         }
@@ -1040,7 +1070,7 @@ private:
     uint32 m_logFrames = 0;
     std::array<Pipeline, 4> m_polyDraw;
     std::array<Pipeline, 3> m_merger;
-    Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrSprite, m_hrCompose;
+    Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrSprite, m_hrCompose, m_hrReplicate;
     id<MTLTexture> m_compositeHR = nil; ///< scaled up output image
     id<MTLBuffer> m_fbramHR = nil; ///< scaled up VDP1 framebuffers (see Vdp1EnableHR)
     id<MTLBuffer> m_hrReadback = nil;

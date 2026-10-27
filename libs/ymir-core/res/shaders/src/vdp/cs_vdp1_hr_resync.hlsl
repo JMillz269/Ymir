@@ -27,18 +27,18 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint nx = (id.x * 2u) & 511u;
     const uint ny = (id.x * 2u) >> 9u;
 
+    // The two pixels cover 2 * scale pixels of every row, starting at an even pixel (the first pixel is at an even
+    // column), so the row is written in whole 32-bit words
+    const uint raw0 = BitExtract(word, 0, 16);
+    const uint raw1 = BitExtract(word, 16, 16);
     const uint rowPixels = 512u * hrScale;
     const uint base = drawFB * kVDP1FBSize * hrScale * hrScale;
-    for (uint p = 0; p < 2; ++p) {
-        const uint raw = BitExtract(word, p * 16u, 16u);
-        for (uint dy = 0; dy < hrScale; ++dy) {
-            for (uint dx = 0; dx < hrScale; ++dx) {
-                const uint address = base + ((ny * hrScale + dy) * rowPixels + (nx + p) * hrScale + dx) * 2u;
-                const uint shift = (address & 2u) * 8u;
-                uint dummy;
-                g_fbramOut.InterlockedAnd(address & ~3u, ~(0xFFFFu << shift), dummy);
-                g_fbramOut.InterlockedOr(address & ~3u, raw << shift, dummy);
-            }
+    for (uint dy = 0; dy < hrScale; ++dy) {
+        const uint rowAddress = base + ((ny * hrScale + dy) * rowPixels + nx * hrScale) * 2u;
+        for (uint m = 0; m < hrScale; ++m) {
+            const uint lo = (m * 2u) < hrScale ? raw0 : raw1;
+            const uint hi = (m * 2u + 1u) < hrScale ? raw0 : raw1;
+            g_fbramOut.Store(rowAddress + m * 4u, lo | (hi << 16u));
         }
     }
 }

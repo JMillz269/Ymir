@@ -70,6 +70,8 @@ public:
         m_batch.ResetBounds();
         m_hrBatch.ResetBounds();
         m_hrValid.fill(false);
+        HRClearDirty(0);
+        HRClearDirty(1);
         m_hrPass = false;
 
         std::memcpy(vramShadow.data(), vdpState.mem1.VRAM.data(), vramShadow.size());
@@ -181,6 +183,29 @@ public:
         return m_hrScale > 1 && m_hrValid[fbIndex] && HRSupportsTVMR();
     }
 
+    /// @brief The lines (native) of the scaled up framebuffer of the given index that may differ from the native
+    /// framebuffer scaled up.
+    /// @return whether there are any
+    bool HRDirtyLines(uint8 fbIndex, uint32 &first, uint32 &last) const {
+        if (m_hrDirtyLast[fbIndex] < m_hrDirtyFirst[fbIndex]) {
+            return false;
+        }
+        first = static_cast<uint32>(m_hrDirtyFirst[fbIndex]);
+        last = static_cast<uint32>(m_hrDirtyLast[fbIndex]);
+        return true;
+    }
+
+    struct Stats {
+        uint32 resyncs = 0;          ///< scaled up framebuffers filled from the native ones
+        uint32 hrBatches = 0;        ///< batches drawn into scaled up framebuffers
+        uint32 hrWriteEntries = 0;   ///< CPU framebuffer writes applied to the scaled up framebuffers
+    };
+    Stats TakeStats() {
+        const Stats stats = m_stats;
+        m_stats = {};
+        return stats;
+    }
+
     void BeginFrame() {
         const VDP1Regs &regs1 = vdpState.regs1;
         const VDP2Regs &regs2 = vdpState.regs2;
@@ -202,6 +227,10 @@ public:
         case VDP1Command::CommandType::DrawLine: {
             // (prepared first as it may need what has been drawn so far)
             const bool replay = m_hrScale > 1 && VDP1HRShouldReplay();
+            if (m_hrScale > 1 && !replay) {
+                // Drawn at the native resolution only, so the scaled up framebuffer no longer follows it
+                m_hrValid[vdpState.fbIndex.draw] = false;
+            }
             m_hrPass = false;
             VDP1DrawCommand(cmdAddress, control);
             if (replay) {
@@ -271,6 +300,16 @@ private:
     bool m_hrFailed = false;
     /// @brief Whether the scaled up framebuffers are in line with the native ones.
     std::array<bool, 2> m_hrValid{};
+    /// @brief Lines (native) of each scaled up framebuffer that drawing may have made differ from the native one
+    /// scaled up (none if last < first)
+    std::array<sint32, 2> m_hrDirtyFirst{INT32_MAX, INT32_MAX};
+    std::array<sint32, 2> m_hrDirtyLast{-1, -1};
+    Stats m_stats{};
+
+    void HRClearDirty(uint8 fbIndex) {
+        m_hrDirtyFirst[fbIndex] = INT32_MAX;
+        m_hrDirtyLast[fbIndex] = -1;
+    }
 
     Batch &ActiveBatch() {
         return m_hrPass ? m_hrBatch : m_batch;
@@ -333,6 +372,8 @@ private:
         if (scale != m_hrScale) {
             m_hrScale = scale;
             m_hrValid.fill(false);
+            HRClearDirty(0);
+            HRClearDirty(1);
         }
     }
 
@@ -359,6 +400,8 @@ private:
             pass.constantsSize = sizeof(params);
             gpu.Vdp1ResyncHR(pass);
             m_hrValid[fbIndex] = true;
+            HRClearDirty(fbIndex);
+            ++m_stats.resyncs;
         }
         return true;
     }
@@ -560,6 +603,7 @@ private:
                 constants.common.enhancements.vdp1Scale = m_hrScale - 1;
                 pass.hr = true;
                 gpu.Vdp1WriteFB(pass);
+                m_stats.hrWriteEntries += pass.count;
             } else {
                 m_hrValid[drawFB] = false;
             }
@@ -636,6 +680,10 @@ private:
         gpu.Vdp1Erase(pass);
 
         if (hrErase) {
+            if (cycles == 0) {
+                // (everything is erased, so the scaled up framebuffer is the native one scaled up again)
+                HRClearDirty(eraseFB);
+            }
             constants.common.enhancements.vdp1Scale = m_hrScale - 1;
             pass.hr = true;
             pass.width *= m_hrScale;
@@ -717,6 +765,12 @@ private:
             constants.common.mergeOriginY = y0;
             pass.mergeWidth = entryX1 - entryX0 + 1;
             pass.mergeHeight = y1 - y0 + 1;
+
+            // The lines of the native framebuffer these pixels belong to may now differ from the native one
+            const uint8 drawFB = cpuCommonRenderParams.displayParams.drawFB;
+            m_hrDirtyFirst[drawFB] = std::min(m_hrDirtyFirst[drawFB], y0 / static_cast<sint32>(scale));
+            m_hrDirtyLast[drawFB] = std::max(m_hrDirtyLast[drawFB], y1 / static_cast<sint32>(scale));
+            ++m_stats.hrBatches;
         }
         pass.hr = hr;
         gpu.Vdp1Draw(pass);
