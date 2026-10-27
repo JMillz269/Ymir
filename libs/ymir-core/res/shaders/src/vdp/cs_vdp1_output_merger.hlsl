@@ -289,14 +289,16 @@ uint HalfTransparentBlend(uint baseColor, uint listHead) {
         return baseColor;
     }
 
-    // Collect fragments
+    // Collect fragments (the sequence number and the color are all that is needed of them)
     // TODO: what if the cap is exceeded?
-    OITFragment frags[32];
+    uint frags[32];
     uint count = 0;
     uint curr = listHead;
     while (curr != 0xFFFFFFFF && count < 32) {
-        frags[count++] = g_fragments[curr];
-        curr = frags[count - 1].next;
+        const OITFragment frag = g_fragments[curr];
+        frags[count] = frag.data;
+        ++count;
+        curr = frag.next;
     }
 
     // Sort by sequence number in descending order (latest to oldest)
@@ -304,11 +306,11 @@ uint HalfTransparentBlend(uint baseColor, uint listHead) {
     // because of an earlier part of it. HLSL doesn't short-circuit && and some compilers (Metal's) take an access out of
     // range to mean that the index can't be, and drop the check that would have prevented it.
     for (uint i = 1; i < count; ++i) {
-        OITFragment key = frags[i];
-        const uint keySeq = BitExtract(key.data, 16, 16);
+        const uint key = frags[i];
+        const uint keySeq = BitExtract(key, 16, 16);
         uint j = i;
         while (j > 0) {
-            if (BitExtract(frags[j - 1].data, 16, 16) >= keySeq) {
+            if (BitExtract(frags[j - 1], 16, 16) >= keySeq) {
                 break;
             }
             frags[j] = frags[j - 1];
@@ -320,7 +322,7 @@ uint HalfTransparentBlend(uint baseColor, uint listHead) {
     // Blend colors, starting from the oldest fragment (the last one), as the pixels would have been drawn
     uint4 finalColor = Uint16ToColor555(baseColor);
     for (uint n = 0; n < count; ++n) {
-        uint4 fragColor = Uint16ToColor555(frags[count - 1 - n].data);
+        uint4 fragColor = Uint16ToColor555(frags[count - 1 - n]);
         if (finalColor.a != 0) {
             finalColor.rgb = (finalColor.rgb + fragColor.rgb) >> 1u;
         } else {
