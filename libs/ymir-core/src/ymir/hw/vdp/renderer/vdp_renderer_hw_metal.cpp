@@ -76,10 +76,25 @@ struct MetalVDPRenderer::Impl {
     uint32 compareMismatches = 0;
 
     std::vector<std::string> compareHalfTransparent;
+    // The framebuffers (draw side) just before the first half-transparent command of the frame is drawn
+    std::vector<uint8> comparePreGpu, comparePreSw;
+    bool comparePreValid = false;
+
+    void CompareSnapshotBeforeHT() {
+        vdp1->FlushWork();
+        comparePreGpu.resize(kVDP1FBRAMSize * 2);
+        gpu->Vdp1DownloadFBRAM(comparePreGpu.data(), static_cast<uint32>(kVDP1FBRAMSize * 2));
+        const auto &fb = vdpState.mem1.FBRAM[vdpState.fbIndex.draw];
+        comparePreSw.assign(fb.begin(), fb.end());
+        comparePreValid = true;
+    }
 
     void CompareNoteCommand(uint32 cmdAddress, VDP1Command::Control control) {
         const uint16 pmod = vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x04);
         ++compareCommands[(static_cast<uint32>(control.command) << 16) | pmod];
+        if ((pmod & 3) == 3 && !comparePreValid) {
+            CompareSnapshotBeforeHT();
+        }
         if ((pmod & 3) == 3 && compareHalfTransparent.size() < 4) {
             char text[200];
             std::snprintf(text, sizeof(text),
@@ -138,7 +153,15 @@ struct MetalVDPRenderer::Impl {
                         gpuValue = (gpuValue << 8) | gpuPixels[offset + 1];
                         swValue = (swValue << 8) | swPixels[offset + 1];
                     }
-                    metal::LogMessage("    (%u,%u): GPU %04X, software %04X", x, y, gpuValue, swValue);
+                    uint32 preGpu = 0, preSw = 0;
+                    if (comparePreValid && bpp == 2) {
+                        preGpu = (comparePreGpu[fbi * kVDP1FBRAMSize + offset] << 8) |
+                                 comparePreGpu[fbi * kVDP1FBRAMSize + offset + 1];
+                        preSw = (comparePreSw[offset] << 8) | comparePreSw[offset + 1];
+                    }
+                    metal::LogMessage("    (%u,%u): GPU %04X, software %04X   (before the first half-transparent "
+                                      "command: GPU %04X, software %04X)",
+                                      x, y, gpuValue, swValue, preGpu, preSw);
                 }
             }
         }
@@ -166,6 +189,7 @@ struct MetalVDPRenderer::Impl {
         }
         compareCommands.clear();
         compareHalfTransparent.clear();
+        comparePreValid = false;
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -1271,9 +1295,11 @@ void MetalVDPRenderer::VDP1BeginFrame() {
 
 void MetalVDPRenderer::VDP1ExecuteCommand(uint32 cmdAddress, VDP1Command::Control control) {
     if (m_impl->vdp1) {
-        m_impl->vdp1->ExecuteCommand(cmdAddress, control);
         if (m_impl->compare) {
             m_impl->CompareNoteCommand(cmdAddress, control);
+        }
+        m_impl->vdp1->ExecuteCommand(cmdAddress, control);
+        if (m_impl->compare) {
             SoftwareVDPRenderer::VDP1ExecuteCommand(cmdAddress, control);
         }
     } else {
