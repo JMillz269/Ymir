@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
@@ -920,6 +921,14 @@ public:
         } else {
             scale = 1;
         }
+        if (m_logFrames > 0 && (m_logFrames + 1) % 300 == 0) {
+            const uint64_t micros = m_gpuMicros.exchange(0);
+            const uint64_t maxMicros = m_gpuMaxMicros.exchange(0);
+            LogMessage("last 300 frames: gpu time average %.2f ms, worst %.2f ms; the emulation waited for the gpu %.2f ms "
+                       "per frame (scale %u)",
+                       micros / 300.0 / 1000.0, maxMicros / 1000.0, m_waitMicros / 300.0 / 1000.0, scale);
+            m_waitMicros = 0;
+        }
         if (++m_logFrames <= 10 || m_logFrames % 300 == 0) {
             LogMessage("frame %u (%ux%u), draws so far %u (copy %u, shadow %u, half-transparent %u, msb %u), downloads %u",
                        m_logFrames, width, height, m_logDraws, m_logDrawsByMode[0], m_logDrawsByMode[1],
@@ -945,7 +954,18 @@ public:
         }
 
         dispatch_semaphore_t done = slot.done;
-        [m_cmdBuf addCompletedHandler:^(id<MTLCommandBuffer>) {
+        std::atomic<uint64_t> *gpuMicros = &m_gpuMicros;
+        std::atomic<uint64_t> *gpuMaxMicros = &m_gpuMaxMicros;
+        [m_cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+            // (how long the GPU spent on the frame)
+            const double seconds = buffer.GPUEndTime - buffer.GPUStartTime;
+            if (seconds > 0) {
+                const uint64_t micros = static_cast<uint64_t>(seconds * 1e6);
+                gpuMicros->fetch_add(micros, std::memory_order_relaxed);
+                uint64_t seen = gpuMaxMicros->load(std::memory_order_relaxed);
+                while (micros > seen && !gpuMaxMicros->compare_exchange_weak(seen, micros)) {
+                }
+            }
             dispatch_semaphore_signal(done);
         }];
         [m_cmdBuf commit];
@@ -959,7 +979,10 @@ public:
         FinishedFrame result{};
         if (m_hasPrevious) {
             FrameSlot &prev = m_slots[m_previousSlot];
+            const auto waitStart = std::chrono::steady_clock::now();
             [prev.lastBuf waitUntilCompleted];
+            m_waitMicros += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - waitStart)
+                                .count();
             result.pixels = static_cast<const uint32 *>([prev.readback contents]);
             result.width = prev.width;
             result.height = prev.height;
@@ -1021,6 +1044,9 @@ private:
     id<MTLTexture> m_compositeHR = nil; ///< scaled up output image
     id<MTLBuffer> m_fbramHR = nil; ///< scaled up VDP1 framebuffers (see Vdp1EnableHR)
     id<MTLBuffer> m_hrReadback = nil;
+    int64_t m_waitMicros = 0;
+    std::atomic<uint64_t> m_gpuMicros{0};
+    std::atomic<uint64_t> m_gpuMaxMicros{0};
     bool m_bindHR = false;         ///< whether VDP1 passes being recorded work on the scaled up framebuffers
     id<MTLBuffer> m_vdp1Vram = nil;
     id<MTLBuffer> m_spriteOutBuf = nil;

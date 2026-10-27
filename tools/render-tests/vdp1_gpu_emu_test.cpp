@@ -478,7 +478,7 @@ struct EmuGpu final : metal::Gpu {
     uint32 dpBits;
     uint32 shading;
 
-    void WriteOutput(int cx, int cy, uint32 cmdIndex, uint32 value) {
+    void WriteOutput(int cx, int cy, uint32 cmdIndex, uint32 value, uint32 fragmentSlot) {
         const VDP1CommandParams &cp = cmds[cmdIndex];
         uint32 sysClipRaw, uc0, uc1, pmodcolr;
         std::memcpy(&sysClipRaw, &cp.sysClip, 4);
@@ -523,7 +523,7 @@ struct EmuGpu final : metal::Gpu {
         } else if (shading == 1) {
             spriteOut[outOffset] += 1;
         } else if (shading == 2) {
-            const uint32 node = nextNode++;
+            const uint32 node = fragmentSlot;
             Frag f;
             f.data = value;
             f.next = listHeads[outOffset];
@@ -696,9 +696,9 @@ struct EmuGpu final : metal::Gpu {
             }
             value = spriteData | ((spanIndex + 1u) << 16u);
         }
-        WriteOutput(ls.posX, ls.posY, cmdIndex, value);
+        WriteOutput(ls.posX, ls.posY, cmdIndex, value, id * 2);
         if (antialias && ls.NeedsAA()) {
-            WriteOutput(ls.posX + ls.aaIncX, ls.posY + ls.aaIncY, cmdIndex, value);
+            WriteOutput(ls.posX + ls.aaIncX, ls.posY + ls.aaIncY, cmdIndex, value, id * 2 + 1);
         }
     }
 

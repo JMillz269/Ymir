@@ -491,12 +491,13 @@ void ReadTexel(uint u, uint v, uint charAddress, uint charSizeH, uint colorMode,
 
 struct OutData {
     uint cmdIndex;
+    uint fragmentSlot; // first of the two fragment slots of the pixel (Half-Transparency)
 #if POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_COPY || POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_OIT
     uint value;
 #endif
 };
 
-void WriteOutput(int2 coord, OutData data) {
+void WriteOutput(int2 coord, OutData data, uint outSlot) {
     const CommandParams cmdParams = g_commandParams[data.cmdIndex];
 
     // Clip to system area
@@ -589,8 +590,9 @@ void WriteOutput(int2 coord, OutData data) {
 
     // Append entry to pixel's node list
 
-    uint nodeIndex;
-    g_counter.InterlockedAdd(0, 1, nodeIndex);
+    // Every pixel of the spans has two fragment slots (one for the pixel and one for the antialiasing pixel it can add)
+    // so that threads don't have to compete for a shared counter.
+    const uint nodeIndex = data.fragmentSlot + (outSlot & 1u);
     if (nodeIndex >= kMaxOITFragments) {
         // Out of fragments (the host code keeps this from happening)
         return;
@@ -707,6 +709,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 
     OutData data;
     data.cmdIndex = cmdIndex;
+    data.fragmentSlot = id.x * 2u;
 
 #if POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_COPY || POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_OIT
     // =========================================================================
@@ -741,8 +744,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 #endif
 
     const int2 coord = lineStepper.Coord();
-    WriteOutput(lineStepper.Coord(), data);
+    WriteOutput(lineStepper.Coord(), data, 0u);
     if (antialias && lineStepper.NeedsAA()) {
-        WriteOutput(lineStepper.AACoord(), data);
+        WriteOutput(lineStepper.AACoord(), data, 1u);
     }
 }
