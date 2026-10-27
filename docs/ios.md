@@ -73,6 +73,12 @@ MSB modes) into the framebuffer memory, which stays on the GPU. The processor ge
 the game reads it back (some games do, e.g. for effects), which makes the processor wait for the GPU, and for save
 states. This is the second step toward upscaling on the GPU; the Internal Resolution setting is still ignored.
 
+Diagnostics: the Metal renderer writes `metal-vdp-log.txt` to the Documents folder (started anew at every launch).
+Creating a folder named `metal-vdp-compare` there makes the software renderer draw VDP1 as well, and the log then lists
+the frames where the GPU's framebuffer differs from the software renderer's (with the pixels, the commands of the frame
+and a few more details). That is much slower; delete the folder for normal play. `tools/render-tests/vdp1_gpu_emu_test.cpp`
+runs the VDP1 compute shaders ported to C++ against the software renderer on a desktop machine.
+
 The finished image is read back from the GPU and shown through the normal display path, so all the display filters,
 upscaling and screenshots keep working. The image arrives one frame late. Deinterlacing, Transparent Meshes and
 Internal Resolution are not supported yet and are ignored while the Metal renderer is on. If it can't be created the

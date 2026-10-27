@@ -458,21 +458,6 @@ public:
                            params.shadingMode, params.mergeMode, heads, out, firstIndex, firstValue);
                 EndEncoder();
             }
-
-            // The merger clears what it has used, but make sure of it: reset the part of the pixel buffer that a
-            // pixel of the framebuffer can have an entry in. (A fragment list left behind would be added to the next
-            // drawing's lists, which are in the same place.)
-            const NSUInteger entries =
-                std::min<NSUInteger>(kVDP1PixelBufferEntries, NSUInteger(params.mergeWidth) * 4 * params.mergeHeight);
-            id<MTLBuffer> buffer = params.shadingMode == 2 ? m_listHeadsBuf : m_spriteOutBuf;
-            id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
-            if (m_fenceUpdated) {
-                [blit waitForFence:m_fence];
-            }
-            [blit fillBuffer:buffer range:NSMakeRange(0, entries * sizeof(uint32)) value:params.shadingMode == 2 ? 0xFF : 0x00];
-            [blit updateFence:m_fence];
-            m_fenceUpdated = true;
-            [blit endEncoding];
         }
 
         if (traceThis) {
