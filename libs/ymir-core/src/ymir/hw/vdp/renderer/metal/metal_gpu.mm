@@ -379,6 +379,14 @@ public:
             return;
         }
         ++m_logDrawsByMode[params.shadingMode];
+        if (m_debugClearCheck && params.shadingMode == 2 && m_traceCalls == 0 && m_logChains == 0) {
+            m_traceCalls = 60;
+        }
+        if (m_traceCalls > 0) {
+            --m_traceCalls;
+            LogMessage("trace: draw shade %u merge %u pixels %u spans %u cmds %u", params.shadingMode, params.mergeMode,
+                       params.numPixels, params.spansSize / 48, params.commandsSize / 20);
+        }
         if (++m_logDraws <= 5) {
             LogMessage("draw #%u: shade %u merge %u pixels %u spans %u cmds %u", m_logDraws, params.shadingMode,
                 params.mergeMode, params.numPixels, params.spansSize / 48, params.commandsSize / 20);
@@ -470,6 +478,10 @@ public:
         if (params.width == 0 || params.height == 0) {
             return;
         }
+        if (m_traceCalls > 0) {
+            --m_traceCalls;
+            LogMessage("trace: erase %ux%u", params.width, params.height);
+        }
         if (++m_logErases <= 20) {
             LogMessage("erase #%u: %ux%u", m_logErases, params.width, params.height);
         }
@@ -496,6 +508,10 @@ public:
     void Vdp1WriteFB(const Vdp1FBWritePassParams &params) override {
         if (params.count == 0) {
             return;
+        }
+        if (m_traceCalls > 0) {
+            --m_traceCalls;
+            LogMessage("trace: framebuffer write of %u words", params.count);
         }
         EnsureFrame();
 
@@ -580,6 +596,23 @@ public:
         }
         LogMessage("OIT draw #%u: %u pixels with fragments, %u spans, %u pixels", m_logChains, nonEmpty,
                    params.spansSize / 48, params.numPixels);
+        {
+            // The framebuffer under the pixels, before they are merged
+            id<MTLBlitCommandEncoder> fbBlit = [m_cmdBuf blitCommandEncoder];
+            [fbBlit copyFromBuffer:m_fbram sourceOffset:0 toBuffer:m_fbramReadback destinationOffset:0 size:kVDP1FBRAMSize * 2];
+            [fbBlit endEncoding];
+            DrainArena();
+            uint32 dp;
+            std::memcpy(&dp, params.constants, 4);
+            const uint8 *fb = static_cast<const uint8 *>([m_fbramReadback contents]) + ((dp >> 7) & 1) * kVDP1FBRAMSize;
+            char text[300];
+            int n = std::snprintf(text, sizeof(text), "  framebuffer %u under:", (dp >> 7) & 1);
+            for (uint32 pixel : {9226u, 9227u, 9738u, 13322u}) {
+                n += std::snprintf(text + n, sizeof(text) - n, " (%u,%u)=%02X%02X", pixel % 512, pixel / 512,
+                                   fb[pixel * 2], fb[pixel * 2 + 1]);
+            }
+            LogMessage("%s", text);
+        }
         for (uint32 pixel : {9226u, 9227u, 9738u, 13322u}) {
             char text[400];
             int n = std::snprintf(text, sizeof(text), "  pixel (%u,%u):", pixel % 512, pixel / 512);
@@ -789,6 +822,7 @@ private:
     id<MTLBuffer> m_debugOut = nil;
     id<MTLBuffer> m_debugFrags = nil;
     uint32 m_logChains = 0;
+    uint32 m_traceCalls = 0;
     id<MTLTexture> m_spriteOutTex = nil;
     id<MTLTexture> m_listHeadsTex = nil;
 
