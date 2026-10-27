@@ -89,6 +89,10 @@ void t_destroy(void *handle) {
     std::free(subject);
 }
 
+void t_set_idle_detection(uint32 enable) {
+    sh2::SH2Recompiler::SetIdleDetection(enable != 0);
+}
+
 void t_testing_mode() {
     jit::SetJitTestingMode(true);
 }
@@ -249,6 +253,7 @@ void t_global_stats(uint64 *out) {
     out[3] = g.instructionsTranslated;
     out[4] = g.compileNanoseconds;
     out[5] = g.slowestCompileNanoseconds;
+    out[6] = sh2::SH2Recompiler::PollSkips();
 }
 
 void t_pool_region(uint64 *base, uint64 *size) {

@@ -54,6 +54,7 @@ lib.t_opcode_type.argtypes = [u32, u32]
 lib.t_kind.restype = u32
 lib.t_kind.argtypes = [u32]
 lib.t_flush.argtypes = [vp]
+lib.t_set_idle_detection.argtypes = [u32]
 EXEC_CB = C.CFUNCTYPE(u64, vp, vp, u64)
 lib.t_set_executor.argtypes = [vp, EXEC_CB]
 
@@ -473,6 +474,45 @@ def directed():
           [0x18C0, 0xE305, 0x0009, 0x0009], {8: CODE_ADDR, 12: 0x00090009}, budget=20)
     # Backward branch loop that runs many times
     check("counted loop", [0xE30A, 0x4310, 0x8FFE, 0x0009, 0x0009], {}, budget=200)
+    # A loop that waits for the free-running timer's counter (the high byte of FRC) to leave zero. With idle detection on,
+    # the recompiler lets the loop skip ahead, which must not make it leave much earlier or later than the interpreter
+    code = [0x2420, 0x6010, 0x2008, 0x89FC, 0xE301, 0x0009, 0x0009]  # mov.b r2,@r4 (TCR) / mov.b @r1,r0 / tst / bt / mov #1,r3
+    blob = b"".join(w.to_bytes(2, "big") for w in code)
+    for cks, name in ((0, "/8"), (1, "/32"), (2, "/128")):
+        st = [0] * 29
+        st[1] = 0xFFFFFE12
+        st[2] = cks
+        st[4] = 0xFFFFFE16
+        st[15] = RAM_BASE_H + 0x20000
+        st[16] = CODE_ADDR
+        interp = lib.t_create(0)
+        rec = Recomp()
+        for h in (interp, rec.h):
+            lib.t_set_mem(h, RAM_BASE_H + 0x1000, blob, len(blob))
+            write_state(h, st)
+        times = []
+        for h in (interp, rec.h):
+            if h is rec.h:
+                lib.t_set_idle_detection(1)
+            total = 0
+            done = False
+            for _ in range(1200):
+                total += lib.t_advance(h, 64, 0)
+                if read_state(h)[3] == 1:
+                    done = True
+                    break
+            lib.t_set_idle_detection(0)
+            times.append((total, done))
+        (ti, di), (tr, dr) = times
+        tol = (8, 32, 128)[cks] * 3 + 64
+        good = di and dr and abs(ti - tr) <= tol
+        g = (u64 * 8)()
+        lib.t_global_stats(g)
+        print(("ok   " if good else "FAIL ") + f"timer wait loop {name}: interpreter left after {ti} cycles, "
+              f"recompiler after {tr} (poll skips so far: {g[6]})")
+        ok = ok and good
+        lib.t_destroy(interp)
+        lib.t_destroy(rec.h)
     return ok
 
 
@@ -505,7 +545,7 @@ def main():
     print(f"{iters - failures}/{iters} cases matched")
     print("recompiler stats: compiled=%d executed=%d rejected=%d invalidations=%d flushes=%d inline=%d helper=%d chain=%d" %
           tuple(tot))
-    g = (u64 * 4)()
+    g = (u64 * 8)()
     lib.t_global_stats(g)
     print(f"code size: {g[2] / max(g[3], 1):.0f} bytes of ARM64 per SH-2 instruction translated, "
           f"{g[2] / max(g[0], 1):.0f} bytes per block, {g[1]} cache flushes")

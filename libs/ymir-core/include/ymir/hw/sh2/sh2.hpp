@@ -1133,6 +1133,11 @@ private:
     // Executes one instruction without fetching it and without checking for interrupts. Used by recompiled code.
     uint64 JitStep(uint16 instr);
 
+    // Cycles until the timer that the on-chip register at `address` belongs to counts again (the free-running timer or
+    // the watchdog timer), or zero for any other address. Used by the recompiler to let a loop that polls a timer wait
+    // for it in one go.
+    uint64 JitCyclesToTimerStep(uint32 address) const;
+
     // Idle detection for the recompiler (see SH2Recompiler::SetIdleDetection)
     bool m_jitImpure = false;  // set by generated code that writes memory and by every call to the interpreter
     uint8 m_idleStreak = 0;    // consecutive time slices that looked like waiting

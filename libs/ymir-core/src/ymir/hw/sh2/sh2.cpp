@@ -2627,6 +2627,17 @@ uint64 SH2::JitStep(uint16 instr) {
     return ExecuteOpcode<false, false>(opcode, instr);
 }
 
+uint64 SH2::JitCyclesToTimerStep(uint32 address) const {
+    const uint64 now = GetCurrentCycleCount();
+    if (address >= 0xFFFFFE10u && address <= 0xFFFFFE19u) {
+        return FRT.CyclesUntilNextStep(now);
+    }
+    if (address >= 0xFFFFFE80u && address <= 0xFFFFFE8Fu) {
+        return WDT.CyclesUntilNextStep(now);
+    }
+    return 0;
+}
+
 uint64 SH2::RunRecompiledBlock(uint64 cyclesLeft) {
     // Blocks start on instruction boundaries only, with no interrupt pending (it could become serviceable right after
     // the first instruction, which only the interpreter's loop notices)

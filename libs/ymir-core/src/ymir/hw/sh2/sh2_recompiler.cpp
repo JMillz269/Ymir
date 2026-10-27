@@ -312,6 +312,7 @@ uint64 SH2Recompiler::StepThunk(SH2 *sh2, uint32 instr) {
     // during a block) read the same value every time round and get the very same state back. Instead of running all
     // of those identical iterations, each one that repeats the previous one claims the time of several.
     bool pollRepeat = false;
+    uint64 pollClaim = 24;
     if ((instr & 0xF00F) <= 0x6002 && (instr & 0xF000) == 0x6000 && IdleDetectionEnabled()) {
         const uint32 addr = sh2->R[(instr >> 4) & 0xF];
         if ((addr >= 0xFFFFFE10u && addr <= 0xFFFFFE19u) || (addr >= 0xFFFFFE80u && addr <= 0xFFFFFE8Fu)) {
@@ -321,12 +322,17 @@ uint64 SH2Recompiler::StepThunk(SH2 *sh2, uint32 instr) {
                 pollRepeat = self->m_pollValid && now == self->m_pollState;
                 self->m_pollState = now;
                 self->m_pollValid = true;
+                if (pollRepeat) {
+                    // Nothing changes until the timer counts again, so wait for that instead of for a fixed time
+                    // (but not for so long that the time slice is overrun by much)
+                    pollClaim = std::clamp<uint64>(sh2->JitCyclesToTimerStep(addr), 24, 256);
+                }
             }
         }
     }
     if (pollRepeat) {
         s_pollSkips.fetch_add(1, std::memory_order_relaxed);
-        return sh2->JitStep(static_cast<uint16>(instr)) + 24;
+        return sh2->JitStep(static_cast<uint16>(instr)) + pollClaim;
     }
     return sh2->JitStep(static_cast<uint16>(instr));
 }

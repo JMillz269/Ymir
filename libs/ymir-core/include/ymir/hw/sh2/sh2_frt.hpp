@@ -35,6 +35,15 @@ struct FreeRunningTimer {
         m_clockDividerShift = kDividerShifts[TCR.CKSn];
     }
 
+    // Cycles from `now` until the counter steps again (zero if a step is already due). Large if it doesn't count.
+    FORCE_INLINE uint64 CyclesUntilNextStep(uint64 now) const {
+        if (m_clockDividerShift >= 64) {
+            return ~uint64{0};
+        }
+        const uint64 next = ((m_cycleCount >> m_clockDividerShift) + 1) << m_clockDividerShift;
+        return next > now ? next - now : 0;
+    }
+
     // Advances the cycle counter to the specified amount
     FORCE_INLINE Event AdvanceTo(uint64 cycles) {
         // Must be monotonically increasing
