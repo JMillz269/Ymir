@@ -965,6 +965,10 @@ public:
                   threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     }
 
+    double RecentGpuMillis() const override {
+        return m_gpuAverageMicros.load(std::memory_order_relaxed) / 1000.0;
+    }
+
     FinishedFrame FinishFrame(uint32 width, uint32 height, uint32 scale) override {
         EnsureFrame();
         FrameSlot &slot = m_slots[m_currentSlot];
@@ -1027,6 +1031,7 @@ public:
         dispatch_semaphore_t done = slot.done;
         std::atomic<uint64_t> *gpuMicros = &m_gpuMicros;
         std::atomic<uint64_t> *gpuMaxMicros = &m_gpuMaxMicros;
+        std::atomic<double> *gpuAverageMicros = &m_gpuAverageMicros;
         id<MTLCounterSampleBuffer> profileBuf = m_profileBuf;
         std::vector<std::pair<uint32, uint32>> profileEncoders;
         if (profileBuf != nil && !m_profileDrained) {
@@ -1073,6 +1078,9 @@ public:
             if (seconds > 0) {
                 const uint64_t micros = static_cast<uint64_t>(seconds * 1e6);
                 gpuMicros->fetch_add(micros, std::memory_order_relaxed);
+                // (a moving average over about the last ten frames)
+                const double average = gpuAverageMicros->load(std::memory_order_relaxed);
+                gpuAverageMicros->store(average * 0.9 + static_cast<double>(micros) * 0.1, std::memory_order_relaxed);
                 uint64_t seen = gpuMaxMicros->load(std::memory_order_relaxed);
                 while (micros > seen && !gpuMaxMicros->compare_exchange_weak(seen, micros)) {
                 }
@@ -1170,6 +1178,7 @@ private:
     std::array<std::atomic<uint64_t>, kProfileKinds> m_profileMicros{};
     std::array<std::atomic<uint64_t>, kProfileKinds> m_profileCount{};
     int64_t m_waitMicros = 0;
+    std::atomic<double> m_gpuAverageMicros{0.0};
     std::atomic<uint64_t> m_gpuMicros{0};
     std::atomic<uint64_t> m_gpuMaxMicros{0};
     bool m_bindHR = false;         ///< whether VDP1 passes being recorded work on the scaled up framebuffers

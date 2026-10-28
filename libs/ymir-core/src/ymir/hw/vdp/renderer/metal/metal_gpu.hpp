@@ -191,6 +191,9 @@ public:
                            uint32 enhancementsOffset, uint32 startYOffset, uint32 planeStartY,
                            uint32 planeNumLines) = 0;
 
+    /// @brief The time the GPU has recently spent per frame, in milliseconds (a moving average).
+    virtual double RecentGpuMillis() const = 0;
+
     /// @brief Ends the frame: copies the composed image out of the GPU and submits everything.
     /// @param[in] width the width of the image
     /// @param[in] height the height of the image
