@@ -516,10 +516,6 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     if (!differs) {
         return;
     }
-    // (the sprite pass has composed the pixel already if the sprite pixel is the topmost one as it is)
-    if (g_spriteAttrsIn[uint3(outCoord, 1)] != 0) {
-        return;
-    }
     const uint3 hrColor = Compose(drawCoord);
     g_compositeOut[hrOutCoord] = float4(hrColor / 255.0, 1.0f);
     return;
