@@ -267,15 +267,16 @@ struct GouraudChannelStepper {
         den <<= 1;
 
         if (den != 0) {
-            while (accum >= 0) {
-                value += fracInc;
-                accum -= den;
+            // Closed forms of stepping until accum < 0 and num < den
+            if (accum >= 0) {
+                const int count = accum / den + 1;
+                value += fracInc * count;
+                accum -= den * count;
             }
 
-            while (num >= den) {
-                intInc += fracInc;
-                num -= den;
-            }
+            const int count = num / den;
+            intInc += fracInc * count;
+            num -= den * count;
         }
         accum = ~accum;
 
@@ -287,11 +288,11 @@ struct GouraudChannelStepper {
     void Skip(int steps) {
         value += intInc * steps;
         accum -= num * steps;
-        if (den != 0) {
-            while (accum < 0) {
-                value += fracInc;
-                accum += den;
-            }
+        if (den != 0 && accum < 0) {
+            // Closed form of stepping until accum >= 0
+            const int count = (den - 1 - accum) / den;
+            value += fracInc * count;
+            accum += den * count;
         }
     }
 
