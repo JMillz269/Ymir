@@ -24,6 +24,8 @@ RWTexture2D<float4> g_compositeOut : register(u1);
 // differ from the native image (the output has been filled with the native image already)
 ByteAddressBuffer g_spriteFB : register(t7);
 ByteAddressBuffer g_spriteFBNative : register(t8);
+// Counts (for the log): every 64th pixel of the plane that was looked at, and how many of those differ
+RWByteAddressBuffer g_hrStats : register(u2);
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -512,6 +514,10 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         const uint hrAddress = displayFB * kVDP1FBRAMSize * hrScale * hrScale + (hrY * fbWidth * hrScale + hrX) * 2;
         const uint hrWord = ByteSwap16(g_spriteFB.Load(hrAddress & ~3) >> ((hrAddress & 2) * 8));
         differs = nativeWord != hrWord;
+    }
+    if (((drawCoord.x | drawCoord.y) & 7u) == 0u) {
+        uint dummy;
+        g_hrStats.InterlockedAdd(differs ? 4 : 0, 1, dummy);
     }
     if (!differs) {
         return;

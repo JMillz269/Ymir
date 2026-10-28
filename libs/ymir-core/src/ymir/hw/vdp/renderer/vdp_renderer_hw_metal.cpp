@@ -1163,9 +1163,12 @@ struct MetalVDPRenderer::Impl {
                 stats = vdp1->TakeStats();
             }
             metal::LogMessage("last 300 frames: %u composed at the internal resolution (%u chunks, %u lines composed "
-                              "again of %u); scaled up framebuffers: %u refills, %u batches, %u CPU write entries",
+                              "again of %u); scaled up framebuffers: %u refills, %u batches, %u CPU write entries; per "
+                              "frame, VDP1 draws %.0f pixels in %.0f spans at the normal size and %.0f pixels in %.0f spans "
+                              "scaled up",
                               statHrFrames, statHrChunks, statHrPlaneLines, statHrLines, stats.resyncs, stats.hrBatches,
-                              stats.hrWriteEntries);
+                              stats.hrWriteEntries, stats.nativePixels / 300.0, stats.nativeSpans / 300.0,
+                              stats.hrPixels / 300.0, stats.hrSpans / 300.0);
             statHrFrames = statHrChunks = statHrPlaneLines = statHrLines = 0;
         }
 

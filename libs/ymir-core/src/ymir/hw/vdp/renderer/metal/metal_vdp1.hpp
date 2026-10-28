@@ -199,6 +199,10 @@ public:
         uint32 resyncs = 0;          ///< scaled up framebuffers filled from the native ones
         uint32 hrBatches = 0;        ///< batches drawn into scaled up framebuffers
         uint32 hrWriteEntries = 0;   ///< CPU framebuffer writes applied to the scaled up framebuffers
+        uint64 nativePixels = 0;     ///< pixels (before clipping to the framebuffer) of the batches drawn at the normal size
+        uint64 nativeSpans = 0;
+        uint64 hrPixels = 0;         ///< the same for the scaled up framebuffers
+        uint64 hrSpans = 0;
     };
     Stats TakeStats() {
         const Stats stats = m_stats;
@@ -742,6 +746,8 @@ private:
         pass.shadingMode = static_cast<uint32>(bit::extract<1, 2>(currPolyDrawShaderIndex));
         pass.mergeMode = static_cast<uint32>(bit::extract<1, 2>(currOutputMergerShaderIndex));
         pass.numPixels = batch.cpuSpanPrefixSums[batch.cpuSpanCount];
+        (hr ? m_stats.hrPixels : m_stats.nativePixels) += pass.numPixels;
+        (hr ? m_stats.hrSpans : m_stats.nativeSpans) += batch.cpuSpanCount;
         pass.mergeWidth = regs1.tvmr.fbSizeH * scale / pixelsPerEntry;
         pass.mergeHeight = regs1.tvmr.fbSizeV * scale;
         if (hr) {

@@ -100,6 +100,7 @@ namespace {
         FbramNative,
         SpriteFBNative,
         CompositeNative,
+        HrStats,
     };
 
     Res ResourceForName(NSString *name) {
@@ -139,6 +140,7 @@ namespace {
             {"g_fbramNative", Res::FbramNative},
             {"g_spriteFBNative", Res::SpriteFBNative},
             {"g_compositeNative", Res::CompositeNative},
+            {"g_hrStats", Res::HrStats},
         };
         for (const Entry &entry : kEntries) {
             if ([name isEqualToString:[NSString stringWithUTF8String:entry.name]]) {
@@ -426,6 +428,10 @@ public:
             !CreatePipeline(kHRComposeShaderPath, m_hrCompose, error) ||
             !CreatePipeline(kHRReplicateShaderPath, m_hrReplicate, error)) {
             return false;
+        }
+        m_hrStatsBuf = [m_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        if (m_hrStatsBuf != nil) {
+            std::memset([m_hrStatsBuf contents], 0, 16);
         }
         m_compositeHR = Create2DTexture(MTLPixelFormatRGBA8Unorm, kMaxNormalResH * kMaxHRScale,
                                         kMaxNormalResV * kMaxHRScale, 1);
@@ -988,6 +994,16 @@ public:
                        "per frame (scale %u)",
                        micros / 300.0 / 1000.0, maxMicros / 1000.0, m_waitMicros / 300.0 / 1000.0, scale);
             m_waitMicros = 0;
+            if (m_hrStatsBuf != nil) {
+                uint32 *counts = static_cast<uint32 *>([m_hrStatsBuf contents]);
+                const uint32 sampled = counts[0] + counts[1];
+                if (sampled > 0) {
+                    LogMessage("scaled up image: of the %u sampled pixels (1 in 64) that were looked at in the last 300 "
+                               "frames, %.1f%% differ from the native sprite data",
+                               sampled, 100.0 * counts[1] / sampled);
+                }
+                counts[0] = counts[1] = 0;
+            }
             if (m_profileBuf != nil) {
                 char text[512];
                 int n = std::snprintf(text, sizeof(text), "last 300 frames, ms per frame by pass (encoders per frame):");
@@ -1155,6 +1171,7 @@ private:
     id<MTLTexture> m_compositeHR = nil; ///< scaled up output image
     id<MTLBuffer> m_fbramHR = nil; ///< scaled up VDP1 framebuffers (see Vdp1EnableHR)
     id<MTLBuffer> m_hrReadback = nil;
+    id<MTLBuffer> m_hrStatsBuf = nil; ///< two counters the composition of the scaled up image adds to (see its shader)
     // Profiling (a folder named metal-vdp-profile in the Documents folder turns it on): the time the GPU spends on each
     // kind of pass, from timestamps taken at the start and the end of the compute encoders
     static constexpr uint32 kProfileKinds = 10;
@@ -1494,6 +1511,7 @@ private:
             case Res::FbramNative: buffer = m_fbram; break;
             case Res::SpriteFBNative: buffer = m_fbram; break;
             case Res::CompositeNative: texture = m_composite; break;
+            case Res::HrStats: buffer = m_hrStatsBuf; break;
             case Res::Vdp1Spans: blob = staged.v1Spans; break;
             case Res::Vdp1PrefixSums: blob = staged.v1PrefixSums; break;
             case Res::Vdp1Commands: blob = staged.v1Commands; break;
