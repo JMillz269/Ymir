@@ -65,6 +65,28 @@ bool BitTest(uint32 value, uint32 bit) {
 uint32 ByteSwap16(uint32 v) {
     return ((v >> 8) & 0xFF) | ((v << 8) & 0xFF00);
 }
+
+// Port of DivFloor (float division corrected to the exact quotient)
+static int DivFloor(int a, int b) {
+    int q = int(float(a) / float(b));
+    int r = a - q * b;
+    if (r < 0) {
+        --q;
+        r += b;
+        if (r < 0) {
+            --q;
+            r += b;
+        }
+    } else if (r >= b) {
+        ++q;
+        r -= b;
+        if (r >= b) {
+            ++q;
+        }
+    }
+    return q;
+}
+
 struct Color555x {
     uint32 r, g, b, a;
 };
@@ -118,7 +140,7 @@ struct TextureStepperH {
         accum = baseAccum + num * step;
         value = baseValue;
         if (accum >= 0) {
-            const int count = (accum / den) + 1;
+            const int count = DivFloor(accum, den) + 1;
             value += inc * count;
             accum -= den * count;
         }
@@ -152,13 +174,15 @@ struct GouraudChannelH {
         den <<= 1;
         if (den != 0) {
             if (accum >= 0) {
-                const int count = accum / den + 1;
+                const int count = DivFloor(accum, den) + 1;
                 value += fracInc * count;
                 accum -= den * count;
             }
-            const int count = num / den;
-            intInc += fracInc * count;
-            num -= den * count;
+            if (num >= den) {
+                const int count = DivFloor(num, den);
+                intInc += fracInc * count;
+                num -= den * count;
+            }
         }
         accum = ~accum;
         baseValue = value;
@@ -168,7 +192,7 @@ struct GouraudChannelH {
         value += intInc * steps;
         accum -= num * steps;
         if (den != 0 && accum < 0) {
-            const int count = (den - 1 - accum) / den;
+            const int count = DivFloor(den - 1 - accum, den);
             value += fracInc * count;
             accum += den * count;
         }
@@ -243,7 +267,7 @@ struct LineStepperH {
         posY += majIncY * stepDelta;
         accum -= num * stepDelta;
         if (den != 0) {
-            const int count = (accumTarget - accum + den) / den;
+            const int count = DivFloor(accumTarget - accum + den, den);
             accum += den * count;
             posX += minIncX * count;
             posY += minIncY * count;

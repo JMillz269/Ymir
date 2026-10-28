@@ -159,6 +159,28 @@ uint ReadVRAM16(uint address) {
 // ---------------------------------------------------------------------------------------------------------------------
 // DDA steppers
 
+// a / b rounded down for a >= 0 and b > 0 where the quotient is below 2^21. GPUs divide integers slowly in software,
+// so this divides floats and corrects the result, which can be off by a little, to the exact quotient.
+int DivFloor(int a, int b) {
+    int q = int(float(a) / float(b));
+    int r = a - q * b;
+    if (r < 0) {
+        --q;
+        r += b;
+        if (r < 0) {
+            --q;
+            r += b;
+        }
+    } else if (r >= b) {
+        ++q;
+        r -= b;
+        if (r >= b) {
+            ++q;
+        }
+    }
+    return q;
+}
+
 // Steps over the texels of a texture.
 struct TextureStepper {
     int num;
@@ -218,7 +240,7 @@ struct TextureStepper {
         accum = baseAccum + num * step;
         value = baseValue;
         if (accum >= 0) {
-            const int count = (accum / den) + 1;
+            const int count = DivFloor(accum, den) + 1;
             value += inc * count;
             accum -= den * count;
         }
@@ -269,14 +291,16 @@ struct GouraudChannelStepper {
         if (den != 0) {
             // Closed forms of stepping until accum < 0 and num < den
             if (accum >= 0) {
-                const int count = accum / den + 1;
+                const int count = DivFloor(accum, den) + 1;
                 value += fracInc * count;
                 accum -= den * count;
             }
 
-            const int count = num / den;
-            intInc += fracInc * count;
-            num -= den * count;
+            if (num >= den) {
+                const int count = DivFloor(num, den);
+                intInc += fracInc * count;
+                num -= den * count;
+            }
         }
         accum = ~accum;
 
@@ -290,7 +314,7 @@ struct GouraudChannelStepper {
         accum -= num * steps;
         if (den != 0 && accum < 0) {
             // Closed form of stepping until accum >= 0
-            const int count = (den - 1 - accum) / den;
+            const int count = DivFloor(den - 1 - accum, den);
             value += fracInc * count;
             accum += den * count;
         }
@@ -430,7 +454,7 @@ struct LineStepper {
 
         accum -= num * stepDelta;
         if (den != 0) {
-            const int count = (accumTarget - accum + den) / den;
+            const int count = DivFloor(accumTarget - accum + den, den);
             accum += den * count;
             pos += minInc * count;
         }
