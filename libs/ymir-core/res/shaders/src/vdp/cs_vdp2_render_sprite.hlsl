@@ -23,6 +23,16 @@ ByteAddressBuffer g_spriteFBNative : register(t6); // the native framebuffers, f
 RWTexture2DArray<uint4> g_layerOut : register(u1);
 RWTexture2DArray<uint> g_spriteAttrsOut : register(u2);
 
+#ifdef HR_SPRITE
+// The sprite layer of the scaled up image (one pixel for every sub-pixel), what g_layerOut and g_spriteAttrsOut hold for
+// the native image. Sub-pixels whose sprite data is the native pixel's get kHRSameAsNative as their attributes.
+RWTexture2D<uint4> g_hrSpriteLayerOut : register(u3);
+RWTexture2D<uint> g_hrSpriteAttrsOut : register(u4);
+// Counts (for the log): every 64th sub-pixel that was looked at, and how many of those differ
+RWByteAddressBuffer g_hrStats : register(u5);
+static const uint kHRSameAsNative = 0x8000;
+#endif
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Parameters
 
@@ -48,7 +58,9 @@ static const bool deinterlace = BitTest(g_commonParams.enhancements, 0);
 
 #ifdef HR_SPRITE
 static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
-static const uint hrPlane = BitExtract(g_commonParams.enhancements, 5, 4);
+// The sub-pixel the thread works on, within the native pixel
+static uint g_hrSubX;
+static uint g_hrSubY;
 #endif
 
 static const uint colorRAMMode = BitExtract(g_commonParams.displayParams, 6, 2);
@@ -77,12 +89,12 @@ uint ReadSprite8(uint address, uint field) {
 uint ReadSprite16(uint address, uint field) {
 #ifdef HR_SPRITE
     // Internal resolution variant: g_spriteFB holds the scaled up framebuffers (two of 512x256 16-bit pixels, scaled)
-    // and every call reads the sub-pixel of the plane being drawn that belongs to the native pixel the address is for.
+    // and every call reads the sub-pixel the thread works on of the native pixel the address is for.
     const uint pixel = address >> 1;
     const uint nativeX = pixel % fbSize.x;
     const uint nativeY = pixel / fbSize.x;
-    const uint hrX = nativeX * hrScale + hrPlane % hrScale;
-    const uint hrY = nativeY * hrScale + hrPlane / hrScale;
+    const uint hrX = nativeX * hrScale + g_hrSubX;
+    const uint hrY = nativeY * hrScale + g_hrSubY;
     const uint hrAddress = spriteDisplayFB * kVDP1FBRAMSize * hrScale * hrScale + (hrY * fbSize.x * hrScale + hrX) * 2;
     return ByteSwap16(g_spriteFB.Load(hrAddress & ~3) >> ((hrAddress & 2) * 8));
 #else
@@ -559,14 +571,38 @@ bool HRPixelDiffers(uint2 pos) {
 }
 #endif
 
+#ifdef HR_SPRITE
+// Internal resolution variant: one thread for every sub-pixel of the lines starting at startY (in native lines)
+[numthreads(32, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    const uint2 hrPos = uint2(id.x, id.y + g_commonParams.startY * hrScale);
+    const uint2 drawCoord = hrPos / hrScale;
+    g_hrSubX = hrPos.x - drawCoord.x * hrScale;
+    g_hrSubY = hrPos.y - drawCoord.y * hrScale;
+
+    const bool differs = HRPixelDiffers(drawCoord);
+    if (((hrPos.x | hrPos.y) & 7u) == 0u) {
+        uint dummy;
+        g_hrStats.InterlockedAdd(differs ? 4 : 0, 1, dummy);
+    }
+    if (!differs) {
+        g_hrSpriteAttrsOut[hrPos] = kHRSameAsNative;
+        return;
+    }
+
+    const uint2 outCoord = uint2(drawCoord.x, GetY(drawCoord.y));
+    const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, 0);
+    g_hrSpriteLayerOut[hrPos] = output.layer;
+    g_hrSpriteAttrsOut[hrPos] =
+        output.colorCalcRatio |
+        ((output.colorMSB ? 1u : 0u) << kSpriteAttrBitColorMSB) |
+        ((output.shadowOrWindow ? 1u : 0u) << kSpriteAttrBitShadowWindow) |
+        (output.special << kSpriteAttrBitSpecial);
+}
+#else
 [numthreads(32, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
-#ifdef HR_SPRITE
-    if (!HRPixelDiffers(drawCoord)) {
-        return;
-    }
-#endif
     const uint2 outCoord = uint2(drawCoord.x, GetY(drawCoord.y));
     const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, id.z);
     g_layerOut[uint3(outCoord.xy, id.z + 6)] = output.layer;
@@ -576,3 +612,4 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         ((output.shadowOrWindow ? 1u : 0u) << kSpriteAttrBitShadowWindow) |
         (output.special << kSpriteAttrBitSpecial);
 }
+#endif

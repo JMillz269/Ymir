@@ -36,11 +36,12 @@ namespace {
     constexpr uint32 kMaxHRScale = 4;
     // (the variants are named after the mesh mode and the shading or merging mode; only the checkerboard mesh mode is
     // used, as transparent meshes aren't available with this renderer)
+    // (the polygon drawing variants used find the span of a pixel through a table, see Vdp1DrawParams)
     constexpr const char *kPolyDrawShaderPaths[4] = {
-        "src/vdp/cs_vdp1_polydraw_0_0.metallib",
-        "src/vdp/cs_vdp1_polydraw_0_1.metallib",
-        "src/vdp/cs_vdp1_polydraw_0_2.metallib",
-        "src/vdp/cs_vdp1_polydraw_0_3.metallib",
+        "src/vdp/cs_vdp1_polydraw_0_0_st.metallib",
+        "src/vdp/cs_vdp1_polydraw_0_1_st.metallib",
+        "src/vdp/cs_vdp1_polydraw_0_2_st.metallib",
+        "src/vdp/cs_vdp1_polydraw_0_3_st.metallib",
     };
     constexpr const char *kMergerShaderPaths[3] = {
         "src/vdp/cs_vdp1_output_merger_0_0.metallib",
@@ -88,6 +89,7 @@ namespace {
         // VDP1
         Vdp1Spans,
         Vdp1PrefixSums,
+        Vdp1SpanBlockStarts,
         Vdp1Commands,
         Vdp1FBWrites,
         Vdp1SpriteOut,
@@ -101,6 +103,8 @@ namespace {
         SpriteFBNative,
         CompositeNative,
         HrStats,
+        HrSpriteLayer,
+        HrSpriteAttrs,
     };
 
     Res ResourceForName(NSString *name) {
@@ -128,6 +132,7 @@ namespace {
             {"g_compositeOut", Res::Composite},
             {"g_spanParams", Res::Vdp1Spans},
             {"g_spanPrefixSums", Res::Vdp1PrefixSums},
+            {"g_spanBlockStarts", Res::Vdp1SpanBlockStarts},
             {"g_commandParams", Res::Vdp1Commands},
             {"g_fbramWrites", Res::Vdp1FBWrites},
             {"g_internalSpriteOut", Res::Vdp1SpriteOut},
@@ -141,6 +146,10 @@ namespace {
             {"g_spriteFBNative", Res::SpriteFBNative},
             {"g_compositeNative", Res::CompositeNative},
             {"g_hrStats", Res::HrStats},
+            {"g_hrSpriteLayerOut", Res::HrSpriteLayer},
+            {"g_hrSpriteLayerIn", Res::HrSpriteLayer},
+            {"g_hrSpriteAttrsOut", Res::HrSpriteAttrs},
+            {"g_hrSpriteAttrsIn", Res::HrSpriteAttrs},
         };
         for (const Entry &entry : kEntries) {
             if ([name isEqualToString:[NSString stringWithUTF8String:entry.name]]) {
@@ -435,8 +444,12 @@ public:
         }
         m_compositeHR = Create2DTexture(MTLPixelFormatRGBA8Unorm, kMaxNormalResH * kMaxHRScale,
                                         kMaxNormalResV * kMaxHRScale, 1);
-        if (m_compositeHR == nil) {
-            error = "Could not allocate the GPU texture for the VDP2 internal resolution output";
+        m_hrSpriteLayer = Create2DTexture(MTLPixelFormatRGBA8Uint, kMaxNormalResH * kMaxHRScale,
+                                          kMaxNormalResV * kMaxHRScale, 1);
+        m_hrSpriteAttrs = Create2DTexture(MTLPixelFormatR16Uint, kMaxNormalResH * kMaxHRScale,
+                                          kMaxNormalResV * kMaxHRScale, 1);
+        if (m_compositeHR == nil || m_hrSpriteLayer == nil || m_hrSpriteAttrs == nil) {
+            error = "Could not allocate the GPU textures for the VDP2 internal resolution output";
             return false;
         }
         // (two framebuffers of 512x256 16-bit pixels, scaled up)
@@ -527,6 +540,10 @@ public:
             staged.v1PrefixSums = StageRaw(m_blobPrefixSums, params.prefixSums, params.prefixSumsSize,
                                            TexelBufferBytes(params.prefixSumsSize, MTLPixelFormatR32Uint));
             MakeTexelView(m_blobPrefixSums, params.prefixSumsSize, MTLPixelFormatR32Uint);
+            staged.v1SpanBlockStarts =
+                StageRaw(m_blobSpanBlockStarts, params.spanBlockStarts, params.spanBlockStartsSize,
+                         TexelBufferBytes(params.spanBlockStartsSize, MTLPixelFormatR32Uint));
+            MakeTexelView(m_blobSpanBlockStarts, params.spanBlockStartsSize, MTLPixelFormatR32Uint);
             staged.v1Commands = StageRaw(m_blobCommands, params.commands, params.commandsSize);
             if (params.shadingMode == 2) {
                 // (the counter of fragments starts at zero for every dispatch)
@@ -534,7 +551,7 @@ public:
                 staged.v1Counter = StageRaw(m_blobCounter, &zero, sizeof(zero));
             }
         } while (generation != m_arenaGeneration);
-        Profile((params.hr ? 2 : 0));
+        Profile(params.hr ? (params.shadingMode == 2 ? 10 : 2) : 0);
         EnsureCompute();
 
         // Draw the spans
@@ -564,7 +581,7 @@ public:
                 generation = m_arenaGeneration;
                 mergeStaged.common = StageRaw(m_blobMergeCommon, params.constants, params.commonSize);
             } while (generation != m_arenaGeneration);
-            Profile((params.hr ? 3 : 1));
+            Profile(params.hr ? (params.shadingMode == 2 ? 11 : 3) : 1);
             EnsureCompute();
             // (the draw above has been recorded already; if the arena was emptied to make room the encoder is a new one)
 
@@ -901,47 +918,37 @@ public:
             return;
         }
 
-        // Compose the lines again for every sub-pixel, where the sprite data changed
+        // Draw the sprite layer of every sub-pixel of the lines (one thread each), then compose every native pixel
+        // whose sub-pixels' sprite data changed (one thread each, going through its sub-pixels)
         std::memcpy(&common[startYOffset], &planeStartY, sizeof(planeStartY));
-
-        // (everything but the common parameters is staged once, again if the arena is emptied to make room)
         Staged staged{};
-        uint64 othersGeneration = ~0ull;
-        for (uint32 plane = 0; plane < scale * scale; ++plane) {
-            const uint32 planeEnhancements = enhancements | (plane << 5);
-            std::memcpy(&common[enhancementsOffset], &planeEnhancements, sizeof(planeEnhancements));
-            uint64 generation;
-            do {
-                generation = m_arenaGeneration;
-                if (othersGeneration != generation) {
-                    staged.layerParams = Stage(m_blobLayerParams, layers.layerParams, layers.layerParamsSize);
-                    staged.cramColor = StageTexels(m_blobCramColor, layers.cramColors, layers.cramColorsSize,
-                                                   MTLPixelFormatRGBA8Uint);
-                    staged.cramRotCoeff = Stage(m_blobCramRot, layers.cramRotCoeffs, layers.cramRotCoeffsSize);
-                    staged.rotParamBases = Stage(m_blobRotBases, layers.rotParamBases, layers.rotParamBasesSize);
-                    staged.composeParams = Stage(m_blobCompose, compose.composeParams, compose.composeParamsSize);
-                    staged.lnclBack =
-                        StageTexels(m_blobLnclBack, compose.lnclBack, compose.lnclBackSize, MTLPixelFormatRGBA8Uint);
-                    othersGeneration = m_arenaGeneration;
-                }
-                staged.common = Stage(m_blobCommon, common.data(), layers.commonSize);
-            } while (generation != m_arenaGeneration);
-            Profile(8);
-            EnsureCompute();
+        uint64 generation;
+        do {
+            generation = m_arenaGeneration;
+            staged.layerParams = Stage(m_blobLayerParams, layers.layerParams, layers.layerParamsSize);
+            staged.cramColor =
+                StageTexels(m_blobCramColor, layers.cramColors, layers.cramColorsSize, MTLPixelFormatRGBA8Uint);
+            staged.cramRotCoeff = Stage(m_blobCramRot, layers.cramRotCoeffs, layers.cramRotCoeffsSize);
+            staged.rotParamBases = Stage(m_blobRotBases, layers.rotParamBases, layers.rotParamBasesSize);
+            staged.composeParams = Stage(m_blobCompose, compose.composeParams, compose.composeParamsSize);
+            staged.lnclBack = StageTexels(m_blobLnclBack, compose.lnclBack, compose.lnclBackSize, MTLPixelFormatRGBA8Uint);
+            staged.common = Stage(m_blobCommon, common.data(), layers.commonSize);
+        } while (generation != m_arenaGeneration);
 
-            m_bindHR = true;
-            [m_encoder setComputePipelineState:m_hrSprite.state];
-            Bind(m_hrSprite, staged);
-            [m_encoder dispatchThreadgroups:MTLSizeMake((layers.hres + 31) / 32, planeNumLines, 1)
-                      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-            Profile(9);
-            EnsureCompute();
-            [m_encoder setComputePipelineState:m_hrCompose.state];
-            Bind(m_hrCompose, staged);
-            [m_encoder dispatchThreadgroups:MTLSizeMake((compose.hres + 31) / 32, planeNumLines, 1)
-                      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-            m_bindHR = false;
-        }
+        Profile(8);
+        EnsureCompute();
+        m_bindHR = true;
+        [m_encoder setComputePipelineState:m_hrSprite.state];
+        Bind(m_hrSprite, staged);
+        [m_encoder dispatchThreadgroups:MTLSizeMake((layers.hres * scale + 31) / 32, planeNumLines * scale, 1)
+                  threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        Profile(9);
+        EnsureCompute();
+        [m_encoder setComputePipelineState:m_hrCompose.state];
+        Bind(m_hrCompose, staged);
+        [m_encoder dispatchThreadgroups:MTLSizeMake((compose.hres + 31) / 32, planeNumLines, 1)
+                  threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        m_bindHR = false;
     }
 
     void ComposePass(const ComposePassParams &params, bool hr) {
@@ -1005,7 +1012,7 @@ public:
                 counts[0] = counts[1] = 0;
             }
             if (m_profileBuf != nil) {
-                char text[512];
+                char text[768];
                 int n = std::snprintf(text, sizeof(text), "last 300 frames, ms per frame by pass (encoders per frame):");
                 for (uint32 kind = 0; kind < kProfileKinds && n > 0 && n < static_cast<int>(sizeof(text)); ++kind) {
                     const uint64_t kindMicros = m_profileMicros[kind].exchange(0);
@@ -1144,6 +1151,7 @@ private:
         const Blob *lnclBack = nullptr;
         const Blob *v1Spans = nullptr;
         const Blob *v1PrefixSums = nullptr;
+        const Blob *v1SpanBlockStarts = nullptr;
         const Blob *v1Commands = nullptr;
         const Blob *v1FBWrites = nullptr;
         const Blob *v1Counter = nullptr;
@@ -1169,16 +1177,19 @@ private:
     std::array<Pipeline, 3> m_merger;
     Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrSprite, m_hrCompose, m_hrReplicate;
     id<MTLTexture> m_compositeHR = nil; ///< scaled up output image
+    id<MTLTexture> m_hrSpriteLayer = nil; ///< sprite layer of the scaled up image (see the internal resolution shaders)
+    id<MTLTexture> m_hrSpriteAttrs = nil;
     id<MTLBuffer> m_fbramHR = nil; ///< scaled up VDP1 framebuffers (see Vdp1EnableHR)
     id<MTLBuffer> m_hrReadback = nil;
     id<MTLBuffer> m_hrStatsBuf = nil; ///< two counters the composition of the scaled up image adds to (see its shader)
     // Profiling (a folder named metal-vdp-profile in the Documents folder turns it on): the time the GPU spends on each
     // kind of pass, from timestamps taken at the start and the end of the compute encoders
-    static constexpr uint32 kProfileKinds = 10;
+    static constexpr uint32 kProfileKinds = 12;
     static constexpr uint32 kProfileSamplesPerSlot = 256; // two for each encoder
     inline static const char *const kProfileNames[kProfileKinds] = {
         "vdp1 draw",       "vdp1 merge",     "vdp1 draw (scaled up)", "vdp1 merge (scaled up)", "vdp1 erase and writes",
         "vdp2 layers",     "vdp2 compose",   "scaled up fill",        "scaled up sprites",    "scaled up compose",
+        "vdp1 half-transparent draw (scaled up)", "vdp1 half-transparent merge (scaled up)",
     };
     id<MTLCounterSampleBuffer> m_profileBuf = nil;
     uint32 m_profileKind = 0;
@@ -1227,8 +1238,8 @@ private:
     Blob m_blobCommon, m_blobLayerParams, m_blobCramColor, m_blobCramRot, m_blobRotBases, m_blobCompose,
         m_blobLnclBack;
     // (the data of the VDP1 passes is never reused, so these are only places to keep the staging results)
-    Blob m_blobV1Params, m_blobSpans, m_blobPrefixSums, m_blobCommands, m_blobFBWrites, m_blobCounter,
-        m_blobMergeCommon;
+    Blob m_blobV1Params, m_blobSpans, m_blobPrefixSums, m_blobSpanBlockStarts, m_blobCommands, m_blobFBWrites,
+        m_blobCounter, m_blobMergeCommon;
 
     // -------------------------------------------------------------------------------------------------------------
     // Setup
@@ -1512,8 +1523,11 @@ private:
             case Res::SpriteFBNative: buffer = m_fbram; break;
             case Res::CompositeNative: texture = m_composite; break;
             case Res::HrStats: buffer = m_hrStatsBuf; break;
+            case Res::HrSpriteLayer: texture = m_hrSpriteLayer; break;
+            case Res::HrSpriteAttrs: texture = m_hrSpriteAttrs; break;
             case Res::Vdp1Spans: blob = staged.v1Spans; break;
             case Res::Vdp1PrefixSums: blob = staged.v1PrefixSums; break;
+            case Res::Vdp1SpanBlockStarts: blob = staged.v1SpanBlockStarts; break;
             case Res::Vdp1Commands: blob = staged.v1Commands; break;
             case Res::Vdp1FBWrites: blob = staged.v1FBWrites; break;
             case Res::Vdp1Counter: blob = staged.v1Counter; break;

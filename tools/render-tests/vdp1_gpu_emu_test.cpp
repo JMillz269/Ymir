@@ -472,6 +472,8 @@ struct EmuGpu final : metal::Gpu {
     uint32 numSpans;
     const VDP1SpanParams *spans;
     const uint32 *prefix;
+    const uint32 *blockStarts;
+    uint32 tableMismatches = 0;
     const VDP1CommandParams *cmds;
     uint32 dpBits;
     uint32 shading;
@@ -561,6 +563,17 @@ struct EmuGpu final : metal::Gpu {
         }
         if (spanIndex == 0xFFFFFFFF) {
             spanIndex = lb - 1u;
+        }
+        // The shader finds the span through the table of the spans of the first pixels of groups of 64
+        {
+            uint32 span = blockStarts[id >> 6];
+            while (prefix[span + 1] <= id) {
+                ++span;
+            }
+            if (span != spanIndex) {
+                std::printf("span table mismatch at pixel %u: %u, search %u\n", id, span, spanIndex);
+                ++tableMismatches;
+            }
         }
 
         const VDP1SpanParams &span = spans[spanIndex];
@@ -854,6 +867,12 @@ struct EmuGpu final : metal::Gpu {
         numSpans = pd.numSpans;
         spans = (const VDP1SpanParams *)p.spans;
         prefix = (const uint32 *)p.prefixSums;
+        blockStarts = (const uint32 *)p.spanBlockStarts;
+        if (p.spanBlockStartsSize < ((p.numPixels + 63) / 64) * 4) {
+            std::printf("span table too small: %u bytes for %u pixels\n", p.spanBlockStartsSize, p.numPixels);
+            ++tableMismatches;
+            return;
+        }
         cmds = (const VDP1CommandParams *)p.commands;
         shading = p.shadingMode;
         nextNode = 0;
@@ -1146,6 +1165,10 @@ int main(int argc, char **argv) {
         vdp1.SwapFramebuffer();
         stateSW->fbIndex.Flip();
         stateGPU->fbIndex.Flip();
+    }
+    if (gpu.tableMismatches) {
+        std::printf("%u span table mismatches\n", gpu.tableMismatches);
+        ++badFrames;
     }
     return badFrames;
 }

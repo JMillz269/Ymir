@@ -20,12 +20,15 @@ Texture2D<uint> g_colorCalcWindowIn : register(t6);
 RWTexture2D<float4> g_compositeOut : register(u1);
 
 #ifdef HR_COMPOSE
-// Internal resolution variant inputs: the scaled up and native VDP1 framebuffers, to tell which pixels of the plane
-// differ from the native image (the output has been filled with the native image already)
-ByteAddressBuffer g_spriteFB : register(t7);
-ByteAddressBuffer g_spriteFBNative : register(t8);
-// Counts (for the log): every 64th pixel of the plane that was looked at, and how many of those differ
-RWByteAddressBuffer g_hrStats : register(u2);
+// Internal resolution variant: the sprite layer of every sub-pixel, as the internal resolution variant of the sprite
+// layer pass leaves it (sub-pixels with the native sprite data are marked; the output has the native image there
+// already). The other layers are the native ones.
+Texture2D<uint4> g_hrSpriteLayerIn : register(t7);
+Texture2D<uint> g_hrSpriteAttrsIn : register(t8);
+static const uint kHRSameAsNative = 0x8000;
+// The sprite layer pixel of the sub-pixel being composed
+static uint4 g_hrSpriteLayer;
+static uint g_hrSpriteAttrs;
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -151,6 +154,23 @@ uint GetColorGradScreenLayerIndex(uint colorGradScreen) {
     }
 }
 
+// The sprite layer pixel and its attributes at the given position
+uint4 GetSpriteLayer(uint2 pos) {
+#ifdef HR_COMPOSE
+    return g_hrSpriteLayer;
+#else
+    return g_layerIn[uint3(pos, kLayerIndexSprite)];
+#endif
+}
+
+uint GetSpriteAttrs(uint2 pos) {
+#ifdef HR_COMPOSE
+    return g_hrSpriteAttrs;
+#else
+    return g_spriteAttrsIn[uint3(pos, 0)];
+#endif
+}
+
 bool IsColorCalcEnabled(uint layer, uint2 pos) {
     const bool enabled = BitTest(g_composeParams[0].colorCalcEnable, layer);
     if (layer >= kLayerBack) {
@@ -167,11 +187,11 @@ bool IsColorCalcEnabled(uint layer, uint2 pos) {
     const bool restrictedColorCalc = BitTest(g_commonParams.layerParams, 24);
     if (layer == kLayerSprite) {
         // Sprites use condition modes based on priority or color MSB
-        const uint layerAttrs = g_layerIn[uint3(pos, kLayerIndexSprite)].a;
+        const uint layerAttrs = GetSpriteLayer(pos).a;
         if (restrictedColorCalc && BitTest(layerAttrs, kPixelAttrBitSpecColorCalc)) {
             return false;
         }
-        const uint attrs = g_spriteAttrsIn[uint3(pos, 0)];
+        const uint attrs = GetSpriteAttrs(pos);
         const uint priority = BitExtract(layerAttrs, 0, 3);
         const uint value = BitExtract(g_commonParams.spriteParams, 12, 3);
         const uint cond = BitExtract(g_commonParams.spriteParams, 15, 2);
@@ -214,7 +234,7 @@ uint3 GetLineColor(uint layer, uint2 pos) {
 int GetColorCalcRatio(uint layer, uint2 pos) {
     switch (layer) {
         case kLayerSprite:
-            return BitExtract(g_spriteAttrsIn[uint3(pos, 0)], kSpriteAttrBitColorCalcRatio, 5);
+            return BitExtract(GetSpriteAttrs(pos), kSpriteAttrBitColorCalcRatio, 5);
         case kLayerRBG0:
         case kLayerNBG0_RBG1:
         case kLayerNBG1_EXBG:
@@ -245,6 +265,7 @@ int3 GetColorOffset(uint layer) {
 uint4 GetLayerOutput(uint layer, uint2 pos) {
     switch (layer) {
         case kLayerSprite:
+            return GetSpriteLayer(pos);
         case kLayerMesh:
         case kLayerRBG0:
         case kLayerNBG0_RBG1:
@@ -310,7 +331,7 @@ uint3 Compose(uint2 basePos) {
 
         // Skip normal shadow sprite layer pixels
         if (layer == kLayerSprite) {
-            const uint spriteAttrs = g_spriteAttrsIn[uint3(pos, 0)];
+            const uint spriteAttrs = GetSpriteAttrs(pos);
             if (BitExtract(spriteAttrs, kSpriteAttrBitSpecial, 2) != kSpriteDataNormal) {
                 continue;
             }
@@ -438,7 +459,7 @@ uint3 Compose(uint2 basePos) {
     const uint4 spriteOutput = GetLayerOutput(kLayerSprite, pos);
     const uint spritePriority = BitExtract(spriteOutput.a, 0, 3);
     if (spritePriority >= layerPrios[0]) {
-        const uint spriteAttrs = g_spriteAttrsIn[uint3(pos, 0)];
+        const uint spriteAttrs = GetSpriteAttrs(pos);
         const bool useSpriteWindow = BitTest(g_commonParams.spriteParams, 20);
         const bool isNormalShadow = BitExtract(spriteAttrs, kSpriteAttrBitSpecial, 2) == kSpriteDataShadow;
         const bool isMSBShadow = !useSpriteWindow && BitTest(spriteAttrs, kSpriteAttrBitShadowWindow);
@@ -494,36 +515,59 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
     const uint2 outCoord = uint2(drawCoord.x, GetOutputY(drawCoord.y));
 #ifdef HR_COMPOSE
-    // Internal resolution variant: the output is scaled up and this is one of the sub-pixels of every pixel
+    // Internal resolution variant: composes the sub-pixels of the native pixel whose sprite data isn't the native
+    // pixel's (the others have the native image already). Sub-pixels with the same sprite layer pixel come out the
+    // same, so the last few results are kept and reused.
     const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
-    const uint hrPlane = BitExtract(g_commonParams.enhancements, 5, 4);
-    const uint2 hrOutCoord = outCoord * hrScale + uint2(hrPlane % hrScale, hrPlane / hrScale);
-
-    // Pixels with the same sprite data as the native image come out the same as the native image
-    bool differs = true;
-    if (!BitTest(g_commonParams.spriteParams, 0) && !BitTest(g_commonParams.spriteParams, 8) &&
-        !BitTest(g_commonParams.spriteParams, 9) && !BitTest(g_commonParams.enhancements, 0)) {
-        const uint fbWidth = 512u << BitExtract(g_commonParams.spriteParams, 6, 1);
-        const uint address = (drawCoord.x + drawCoord.y * fbWidth) * 2;
-        const uint displayFB = BitExtract(g_commonParams.spriteParams, 23, 1);
-        const uint nativeAddress = address + displayFB * kVDP1FBRAMSize;
-        const uint nativeWord = ByteSwap16(g_spriteFBNative.Load(nativeAddress & ~3) >> ((nativeAddress & 2) * 8));
-        // (the same pixel of this plane in the scaled up framebuffer)
-        const uint hrX = drawCoord.x * hrScale + hrPlane % hrScale;
-        const uint hrY = drawCoord.y * hrScale + hrPlane / hrScale;
-        const uint hrAddress = displayFB * kVDP1FBRAMSize * hrScale * hrScale + (hrY * fbWidth * hrScale + hrX) * 2;
-        const uint hrWord = ByteSwap16(g_spriteFB.Load(hrAddress & ~3) >> ((hrAddress & 2) * 8));
-        differs = nativeWord != hrWord;
+    uint cacheLayer0 = 0, cacheAttrs0 = 0xFFFFFFFF, cacheColor0 = 0;
+    uint cacheLayer1 = 0, cacheAttrs1 = 0xFFFFFFFF, cacheColor1 = 0;
+    uint cacheLayer2 = 0, cacheAttrs2 = 0xFFFFFFFF, cacheColor2 = 0;
+    uint cacheLayer3 = 0, cacheAttrs3 = 0xFFFFFFFF, cacheColor3 = 0;
+    uint cacheNext = 0;
+    for (uint sub = 0; sub < hrScale * hrScale; ++sub) {
+        const uint2 hrPos = outCoord * hrScale + uint2(sub % hrScale, sub / hrScale);
+        const uint attrs = g_hrSpriteAttrsIn[hrPos];
+        if (attrs == kHRSameAsNative) {
+            continue;
+        }
+        const uint4 layer = g_hrSpriteLayerIn[hrPos];
+        const uint key = layer.r | (layer.g << 8u) | (layer.b << 16u) | (layer.a << 24u);
+        uint color;
+        if (cacheAttrs0 == attrs && cacheLayer0 == key) {
+            color = cacheColor0;
+        } else if (cacheAttrs1 == attrs && cacheLayer1 == key) {
+            color = cacheColor1;
+        } else if (cacheAttrs2 == attrs && cacheLayer2 == key) {
+            color = cacheColor2;
+        } else if (cacheAttrs3 == attrs && cacheLayer3 == key) {
+            color = cacheColor3;
+        } else {
+            g_hrSpriteLayer = layer;
+            g_hrSpriteAttrs = attrs;
+            const uint3 rgb = Compose(drawCoord);
+            color = rgb.r | (rgb.g << 8u) | (rgb.b << 16u);
+            if (cacheNext == 0) {
+                cacheLayer0 = key;
+                cacheAttrs0 = attrs;
+                cacheColor0 = color;
+            } else if (cacheNext == 1) {
+                cacheLayer1 = key;
+                cacheAttrs1 = attrs;
+                cacheColor1 = color;
+            } else if (cacheNext == 2) {
+                cacheLayer2 = key;
+                cacheAttrs2 = attrs;
+                cacheColor2 = color;
+            } else {
+                cacheLayer3 = key;
+                cacheAttrs3 = attrs;
+                cacheColor3 = color;
+            }
+            cacheNext = (cacheNext + 1u) & 3u;
+        }
+        const uint3 rgb = uint3(color & 0xFFu, (color >> 8u) & 0xFFu, (color >> 16u) & 0xFFu);
+        g_compositeOut[hrPos] = float4(rgb / 255.0, 1.0f);
     }
-    if (((drawCoord.x | drawCoord.y) & 7u) == 0u) {
-        uint dummy;
-        g_hrStats.InterlockedAdd(differs ? 4 : 0, 1, dummy);
-    }
-    if (!differs) {
-        return;
-    }
-    const uint3 hrColor = Compose(drawCoord);
-    g_compositeOut[hrOutCoord] = float4(hrColor / 255.0, 1.0f);
     return;
 #endif
     const uint3 outColor = Compose(drawCoord);

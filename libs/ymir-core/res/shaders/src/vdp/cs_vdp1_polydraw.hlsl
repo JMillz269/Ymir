@@ -63,6 +63,10 @@ StructuredBuffer<PolySpan> g_spanParams : register(t1);
 Buffer<uint> g_spanPrefixSums : register(t2);
 StructuredBuffer<CommandParams> g_commandParams : register(t3);
 ByteAddressBuffer g_vram : register(t4);
+#if POLYSPEC_SPAN_TABLE
+// The span that holds the first pixel of every group of 64 pixels (lets threads find their span without searching)
+Buffer<uint> g_spanBlockStarts : register(t5);
+#endif
 
 #if POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_OIT
 
@@ -111,6 +115,15 @@ uint GetSpanIndex(uint pixelIndex) {
     if (pixelIndex >= g_spanPrefixSums[g_polyDrawParams.numSpans]) {
         return 0xFFFFFFFF;
     }
+
+#if POLYSPEC_SPAN_TABLE
+    // Start at the span of the first pixel of the group and move on to the one holding this pixel
+    uint span = g_spanBlockStarts[pixelIndex >> 6u];
+    while (g_spanPrefixSums[span + 1u] <= pixelIndex) {
+        ++span;
+    }
+    return span;
+#endif
 
     // Binary search for smallest span index where pixelIndex >= prefixSum.
     // The span prefix sums array always contains [0, ..., total length].

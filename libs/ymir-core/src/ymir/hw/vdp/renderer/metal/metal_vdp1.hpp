@@ -280,6 +280,7 @@ private:
         std::vector<VDP1SpanParams> cpuSpanParams;
         std::vector<HLSLuint> cpuSpanPrefixSums;
         std::vector<VDP1CommandParams> cpuCmdParams;
+        std::vector<HLSLuint> cpuSpanBlockStarts; ///< see BuildSpanBlockStarts
         uint32 cpuSpanCount = 0;
         uint32 cpuCmdCount = 0;
 
@@ -705,6 +706,26 @@ private:
         vramTexUsageTracker.Clear();
     }
 
+    /// @brief Fills the table the polygon drawing shader finds the span of a pixel with: for every group of 64 pixels
+    /// (a group of threads), the index of the span holding its first pixel.
+    /// @return the number of entries
+    static uint32 BuildSpanBlockStarts(Batch &batch) {
+        const uint32 numPixels = batch.cpuSpanPrefixSums[batch.cpuSpanCount];
+        const uint32 numBlocks = (numPixels + 63) / 64;
+        if (batch.cpuSpanBlockStarts.size() < numBlocks) {
+            batch.cpuSpanBlockStarts.resize(numBlocks);
+        }
+        uint32 span = 0;
+        for (uint32 block = 0; block < numBlocks; ++block) {
+            const uint32 pixel = block * 64;
+            while (batch.cpuSpanPrefixSums[span + 1] <= pixel) {
+                ++span;
+            }
+            batch.cpuSpanBlockStarts[block] = span;
+        }
+        return numBlocks;
+    }
+
     /// @brief Draws a batch of spans, into the scaled up framebuffer if `hr`.
     void VDP1SubmitBatch(Batch &batch, bool hr) {
         if (batch.cpuSpanCount == 0) {
@@ -741,6 +762,9 @@ private:
         pass.spansSize = static_cast<uint32>(sizeof(VDP1SpanParams) * batch.cpuSpanCount);
         pass.prefixSums = batch.cpuSpanPrefixSums.data();
         pass.prefixSumsSize = static_cast<uint32>(sizeof(HLSLuint) * (batch.cpuSpanCount + 1));
+        const uint32 numBlocks = BuildSpanBlockStarts(batch);
+        pass.spanBlockStarts = batch.cpuSpanBlockStarts.data();
+        pass.spanBlockStartsSize = static_cast<uint32>(sizeof(HLSLuint) * numBlocks);
         pass.commands = batch.cpuCmdParams.data();
         pass.commandsSize = static_cast<uint32>(sizeof(VDP1CommandParams) * batch.cpuCmdCount);
         pass.shadingMode = static_cast<uint32>(bit::extract<1, 2>(currPolyDrawShaderIndex));

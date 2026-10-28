@@ -65,6 +65,8 @@ struct Vdp1DrawParams {
     uint32 spansSize = 0;
     const void *prefixSums = nullptr; ///< number of spans + 1 pixel counts
     uint32 prefixSumsSize = 0;
+    const void *spanBlockStarts = nullptr; ///< for every 64 pixels, the index of the span holding the first one
+    uint32 spanBlockStartsSize = 0;
     const void *commands = nullptr; ///< VDP1CommandParams
     uint32 commandsSize = 0;
 
