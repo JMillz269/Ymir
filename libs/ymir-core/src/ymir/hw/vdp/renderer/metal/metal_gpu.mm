@@ -928,6 +928,8 @@ public:
             Bind(m_hrSprite, staged);
             [m_encoder dispatchThreadgroups:MTLSizeMake((layers.hres + 31) / 32, planeNumLines, 1)
                       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            Profile(9);
+            EnsureCompute();
             [m_encoder setComputePipelineState:m_hrCompose.state];
             Bind(m_hrCompose, staged);
             [m_encoder dispatchThreadgroups:MTLSizeMake((compose.hres + 31) / 32, planeNumLines, 1)
@@ -1155,11 +1157,11 @@ private:
     id<MTLBuffer> m_hrReadback = nil;
     // Profiling (a folder named metal-vdp-profile in the Documents folder turns it on): the time the GPU spends on each
     // kind of pass, from timestamps taken at the start and the end of the compute encoders
-    static constexpr uint32 kProfileKinds = 9;
+    static constexpr uint32 kProfileKinds = 10;
     static constexpr uint32 kProfileSamplesPerSlot = 256; // two for each encoder
     inline static const char *const kProfileNames[kProfileKinds] = {
         "vdp1 draw",       "vdp1 merge",     "vdp1 draw (scaled up)", "vdp1 merge (scaled up)", "vdp1 erase and writes",
-        "vdp2 layers",     "vdp2 compose",   "scaled up fill",        "scaled up recompose",
+        "vdp2 layers",     "vdp2 compose",   "scaled up fill",        "scaled up sprites",    "scaled up compose",
     };
     id<MTLCounterSampleBuffer> m_profileBuf = nil;
     uint32 m_profileKind = 0;
