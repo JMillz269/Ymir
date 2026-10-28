@@ -1019,6 +1019,12 @@ int main(int argc, char **argv) {
     }
     put(0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, 319, 223, 0, 0);
     put(0x000A, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    // huge quads reaching far beyond the screen (a ground plane close to the camera), textured and flat, drawn
+    // under everything else
+    // (edges about 2000 pixels long with coordinates within the 11 bits the VDP1 draws at, so beyond 4095 pixels at
+    // 3x and 4x)
+    put(0x0002, 0, 0x0028, 0, 0x20000 >> 3, (2 << 8) | 16, -1000, 150, 1000, 150, 1020, 1000, -1020, 1000);
+    put(0x0004, 0, 0x0000, 0x8210, 0, 0, -1000, -1000, 1000, -1010, 1000, 60, -1000, 40);
     // opaque base: textured rotated sprites and polygons
     put(0x0002, 0, 0x0028, 0, 0x20000 >> 3, (2 << 8) | 16, 20, 20, 150, 40, 130, 150, 30, 120);
     put(0x0004, 0, 0x0000, 0x83E0, 0, 0, 100, 60, 220, 60, 220, 140, 100, 140);
@@ -1211,6 +1217,35 @@ int main(int argc, char **argv) {
                     std::printf("  %u scaled up pixels of thin shapes are not drawn\n", holes);
                     ++badFrames;
                 }
+            }
+            if (std::getenv("DUMP") && frame == 0) {
+                // Writes the native (scaled up by repetition), GPU and software scaled up framebuffers as PPM images
+                auto dump = [&](const char *name, auto pixelAt) {
+                    FILE *f = std::fopen(name, "wb");
+                    std::fprintf(f, "P6 %u %u 255\n", 320 * scale, 224 * scale);
+                    for (uint32 y = 0; y < 224 * scale; ++y) {
+                        for (uint32 x = 0; x < 320 * scale; ++x) {
+                            const uint16 v = pixelAt(x, y);
+                            const uint8 rgb[3] = {uint8((v & 31) << 3), uint8(((v >> 5) & 31) << 3),
+                                                  uint8(((v >> 10) & 31) << 3)};
+                            std::fwrite(rgb, 1, 3, f);
+                        }
+                    }
+                    std::fclose(f);
+                };
+                dump("dump_native.ppm", [&](uint32 x, uint32 y) {
+                    const uint8 *n = &stateSW->mem1.FBRAM[fbi][(size_t(y / scale) * 512 + x / scale) * 2];
+                    return uint16((uint16(n[0]) << 8) | n[1]);
+                });
+                dump("dump_gpu_native.ppm", [&](uint32 x, uint32 y) {
+                    const uint8 *n = &gpu.fbram[fbi * 256 * 1024 + (size_t(y / scale) * 512 + x / scale) * 2];
+                    return uint16((uint16(n[0]) << 8) | n[1]);
+                });
+                dump("dump_gpu_hr.ppm", [&](uint32 x, uint32 y) {
+                    const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * scale * scale + (size_t(y) * stride + x) * 2];
+                    return uint16((uint16(g[0]) << 8) | g[1]);
+                });
+                dump("dump_sw_hr.ppm", [&](uint32 x, uint32 y) { return swHr[size_t(y) * stride + x]; });
             }
             std::printf("  scaled up %ux (%u pixels drawn): %u pixels differ", scale, hfilled, hdiffs);
             if (hdiffs) {

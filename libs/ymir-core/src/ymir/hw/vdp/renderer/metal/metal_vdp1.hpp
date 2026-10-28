@@ -504,6 +504,19 @@ private:
         }
     }
 
+    /// @brief The steppers wrap coordinate deltas and step counts around at the 13 bits of the VDP1. The scaled up pass
+    /// gives them two more bits so that a quad wraps around when it does natively (scales up to 4x).
+    static constexpr sint32 kHRStepperBits = 13 + 2;
+
+    /// @brief Calls fn.template operator()<bits>() with the number of bits of the steppers in the current pass.
+    template <typename Fn>
+    decltype(auto) WithStepperBits(Fn &&fn) const {
+        if (m_hrPass) {
+            return fn.template operator()<kHRStepperBits>();
+        }
+        return fn.template operator()<13>();
+    }
+
     // -----------------------------------------------------------------------------------------------------------------
     // Shader selection
 
@@ -995,9 +1008,11 @@ private:
         }
 
         // Determine span length
-        LineStepper line{coord0, coord1};
-        const uint32 skip = line.SystemClip(sysClipH, sysClipV);
-        const uint32 length = line.Length();
+        const auto [skip, length] = WithStepperBits([&]<sint32 bits>() {
+            LineStepper<bits> line{coord0, coord1};
+            const uint32 lineSkip = line.SystemClip(sysClipH, sysClipV);
+            return std::pair<uint32, uint32>{lineSkip, line.Length()};
+        });
 
         if (length == 0) {
             // Entire line was clipped
@@ -1075,7 +1090,15 @@ private:
 
     void VDP1PlotTexturedQuad(VDP1SpanData &data, uint32 cmdAddress, VDP1Command::Control control, CoordS32 coordA,
                               CoordS32 coordB, CoordS32 coordC, CoordS32 coordD) {
-        QuadStepper quad{coordA, coordB, coordC, coordD};
+        WithStepperBits([&]<sint32 bits>() {
+            VDP1PlotTexturedQuad<bits>(data, cmdAddress, control, coordA, coordB, coordC, coordD);
+        });
+    }
+
+    template <sint32 t_bits>
+    void VDP1PlotTexturedQuad(VDP1SpanData &data, uint32 cmdAddress, VDP1Command::Control control, CoordS32 coordA,
+                              CoordS32 coordB, CoordS32 coordC, CoordS32 coordD) {
+        QuadStepper<t_bits> quad{coordA, coordB, coordC, coordD};
 
         if (data.mode.gouraudEnable) {
             const uint32 gouraudTable = static_cast<uint32>(vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x1C)) << 3u;
@@ -1512,60 +1535,62 @@ private:
         };
 
         HRForEachQuad(coordA, coordB, coordC, coordD, [&](CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d) {
-            QuadStepper quad{a, b, c, d};
-
-            if (mode.gouraudEnable) {
-                quad.SetupGouraud(gouraudA, gouraudB, gouraudC, gouraudD);
-            }
-
-            // Optimization for the case where the quad goes outside the system clipping area.
-            // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
-            // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
-            // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more
-            // lines can be plotted because they all sit outside the system clip area.
-            //
-            // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two
-            // points poking into the screen area in a configuration similar to this:
-            //
-            //                       D
-            //                        B
-            //   +-----------------+
-            //   |            A    |
-            //   |               C |
-            //   |                 |
-            //   |                 |
-            //   |                 |
-            //   +-----------------+
-            //
-            // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so
-            // we need to check for two sequences of plotted lines rather than one.
-            bool linePlotted = false;
-            int plottedSegmentsCount = 0;
-            const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
-
-            // Interpolate linearly over edges A-D and B-C
-            for (; quad.CanStep(); quad.Step()) {
-                // Plot lines between the interpolated points
-                const CoordS32 coordL = quad.LeftEdge().Coord();
-                const CoordS32 coordR = quad.RightEdge().Coord();
+            WithStepperBits([&]<sint32 bits>() {
+                QuadStepper<bits> quad{a, b, c, d};
 
                 if (mode.gouraudEnable) {
-                    spanData.gouraud0 = quad.LeftEdge().GouraudValue();
-                    spanData.gouraud1 = quad.RightEdge().GouraudValue();
+                    quad.SetupGouraud(gouraudA, gouraudB, gouraudC, gouraudD);
                 }
 
-                if (VDP1AddSpan(coordL, coordR, spanData, false, true)) {
-                    if (!linePlotted) {
-                        linePlotted = true;
-                        ++plottedSegmentsCount;
+                // Optimization for the case where the quad goes outside the system clipping area.
+                // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
+                // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
+                // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more
+                // lines can be plotted because they all sit outside the system clip area.
+                //
+                // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two
+                // points poking into the screen area in a configuration similar to this:
+                //
+                //                       D
+                //                        B
+                //   +-----------------+
+                //   |            A    |
+                //   |               C |
+                //   |                 |
+                //   |                 |
+                //   |                 |
+                //   +-----------------+
+                //
+                // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so
+                // we need to check for two sequences of plotted lines rather than one.
+                bool linePlotted = false;
+                int plottedSegmentsCount = 0;
+                const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
+
+                // Interpolate linearly over edges A-D and B-C
+                for (; quad.CanStep(); quad.Step()) {
+                    // Plot lines between the interpolated points
+                    const CoordS32 coordL = quad.LeftEdge().Coord();
+                    const CoordS32 coordR = quad.RightEdge().Coord();
+
+                    if (mode.gouraudEnable) {
+                        spanData.gouraud0 = quad.LeftEdge().GouraudValue();
+                        spanData.gouraud1 = quad.RightEdge().GouraudValue();
                     }
-                } else if (plottedSegmentsCount >= plottedSegmentsMax) {
-                    // No more lines can be drawn past this point
-                    break;
-                } else {
-                    linePlotted = false;
+
+                    if (VDP1AddSpan(coordL, coordR, spanData, false, true)) {
+                        if (!linePlotted) {
+                            linePlotted = true;
+                            ++plottedSegmentsCount;
+                        }
+                    } else if (plottedSegmentsCount >= plottedSegmentsMax) {
+                        // No more lines can be drawn past this point
+                        break;
+                    } else {
+                        linePlotted = false;
+                    }
                 }
-            }
+            });
         });
     }
 

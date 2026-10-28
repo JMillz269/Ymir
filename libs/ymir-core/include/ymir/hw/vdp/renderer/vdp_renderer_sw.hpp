@@ -811,6 +811,19 @@ private:
     template <typename Fn>
     void HRForEachLine(CoordS32 a, CoordS32 b, Fn &&fn) const;
 
+    // The steppers wrap coordinate deltas and step counts around at the 13 bits of the VDP1. The large framebuffer pass
+    // gives them two more bits so that a quad wraps around when it does natively (scales up to 4x).
+    static constexpr sint32 kHRStepperBits = 13 + 2;
+
+    // Calls fn.template operator()<bits>() with the number of bits of the steppers in the current pass.
+    template <typename Fn>
+    FORCE_INLINE decltype(auto) WithStepperBits(Fn &&fn) const {
+        if (m_hrPass) [[unlikely]] {
+            return fn.template operator()<kHRStepperBits>();
+        }
+        return fn.template operator()<13>();
+    }
+
     // Scales coordinates up for the system clipping tests of the large framebuffer pass (same outcome as the tests of
     // the native coordinates).
     CoordS32 HRClipCoord(CoordS32 p) const {

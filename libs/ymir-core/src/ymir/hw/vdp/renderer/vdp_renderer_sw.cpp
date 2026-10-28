@@ -1595,43 +1595,45 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotLine(CoordS32 coord1, CoordS32 co
         return false;
     }
 
-    LineStepper line{coord1, coord2, antiAlias};
-    auto &ctx = m_state.state1;
-    const uint32 skipSteps = line.SystemClip(VDP1SysClipMaxX(), VDP1SysClipMaxY());
+    return WithStepperBits([&]<sint32 bits>() -> bool {
+        LineStepper<bits> line{coord1, coord2, antiAlias};
+        auto &ctx = m_state.state1;
+        const uint32 skipSteps = line.SystemClip(VDP1SysClipMaxX(), VDP1SysClipMaxY());
 
-    VDP1PixelParams pixelParams{
-        .mode = lineParams.mode,
-        .color = lineParams.color,
-    };
-    if (pixelParams.mode.gouraudEnable) {
-        pixelParams.gouraud.Setup(line.DMajor() + 1, lineParams.gouraudLeft, lineParams.gouraudRight);
-        pixelParams.gouraud.Skip(skipSteps);
-    }
+        VDP1PixelParams pixelParams{
+            .mode = lineParams.mode,
+            .color = lineParams.color,
+        };
+        if (pixelParams.mode.gouraudEnable) {
+            pixelParams.gouraud.Setup(line.DMajor() + 1, lineParams.gouraudLeft, lineParams.gouraudRight);
+            pixelParams.gouraud.Skip(skipSteps);
+        }
 
-    bool aa = false;
-    bool plotted = false;
-    for (line.Step(); line.CanStep(); aa = line.Step()) {
-        bool plottedPixel =
-            VDP1PlotPixel<deinterlace, transparentMeshes>(line.Coord(), pixelParams, regs1, doubleDensity);
-        if constexpr (antiAlias) {
-            if (aa) {
-                plottedPixel |=
-                    VDP1PlotPixel<deinterlace, transparentMeshes>(line.AACoord(), pixelParams, regs1, doubleDensity);
+        bool aa = false;
+        bool plotted = false;
+        for (line.Step(); line.CanStep(); aa = line.Step()) {
+            bool plottedPixel =
+                VDP1PlotPixel<deinterlace, transparentMeshes>(line.Coord(), pixelParams, regs1, doubleDensity);
+            if constexpr (antiAlias) {
+                if (aa) {
+                    plottedPixel |=
+                        VDP1PlotPixel<deinterlace, transparentMeshes>(line.AACoord(), pixelParams, regs1, doubleDensity);
+                }
+            }
+            if (plottedPixel) {
+                plotted = true;
+            } else if (plotted && !pixelParams.mode.clippingMode) {
+                // No more pixels can be drawn past this point
+                break;
+            }
+
+            if (pixelParams.mode.gouraudEnable) {
+                pixelParams.gouraud.Step();
             }
         }
-        if (plottedPixel) {
-            plotted = true;
-        } else if (plotted && !pixelParams.mode.clippingMode) {
-            // No more pixels can be drawn past this point
-            break;
-        }
 
-        if (pixelParams.mode.gouraudEnable) {
-            pixelParams.gouraud.Step();
-        }
-    }
-
-    return plotted;
+        return plotted;
+    });
 }
 
 template <bool deinterlace, bool transparentMeshes>
@@ -1654,177 +1656,179 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotTexturedLine(CoordS32 coord1, Coo
 
     const uint32 v = lineParams.texVStepper.Value();
 
-    LineStepper line{coord1, coord2, true};
-    const uint32 skipSteps = line.SystemClip(VDP1SysClipMaxX(), VDP1SysClipMaxY());
+    return WithStepperBits([&]<sint32 bits>() -> bool {
+        LineStepper<bits> line{coord1, coord2, true};
+        const uint32 skipSteps = line.SystemClip(VDP1SysClipMaxX(), VDP1SysClipMaxY());
 
-    VDP1PixelParams pixelParams{
-        .mode = mode,
-    };
-    if (mode.gouraudEnable) {
-        assert(lineParams.gouraudLeft != nullptr);
-        assert(lineParams.gouraudRight != nullptr);
-        pixelParams.gouraud.Setup(line.DMajor() + 1, lineParams.gouraudLeft->Value(), lineParams.gouraudRight->Value());
-        pixelParams.gouraud.Skip(skipSteps);
-    }
+        VDP1PixelParams pixelParams{
+            .mode = mode,
+        };
+        if (mode.gouraudEnable) {
+            assert(lineParams.gouraudLeft != nullptr);
+            assert(lineParams.gouraudRight != nullptr);
+            pixelParams.gouraud.Setup(line.DMajor() + 1, lineParams.gouraudLeft->Value(), lineParams.gouraudRight->Value());
+            pixelParams.gouraud.Skip(skipSteps);
+        }
 
-    sint32 uStart = 0;
-    sint32 uEnd = charSizeH - 1;
-    if (control.flipH) {
-        std::swap(uStart, uEnd);
-    }
-    const bool useHighSpeedShrink = mode.highSpeedShrink && line.DMajor() < charSizeH - 1;
+        sint32 uStart = 0;
+        sint32 uEnd = charSizeH - 1;
+        if (control.flipH) {
+            std::swap(uStart, uEnd);
+        }
+        const bool useHighSpeedShrink = mode.highSpeedShrink && line.DMajor() < charSizeH - 1;
 
-    TextureStepper uStepper;
-    uStepper.Setup(line.DMajor() + 1, uStart, uEnd, useHighSpeedShrink, regs1.evenOddCoordSelect);
-    uStepper.SkipPixels(skipSteps);
+        TextureStepper uStepper;
+        uStepper.Setup(line.DMajor() + 1, uStart, uEnd, useHighSpeedShrink, regs1.evenOddCoordSelect);
+        uStepper.SkipPixels(skipSteps);
 
-    uint16 color = 0;
-    bool transparent = true;
-    bool hasEndCode = false;
-    int endCodeCount = useHighSpeedShrink ? std::numeric_limits<int>::min() : 0;
+        uint16 color = 0;
+        bool transparent = true;
+        bool hasEndCode = false;
+        int endCodeCount = useHighSpeedShrink ? std::numeric_limits<int>::min() : 0;
 
-    auto readTexel = [&] {
-        const uint32 u = uStepper.Value();
+        auto readTexel = [&] {
+            const uint32 u = uStepper.Value();
 
-        const uint32 charIndex = u + v * charSizeH;
+            const uint32 charIndex = u + v * charSizeH;
 
-        auto processEndCode = [&](bool endCode) {
-            if (endCode && !mode.endCodeDisable) {
-                hasEndCode = true;
-                ++endCodeCount;
-            } else {
-                hasEndCode = false;
+            auto processEndCode = [&](bool endCode) {
+                if (endCode && !mode.endCodeDisable) {
+                    hasEndCode = true;
+                    ++endCodeCount;
+                } else {
+                    hasEndCode = false;
+                }
+            };
+
+            // Read next texel
+            switch (mode.colorMode) {
+            case 0: // 4 bpp, 16 colors, bank mode
+                color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + (charIndex >> 1));
+                color = (color >> ((~u & 1) * 4)) & 0xF;
+                processEndCode(color == 0xF);
+                transparent = color == 0x0;
+                color |= lineParams.colorBank;
+                break;
+            case 1: // 4 bpp, 16 colors, lookup table mode
+                color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + (charIndex >> 1));
+                color = (color >> ((~u & 1) * 4)) & 0xF;
+                processEndCode(color == 0xF);
+                transparent = color == 0x0;
+                color = VDP1ReadRendererVRAM<uint16>(color * sizeof(uint16) + lineParams.colorBank);
+                break;
+            case 2: // 8 bpp, 64 colors, bank mode
+                color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + charIndex);
+                processEndCode(color == 0xFF);
+                transparent = color == 0x00;
+                color &= 0x3F;
+                color |= lineParams.colorBank;
+                break;
+            case 3: // 8 bpp, 128 colors, bank mode
+                color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + charIndex);
+                processEndCode(color == 0xFF);
+                transparent = color == 0x00;
+                color &= 0x7F;
+                color |= lineParams.colorBank;
+                break;
+            case 4: // 8 bpp, 256 colors, bank mode
+                color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + charIndex);
+                processEndCode(color == 0xFF);
+                transparent = color == 0x00;
+                color |= lineParams.colorBank;
+                break;
+            case 5: // 16 bpp, 32768 colors, RGB mode
+                color = VDP1ReadRendererVRAM<uint16>(lineParams.charAddr + charIndex * sizeof(uint16));
+                processEndCode(color == 0x7FFF);
+                transparent = !bit::test<15>(color);
+                break;
             }
         };
 
-        // Read next texel
-        switch (mode.colorMode) {
-        case 0: // 4 bpp, 16 colors, bank mode
-            color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + (charIndex >> 1));
-            color = (color >> ((~u & 1) * 4)) & 0xF;
-            processEndCode(color == 0xF);
-            transparent = color == 0x0;
-            color |= lineParams.colorBank;
-            break;
-        case 1: // 4 bpp, 16 colors, lookup table mode
-            color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + (charIndex >> 1));
-            color = (color >> ((~u & 1) * 4)) & 0xF;
-            processEndCode(color == 0xF);
-            transparent = color == 0x0;
-            color = VDP1ReadRendererVRAM<uint16>(color * sizeof(uint16) + lineParams.colorBank);
-            break;
-        case 2: // 8 bpp, 64 colors, bank mode
-            color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + charIndex);
-            processEndCode(color == 0xFF);
-            transparent = color == 0x00;
-            color &= 0x3F;
-            color |= lineParams.colorBank;
-            break;
-        case 3: // 8 bpp, 128 colors, bank mode
-            color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + charIndex);
-            processEndCode(color == 0xFF);
-            transparent = color == 0x00;
-            color &= 0x7F;
-            color |= lineParams.colorBank;
-            break;
-        case 4: // 8 bpp, 256 colors, bank mode
-            color = VDP1ReadRendererVRAM<uint8>(lineParams.charAddr + charIndex);
-            processEndCode(color == 0xFF);
-            transparent = color == 0x00;
-            color |= lineParams.colorBank;
-            break;
-        case 5: // 16 bpp, 32768 colors, RGB mode
-            color = VDP1ReadRendererVRAM<uint16>(lineParams.charAddr + charIndex * sizeof(uint16));
-            processEndCode(color == 0x7FFF);
-            transparent = !bit::test<15>(color);
-            break;
-        }
-    };
+        readTexel();
 
-    readTexel();
+        bool aa = false;
+        bool plotted = false;
+        for (line.Step(); line.CanStep(); aa = line.Step()) {
+            // Load new texels if U coordinate changed
+            while (uStepper.ShouldStepTexel()) {
+                uStepper.StepTexel();
+                readTexel();
 
-    bool aa = false;
-    bool plotted = false;
-    for (line.Step(); line.CanStep(); aa = line.Step()) {
-        // Load new texels if U coordinate changed
-        while (uStepper.ShouldStepTexel()) {
-            uStepper.StepTexel();
-            readTexel();
-
-            if (endCodeCount == 2) {
-                break;
-            }
-        }
-        if (endCodeCount == 2) {
-            break;
-        }
-        uStepper.StepPixel();
-
-        if (hasEndCode || (transparent && !mode.transparentPixelDisable)) {
-            if (mode.gouraudEnable) {
-                pixelParams.gouraud.Step();
-            }
-
-            // Check if the transparent pixel is in-bounds, but only if the clipping mode is set to reject outside
-            if (!mode.clippingMode) {
-                if (!VDP1IsPixelClipped<deinterlace>(line.Coord(), mode.userClippingEnable, mode.clippingMode)) {
-                    plotted = true;
-                    continue;
-                }
-                if (aa &&
-                    !VDP1IsPixelClipped<deinterlace>(line.AACoord(), mode.userClippingEnable, mode.clippingMode)) {
-                    plotted = true;
-                    continue;
-                }
-
-                // At this point the pixel is clipped. Bail out if there have been in-bounds pixels before, as no more
-                // pixels can be drawn past this point.
-                if (plotted) {
+                if (endCodeCount == 2) {
                     break;
                 }
             }
-
-            // Otherwise, continue to the next pixel
-            continue;
-        }
-
-        pixelParams.color = color;
-
-        bool plottedPixel =
-            VDP1PlotPixel<deinterlace, transparentMeshes>(line.Coord(), pixelParams, regs1, doubleDensity);
-        if (aa) {
-            plottedPixel |=
-                VDP1PlotPixel<deinterlace, transparentMeshes>(line.AACoord(), pixelParams, regs1, doubleDensity);
-        }
-        if (plottedPixel) {
-            plotted = true;
-        } else if (plotted && !mode.clippingMode) {
-            // No more pixels can be drawn past this point
-            break;
-        }
-
-        if (mode.gouraudEnable) {
-            pixelParams.gouraud.Step();
-        }
-    }
-
-    if (endCodeCount == 2 && !plotted && !mode.clippingMode) {
-        // Check that the line is indeed entirely out of bounds.
-        // End codes cut the line short, so if it happens to cut the line before it managed to plot a pixel in-bounds,
-        // the optimization could interrupt rendering the rest of the quad.
-        for (; line.CanStep(); aa = line.Step()) {
-            if (!VDP1IsPixelClipped<deinterlace>(line.Coord(), mode.userClippingEnable, mode.clippingMode)) {
-                plotted = true;
+            if (endCodeCount == 2) {
                 break;
             }
-            if (aa && !VDP1IsPixelClipped<deinterlace>(line.AACoord(), mode.userClippingEnable, mode.clippingMode)) {
+            uStepper.StepPixel();
+
+            if (hasEndCode || (transparent && !mode.transparentPixelDisable)) {
+                if (mode.gouraudEnable) {
+                    pixelParams.gouraud.Step();
+                }
+
+                // Check if the transparent pixel is in-bounds, but only if the clipping mode is set to reject outside
+                if (!mode.clippingMode) {
+                    if (!VDP1IsPixelClipped<deinterlace>(line.Coord(), mode.userClippingEnable, mode.clippingMode)) {
+                        plotted = true;
+                        continue;
+                    }
+                    if (aa &&
+                        !VDP1IsPixelClipped<deinterlace>(line.AACoord(), mode.userClippingEnable, mode.clippingMode)) {
+                        plotted = true;
+                        continue;
+                    }
+
+                    // At this point the pixel is clipped. Bail out if there have been in-bounds pixels before, as no more
+                    // pixels can be drawn past this point.
+                    if (plotted) {
+                        break;
+                    }
+                }
+
+                // Otherwise, continue to the next pixel
+                continue;
+            }
+
+            pixelParams.color = color;
+
+            bool plottedPixel =
+                VDP1PlotPixel<deinterlace, transparentMeshes>(line.Coord(), pixelParams, regs1, doubleDensity);
+            if (aa) {
+                plottedPixel |=
+                    VDP1PlotPixel<deinterlace, transparentMeshes>(line.AACoord(), pixelParams, regs1, doubleDensity);
+            }
+            if (plottedPixel) {
                 plotted = true;
+            } else if (plotted && !mode.clippingMode) {
+                // No more pixels can be drawn past this point
                 break;
             }
-        }
-    }
 
-    return plotted;
+            if (mode.gouraudEnable) {
+                pixelParams.gouraud.Step();
+            }
+        }
+
+        if (endCodeCount == 2 && !plotted && !mode.clippingMode) {
+            // Check that the line is indeed entirely out of bounds.
+            // End codes cut the line short, so if it happens to cut the line before it managed to plot a pixel in-bounds,
+            // the optimization could interrupt rendering the rest of the quad.
+            for (; line.CanStep(); aa = line.Step()) {
+                if (!VDP1IsPixelClipped<deinterlace>(line.Coord(), mode.userClippingEnable, mode.clippingMode)) {
+                    plotted = true;
+                    break;
+                }
+                if (aa && !VDP1IsPixelClipped<deinterlace>(line.AACoord(), mode.userClippingEnable, mode.clippingMode)) {
+                    plotted = true;
+                    break;
+                }
+            }
+        }
+
+        return plotted;
+    });
 }
 
 template <bool deinterlace, bool transparentMeshes>
@@ -1864,88 +1868,90 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1PlotTexturedQuad(uint32 cmdAddress, V
     case 5: break;                                 // 16 bpp, 32768 colors, RGB mode
     }
 
-    QuadStepper quad{coordA, coordB, coordC, coordD};
-
-    if (mode.gouraudEnable) {
-        const uint32 gouraudTable = static_cast<uint32>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1C)) << 3u;
-
-        Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};
-        Color555 colorB{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u)};
-        Color555 colorC{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u)};
-        Color555 colorD{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u)};
-
-        devlog::trace<grp::swvdp1_cmd>("[{:05X}] Gouraud colors: ({},{},{}) ({},{},{}) ({},{},{}) ({},{},{})",
-                                       gouraudTable, (uint8)colorA.r, (uint8)colorA.g, (uint8)colorA.b, (uint8)colorB.r,
-                                       (uint8)colorB.g, (uint8)colorB.b, (uint8)colorC.r, (uint8)colorC.g,
-                                       (uint8)colorC.b, (uint8)colorD.r, (uint8)colorD.g, (uint8)colorD.b);
-
-        quad.SetupGouraud(colorA, colorB, colorC, colorD);
-        lineParams.gouraudLeft = &quad.LeftEdge().Gouraud();
-        lineParams.gouraudRight = &quad.RightEdge().Gouraud();
-    }
-
-    // A width of zero results in the first fetched texel being used for the entire texture.
-    // We simulate this by reducing the texture height to one.
-    const bool flipV = control.flipV;
-    quad.SetupTexture(lineParams.texVStepper, charSizeH == 0 ? 1 : charSizeV, flipV);
-
-    // Optimization for the case where the quad goes outside the system clipping area.
-    // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
-    // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
-    // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more lines
-    // can be plotted because they all sit outside the system clip area.
-    //
-    // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two points
-    // poking into the screen area in a configuration similar to this:
-    //
-    //                       D
-    //                        B
-    //   +-----------------+
-    //   |            A    |
-    //   |               C |
-    //   |                 |
-    //   |                 |
-    //   |                 |
-    //   +-----------------+
-    //
-    // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so we
-    // need to check for two sequences of plotted lines rather than one.
-    bool linePlotted = false;
-    int plottedSegmentsCount = 0;
-    const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
-
-    const VDP1Regs &regs1 = VDP1GetRegs();
-    const VDP2Regs &regs2 = VDP2GetRegs();
-    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
-
-    // Interpolate linearly over edges A-D and B-C
-    for (; quad.CanStep(); quad.Step()) {
-        // Plot lines between the interpolated points
-        const CoordS32 coordL = quad.LeftEdge().Coord();
-        const CoordS32 coordR = quad.RightEdge().Coord();
-
-        while (lineParams.texVStepper.ShouldStepTexel()) {
-            lineParams.texVStepper.StepTexel();
-        }
-        lineParams.texVStepper.StepPixel();
+    WithStepperBits([&]<sint32 bits>() {
+        QuadStepper<bits> quad{coordA, coordB, coordC, coordD};
 
         if (mode.gouraudEnable) {
+            const uint32 gouraudTable = static_cast<uint32>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1C)) << 3u;
+
+            Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};
+            Color555 colorB{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u)};
+            Color555 colorC{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u)};
+            Color555 colorD{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u)};
+
+            devlog::trace<grp::swvdp1_cmd>("[{:05X}] Gouraud colors: ({},{},{}) ({},{},{}) ({},{},{}) ({},{},{})",
+                                           gouraudTable, (uint8)colorA.r, (uint8)colorA.g, (uint8)colorA.b, (uint8)colorB.r,
+                                           (uint8)colorB.g, (uint8)colorB.b, (uint8)colorC.r, (uint8)colorC.g,
+                                           (uint8)colorC.b, (uint8)colorD.r, (uint8)colorD.g, (uint8)colorD.b);
+
+            quad.SetupGouraud(colorA, colorB, colorC, colorD);
             lineParams.gouraudLeft = &quad.LeftEdge().Gouraud();
             lineParams.gouraudRight = &quad.RightEdge().Gouraud();
         }
 
-        if (VDP1PlotTexturedLine<deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity)) {
-            if (!linePlotted) {
-                linePlotted = true;
-                ++plottedSegmentsCount;
+        // A width of zero results in the first fetched texel being used for the entire texture.
+        // We simulate this by reducing the texture height to one.
+        const bool flipV = control.flipV;
+        quad.SetupTexture(lineParams.texVStepper, charSizeH == 0 ? 1 : charSizeV, flipV);
+
+        // Optimization for the case where the quad goes outside the system clipping area.
+        // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
+        // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
+        // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more lines
+        // can be plotted because they all sit outside the system clip area.
+        //
+        // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two points
+        // poking into the screen area in a configuration similar to this:
+        //
+        //                       D
+        //                        B
+        //   +-----------------+
+        //   |            A    |
+        //   |               C |
+        //   |                 |
+        //   |                 |
+        //   |                 |
+        //   +-----------------+
+        //
+        // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so we
+        // need to check for two sequences of plotted lines rather than one.
+        bool linePlotted = false;
+        int plottedSegmentsCount = 0;
+        const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
+
+        const VDP1Regs &regs1 = VDP1GetRegs();
+        const VDP2Regs &regs2 = VDP2GetRegs();
+        const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+
+        // Interpolate linearly over edges A-D and B-C
+        for (; quad.CanStep(); quad.Step()) {
+            // Plot lines between the interpolated points
+            const CoordS32 coordL = quad.LeftEdge().Coord();
+            const CoordS32 coordR = quad.RightEdge().Coord();
+
+            while (lineParams.texVStepper.ShouldStepTexel()) {
+                lineParams.texVStepper.StepTexel();
             }
-        } else if (plottedSegmentsCount >= plottedSegmentsMax) {
-            // No more lines can be drawn past this point
-            break;
-        } else {
-            linePlotted = false;
+            lineParams.texVStepper.StepPixel();
+
+            if (mode.gouraudEnable) {
+                lineParams.gouraudLeft = &quad.LeftEdge().Gouraud();
+                lineParams.gouraudRight = &quad.RightEdge().Gouraud();
+            }
+
+            if (VDP1PlotTexturedLine<deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity)) {
+                if (!linePlotted) {
+                    linePlotted = true;
+                    ++plottedSegmentsCount;
+                }
+            } else if (plottedSegmentsCount >= plottedSegmentsMax) {
+                // No more lines can be drawn past this point
+                break;
+            } else {
+                linePlotted = false;
+            }
         }
-    }
+    });
 }
 
 template <bool deinterlace, bool transparentMeshes>
@@ -2237,74 +2243,76 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolygon(uint32 cmdAddress) {
             .color = color,
         };
 
-        QuadStepper quad{a, b, c, d};
-
-        if (mode.gouraudEnable) {
-            Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};
-            Color555 colorB{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u)};
-            Color555 colorC{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u)};
-            Color555 colorD{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u)};
-
-            devlog::trace<grp::swvdp1_cmd>("Gouraud colors: ({},{},{}) ({},{},{}) ({},{},{}) ({},{},{})", (uint8)colorA.r,
-                                           (uint8)colorA.g, (uint8)colorA.b, (uint8)colorB.r, (uint8)colorB.g,
-                                           (uint8)colorB.b, (uint8)colorC.r, (uint8)colorC.g, (uint8)colorC.b,
-                                           (uint8)colorD.r, (uint8)colorD.g, (uint8)colorD.b);
-
-            quad.SetupGouraud(colorA, colorB, colorC, colorD);
-        }
-
-        // Optimization for the case where the quad goes outside the system clipping area.
-        // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
-        // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
-        // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more lines
-        // can be plotted because they all sit outside the system clip area.
-        //
-        // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two points
-        // poking into the screen area in a configuration similar to this:
-        //
-        //                       D
-        //                        B
-        //   +-----------------+
-        //   |            A    |
-        //   |               C |
-        //   |                 |
-        //   |                 |
-        //   |                 |
-        //   +-----------------+
-        //
-        // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so we
-        // need to check for two sequences of plotted lines rather than one.
-        bool linePlotted = false;
-        int plottedSegmentsCount = 0;
-        const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
-
-        const VDP1Regs &regs1 = VDP1GetRegs();
-        const VDP2Regs &regs2 = VDP2GetRegs();
-        const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
-
-        // Interpolate linearly over edges A-D and B-C
-        for (; quad.CanStep(); quad.Step()) {
-            // Plot lines between the interpolated points
-            const CoordS32 coordL = quad.LeftEdge().Coord();
-            const CoordS32 coordR = quad.RightEdge().Coord();
+        WithStepperBits([&]<sint32 bits>() {
+            QuadStepper<bits> quad{a, b, c, d};
 
             if (mode.gouraudEnable) {
-                lineParams.gouraudLeft = quad.LeftEdge().GouraudValue();
-                lineParams.gouraudRight = quad.RightEdge().GouraudValue();
+                Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};
+                Color555 colorB{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u)};
+                Color555 colorC{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u)};
+                Color555 colorD{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u)};
+
+                devlog::trace<grp::swvdp1_cmd>("Gouraud colors: ({},{},{}) ({},{},{}) ({},{},{}) ({},{},{})", (uint8)colorA.r,
+                                               (uint8)colorA.g, (uint8)colorA.b, (uint8)colorB.r, (uint8)colorB.g,
+                                               (uint8)colorB.b, (uint8)colorC.r, (uint8)colorC.g, (uint8)colorC.b,
+                                               (uint8)colorD.r, (uint8)colorD.g, (uint8)colorD.b);
+
+                quad.SetupGouraud(colorA, colorB, colorC, colorD);
             }
 
-            if (VDP1PlotLine<true, deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity)) {
-                if (!linePlotted) {
-                    linePlotted = true;
-                    ++plottedSegmentsCount;
+            // Optimization for the case where the quad goes outside the system clipping area.
+            // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
+            // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
+            // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more lines
+            // can be plotted because they all sit outside the system clip area.
+            //
+            // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two points
+            // poking into the screen area in a configuration similar to this:
+            //
+            //                       D
+            //                        B
+            //   +-----------------+
+            //   |            A    |
+            //   |               C |
+            //   |                 |
+            //   |                 |
+            //   |                 |
+            //   +-----------------+
+            //
+            // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so we
+            // need to check for two sequences of plotted lines rather than one.
+            bool linePlotted = false;
+            int plottedSegmentsCount = 0;
+            const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
+
+            const VDP1Regs &regs1 = VDP1GetRegs();
+            const VDP2Regs &regs2 = VDP2GetRegs();
+            const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+
+            // Interpolate linearly over edges A-D and B-C
+            for (; quad.CanStep(); quad.Step()) {
+                // Plot lines between the interpolated points
+                const CoordS32 coordL = quad.LeftEdge().Coord();
+                const CoordS32 coordR = quad.RightEdge().Coord();
+
+                if (mode.gouraudEnable) {
+                    lineParams.gouraudLeft = quad.LeftEdge().GouraudValue();
+                    lineParams.gouraudRight = quad.RightEdge().GouraudValue();
                 }
-            } else if (plottedSegmentsCount >= plottedSegmentsMax) {
-                // No more lines can be drawn past this point
-                break;
-            } else {
-                linePlotted = false;
+
+                if (VDP1PlotLine<true, deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity)) {
+                    if (!linePlotted) {
+                        linePlotted = true;
+                        ++plottedSegmentsCount;
+                    }
+                } else if (plottedSegmentsCount >= plottedSegmentsMax) {
+                    // No more lines can be drawn past this point
+                    break;
+                } else {
+                    linePlotted = false;
+                }
             }
-        }
+        });
     });
 }
 
