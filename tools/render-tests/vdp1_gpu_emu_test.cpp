@@ -1042,6 +1042,17 @@ int main(int argc, char **argv) {
     put(0x0002, 0, 0x002B, 0, 0x24000 >> 3, (18 << 8) | 32, -40, -10, 100, 5, 90, 60, -50, 40);
     put(0x0002, 0, 0x002B, 0, 0x24000 >> 3, (18 << 8) | 32, 30, 120, 170, 100, 170, 200, 30, 190);
     put(0x0002, 0x0010, 0x002B, 0, 0x24000 >> 3, (18 << 8) | 32, 200, 100, 300, 100, 300, 130, 200, 130);
+    // shapes one pixel thin in the free strip at the bottom (y 216..223): polygons one pixel tall, one pixel wide and
+    // a single pixel, a sprite one texel tall, a distorted sprite with all vertices on one line, lines and a polyline
+    put(0x0004, 0, 0x0000, 0x83FF, 0, 0, 5, 218, 60, 218, 60, 218, 5, 218);
+    put(0x0004, 0, 0x0000, 0xFC1F, 0, 0, 64, 216, 64, 216, 64, 222, 64, 222);
+    put(0x0004, 0, 0x0000, 0xFFE0, 0, 0, 70, 219, 70, 219, 70, 219, 70, 219);
+    put(0x0000, 0, 0x0028, 0, 0x20000 >> 3, (2 << 8) | 1, 80, 218, 0, 0, 0, 0, 0, 0);
+    put(0x0002, 0, 0x0028, 0, 0x20000 >> 3, (2 << 8) | 16, 100, 220, 160, 220, 160, 220, 100, 220);
+    put(0x0006, 0, 0x0000, 0x801F, 0, 0, 170, 217, 230, 217, 0, 0, 0, 0);
+    put(0x0006, 0, 0x0000, 0x83E0, 0, 0, 233, 216, 233, 223, 0, 0, 0, 0);
+    put(0x0005, 0, 0x0000, 0xFFFF, 0, 0, 240, 217, 260, 217, 260, 222, 240, 222);
+    put(0x0006, 0, 0x0000, 0xFC00, 0, 0, 270, 222, 315, 217, 0, 0, 0, 0);
     // lines
     put(0x0006, 0, 0x0003, 0xFFFF, 0, 0, 10, 210, 310, 100, 0, 0, 0, 0);
     put(0x0005, 0, 0x0000, 0x7FFF, 0, 0, 220, 170, 300, 170, 300, 215, 220, 215);
@@ -1174,6 +1185,30 @@ int main(int argc, char **argv) {
                 }
                 if (outside) {
                     std::printf("  %u pixels differ from the native ones scaled up outside the reported lines\n", outside);
+                    ++badFrames;
+                }
+            }
+            // Shapes one native pixel thin cover all of their native pixels' scaled up pixels (checked on the axis
+            // aligned ones in the bottom strip)
+            {
+                uint32 holes = 0;
+                for (uint32 y = 216; y < 224; ++y) {
+                    for (uint32 x = 0; x < 265; ++x) {
+                        const uint8 *n = &gpu.fbram[fbi * 256 * 1024 + (size_t(y) * 512 + x) * 2];
+                        if ((n[0] | n[1]) == 0) {
+                            continue;
+                        }
+                        for (uint32 sy = 0; sy < scale; ++sy) {
+                            for (uint32 sx = 0; sx < scale; ++sx) {
+                                const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * scale * scale +
+                                                              (size_t(y * scale + sy) * stride + x * scale + sx) * 2];
+                                holes += (g[0] | g[1]) == 0;
+                            }
+                        }
+                    }
+                }
+                if (holes) {
+                    std::printf("  %u scaled up pixels of thin shapes are not drawn\n", holes);
                     ++badFrames;
                 }
             }

@@ -788,10 +788,35 @@ private:
     // Returns true if draw commands should currently be replayed into the large framebuffer.
     bool VDP1HRShouldReplay();
 
+    // How many times a scaled up quad is drawn along each axis
+    struct HRCopies {
+        sint32 x = 1;
+        sint32 y = 1;
+    };
+
     // Scales coordinates for the large framebuffer.
-    // Quads grow to cover the whole area of the native pixels they touch, lines stay one pixel thin.
-    void HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c, CoordS32 &d) const;
-    void HRScaleLine(CoordS32 &a, CoordS32 &b) const;
+    // Quads grow to cover the whole area of the native pixels they touch. A quad one native pixel thin along an axis
+    // has no extent to scale on it, so it's drawn once for each large pixel across the native one (the returned
+    // number of copies).
+    HRCopies HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c, CoordS32 &d) const;
+
+    // Calls fn with the coordinates of the quad, or in the large framebuffer pass with those of each of the copies
+    // that make up the scaled up quad.
+    template <typename Fn>
+    void HRForEachQuad(CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d, Fn &&fn) const;
+
+    // Calls fn with the end points of the line, or in the large framebuffer pass with those of each of the lines that
+    // make up the scaled up line: as many side by side as the scale, so that it's as thick as a native pixel, from
+    // the far side of the first native pixel to the far side of the last one along the major axis.
+    template <typename Fn>
+    void HRForEachLine(CoordS32 a, CoordS32 b, Fn &&fn) const;
+
+    // Scales coordinates up for the system clipping tests of the large framebuffer pass (same outcome as the tests of
+    // the native coordinates).
+    CoordS32 HRClipCoord(CoordS32 p) const {
+        return m_hrPass ? CoordS32{p.x() * static_cast<sint32>(m_hrScale1), p.y() * static_cast<sint32>(m_hrScale1)}
+                        : p;
+    }
 
     // Draws a pixel into the large framebuffer.
     template <bool transparentMeshes>

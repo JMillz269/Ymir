@@ -1128,7 +1128,8 @@ bool SoftwareVDPRenderer::VDP1HRShouldReplay() {
     return VDP1HRPrepare(m_state.fbIndex.draw);
 }
 
-void SoftwareVDPRenderer::HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c, CoordS32 &d) const {
+SoftwareVDPRenderer::HRCopies SoftwareVDPRenderer::HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c,
+                                                                 CoordS32 &d) const {
     // Native coordinates are inclusive pixel indices, so a quad covers its pixels' whole area. Scale each vertex
     // and push it outwards by the part of a native pixel that lies beyond the vertex, proportionally to its position
     // along each axis, so that axis-aligned quads cover exactly the scaled-up pixels and neighbors still tile.
@@ -1144,20 +1145,56 @@ void SoftwareVDPRenderer::HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c, Coo
     const sint32 spanX = maxX - minX;
     const sint32 spanY = maxY - minY;
     for (auto *p : pts) {
-        const sint32 ox = spanX == 0 ? (s - 1) / 2 : ((p->x() - minX) * (s - 1)) / spanX;
-        const sint32 oy = spanY == 0 ? (s - 1) / 2 : ((p->y() - minY) * (s - 1)) / spanY;
+        const sint32 ox = spanX == 0 ? 0 : ((p->x() - minX) * (s - 1)) / spanX;
+        const sint32 oy = spanY == 0 ? 0 : ((p->y() - minY) * (s - 1)) / spanY;
         p->x() = p->x() * s + ox;
         p->y() = p->y() * s + oy;
     }
+    return {spanX == 0 ? s : 1, spanY == 0 ? s : 1};
 }
 
-void SoftwareVDPRenderer::HRScaleLine(CoordS32 &a, CoordS32 &b) const {
-    // Lines stay one (large) pixel thin and go through the center of the native pixels
+template <typename Fn>
+void SoftwareVDPRenderer::HRForEachQuad(CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d, Fn &&fn) const {
+    if (!m_hrPass) {
+        fn(a, b, c, d);
+        return;
+    }
+    const HRCopies copies = HRScaleQuad(a, b, c, d);
+    for (sint32 cy = 0; cy < copies.y; ++cy) {
+        for (sint32 cx = 0; cx < copies.x; ++cx) {
+            const auto shift = [&](CoordS32 p) { return CoordS32{p.x() + cx, p.y() + cy}; };
+            fn(shift(a), shift(b), shift(c), shift(d));
+        }
+    }
+}
+
+template <typename Fn>
+void SoftwareVDPRenderer::HRForEachLine(CoordS32 a, CoordS32 b, Fn &&fn) const {
+    if (!m_hrPass) {
+        fn(a, b);
+        return;
+    }
     const sint32 s = m_hrScale1;
-    a.x() = a.x() * s + s / 2;
-    a.y() = a.y() * s + s / 2;
-    b.x() = b.x() * s + s / 2;
-    b.y() = b.y() * s + s / 2;
+    const bool xMajor = std::abs(b.x() - a.x()) >= std::abs(b.y() - a.y());
+    const auto scaleMajor = [&](sint32 from, sint32 to, sint32 &outFrom, sint32 &outTo) {
+        outFrom = from * s + (to >= from ? 0 : s - 1);
+        outTo = to * s + (to >= from ? s - 1 : 0);
+    };
+    sint32 ax, ay, bx, by;
+    if (xMajor) {
+        scaleMajor(a.x(), b.x(), ax, bx);
+        ay = a.y() * s;
+        by = b.y() * s;
+    } else {
+        scaleMajor(a.y(), b.y(), ay, by);
+        ax = a.x() * s;
+        bx = b.x() * s;
+    }
+    for (sint32 i = 0; i < s; ++i) {
+        const sint32 dx = xMajor ? 0 : i;
+        const sint32 dy = xMajor ? i : 0;
+        fn(CoordS32{ax + dx, ay + dy}, CoordS32{bx + dx, by + dy});
+    }
 }
 
 FORCE_INLINE sint32 SoftwareVDPRenderer::VDP1SysClipMaxX() const {
@@ -2006,14 +2043,13 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawNormalSprite(uint32 cmdAddress, VDP1Comman
     CoordS32 coordB{xb, ya << doubleV};
     CoordS32 coordC{xb, (yb << doubleV) + yAdd};
     CoordS32 coordD{xa, (yb << doubleV) + yAdd};
-    if (m_hrPass) {
-        HRScaleQuad(coordA, coordB, coordC, coordD);
-    }
 
     devlog::trace<grp::swvdp1_cmd>("[{:05X}] Draw normal sprite: {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d}",
                                    cmdAddress, xa, ya, xb, ya, xb, yb, xa, yb);
 
-    VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, coordA, coordB, coordC, coordD);
+    HRForEachQuad(coordA, coordB, coordC, coordD, [&](CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d) {
+        VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, a, b, c, d);
+    });
 }
 
 template <bool deinterlace, bool transparentMeshes>
@@ -2109,14 +2145,13 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawScaledSprite(uint32 cmdAddress, VDP1Comman
     CoordS32 coordB{qxb, qyb << doubleV};
     CoordS32 coordC{qxc, (qyc << doubleV) + yAdd};
     CoordS32 coordD{qxd, (qyd << doubleV) + yAdd};
-    if (m_hrPass) {
-        HRScaleQuad(coordA, coordB, coordC, coordD);
-    }
 
     devlog::trace<grp::swvdp1_cmd>("[{:05X}] Draw scaled sprite: {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d}",
                                    cmdAddress, qxa, qya, qxb, qyb, qxc, qyc, qxd, qyd);
 
-    VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, coordA, coordB, coordC, coordD);
+    HRForEachQuad(coordA, coordB, coordC, coordD, [&](CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d) {
+        VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, a, b, c, d);
+    });
 }
 
 template <bool deinterlace, bool transparentMeshes>
@@ -2147,15 +2182,14 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawDistortedSprite(uint32 cmdAddress, VDP1Com
     CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
     CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
     CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
-    if (m_hrPass) {
-        HRScaleQuad(coordA, coordB, coordC, coordD);
-    }
 
     devlog::trace<grp::swvdp1_cmd>(
         "[{:05X}] Draw distorted sprite: {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d}", cmdAddress, xa, ya, xb,
         yb, xc, yc, xd, yd);
 
-    VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, coordA, coordB, coordC, coordD);
+    HRForEachQuad(coordA, coordB, coordC, coordD, [&](CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d) {
+        VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, a, b, c, d);
+    });
 }
 
 template <bool deinterlace, bool transparentMeshes>
@@ -2188,91 +2222,90 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolygon(uint32 cmdAddress) {
     CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
     CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
     CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
-    if (m_hrPass) {
-        HRScaleQuad(coordA, coordB, coordC, coordD);
-    }
 
     devlog::trace<grp::swvdp1_cmd>("[{:05X}] Draw polygon: {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d}, color "
                                    "{:04X}, gouraud table {:05X}, CMDPMOD = {:04X}",
                                    cmdAddress, xa, ya, xb, yb, xc, yc, xd, yd, color, gouraudTable, mode.u16);
 
-    if (VDP1IsQuadSystemClipped<deinterlace>(coordA, coordB, coordC, coordD)) {
-        return;
-    }
+    HRForEachQuad(coordA, coordB, coordC, coordD, [&](CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d) {
+        if (VDP1IsQuadSystemClipped<deinterlace>(a, b, c, d)) {
+            return;
+        }
 
-    VDP1LineParams lineParams{
-        .mode = mode,
-        .color = color,
-    };
+        VDP1LineParams lineParams{
+            .mode = mode,
+            .color = color,
+        };
 
-    QuadStepper quad{coordA, coordB, coordC, coordD};
-
-    if (mode.gouraudEnable) {
-        Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};
-        Color555 colorB{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u)};
-        Color555 colorC{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u)};
-        Color555 colorD{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u)};
-
-        devlog::trace<grp::swvdp1_cmd>("Gouraud colors: ({},{},{}) ({},{},{}) ({},{},{}) ({},{},{})", (uint8)colorA.r,
-                                       (uint8)colorA.g, (uint8)colorA.b, (uint8)colorB.r, (uint8)colorB.g,
-                                       (uint8)colorB.b, (uint8)colorC.r, (uint8)colorC.g, (uint8)colorC.b,
-                                       (uint8)colorD.r, (uint8)colorD.g, (uint8)colorD.b);
-
-        quad.SetupGouraud(colorA, colorB, colorC, colorD);
-    }
-
-    // Optimization for the case where the quad goes outside the system clipping area.
-    // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
-    // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
-    // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more lines
-    // can be plotted because they all sit outside the system clip area.
-    //
-    // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two points
-    // poking into the screen area in a configuration similar to this:
-    //
-    //                       D
-    //                        B
-    //   +-----------------+
-    //   |            A    |
-    //   |               C |
-    //   |                 |
-    //   |                 |
-    //   |                 |
-    //   +-----------------+
-    //
-    // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so we
-    // need to check for two sequences of plotted lines rather than one.
-    bool linePlotted = false;
-    int plottedSegmentsCount = 0;
-    const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
-
-    const VDP1Regs &regs1 = VDP1GetRegs();
-    const VDP2Regs &regs2 = VDP2GetRegs();
-    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
-
-    // Interpolate linearly over edges A-D and B-C
-    for (; quad.CanStep(); quad.Step()) {
-        // Plot lines between the interpolated points
-        const CoordS32 coordL = quad.LeftEdge().Coord();
-        const CoordS32 coordR = quad.RightEdge().Coord();
+        QuadStepper quad{a, b, c, d};
 
         if (mode.gouraudEnable) {
-            lineParams.gouraudLeft = quad.LeftEdge().GouraudValue();
-            lineParams.gouraudRight = quad.RightEdge().GouraudValue();
+            Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};
+            Color555 colorB{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u)};
+            Color555 colorC{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u)};
+            Color555 colorD{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u)};
+
+            devlog::trace<grp::swvdp1_cmd>("Gouraud colors: ({},{},{}) ({},{},{}) ({},{},{}) ({},{},{})", (uint8)colorA.r,
+                                           (uint8)colorA.g, (uint8)colorA.b, (uint8)colorB.r, (uint8)colorB.g,
+                                           (uint8)colorB.b, (uint8)colorC.r, (uint8)colorC.g, (uint8)colorC.b,
+                                           (uint8)colorD.r, (uint8)colorD.g, (uint8)colorD.b);
+
+            quad.SetupGouraud(colorA, colorB, colorC, colorD);
         }
 
-        if (VDP1PlotLine<true, deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity)) {
-            if (!linePlotted) {
-                linePlotted = true;
-                ++plottedSegmentsCount;
+        // Optimization for the case where the quad goes outside the system clipping area.
+        // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
+        // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
+        // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more lines
+        // can be plotted because they all sit outside the system clip area.
+        //
+        // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two points
+        // poking into the screen area in a configuration similar to this:
+        //
+        //                       D
+        //                        B
+        //   +-----------------+
+        //   |            A    |
+        //   |               C |
+        //   |                 |
+        //   |                 |
+        //   |                 |
+        //   +-----------------+
+        //
+        // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so we
+        // need to check for two sequences of plotted lines rather than one.
+        bool linePlotted = false;
+        int plottedSegmentsCount = 0;
+        const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
+
+        const VDP1Regs &regs1 = VDP1GetRegs();
+        const VDP2Regs &regs2 = VDP2GetRegs();
+        const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+
+        // Interpolate linearly over edges A-D and B-C
+        for (; quad.CanStep(); quad.Step()) {
+            // Plot lines between the interpolated points
+            const CoordS32 coordL = quad.LeftEdge().Coord();
+            const CoordS32 coordR = quad.RightEdge().Coord();
+
+            if (mode.gouraudEnable) {
+                lineParams.gouraudLeft = quad.LeftEdge().GouraudValue();
+                lineParams.gouraudRight = quad.RightEdge().GouraudValue();
             }
-        } else if (plottedSegmentsCount >= plottedSegmentsMax) {
-            // No more lines can be drawn past this point
-            break;
-        } else {
-            linePlotted = false;
+
+            if (VDP1PlotLine<true, deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity)) {
+                if (!linePlotted) {
+                    linePlotted = true;
+                    ++plottedSegmentsCount;
+                }
+            } else if (plottedSegmentsCount >= plottedSegmentsMax) {
+                // No more lines can be drawn past this point
+                break;
+            } else {
+                linePlotted = false;
+            }
         }
-    }
+    });
 }
 
 template <bool deinterlace, bool transparentMeshes>
@@ -2305,16 +2338,13 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolylines(uint32 cmdAddress) {
     CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
     CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
     CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
-    if (m_hrPass) {
-        HRScaleLine(coordA, coordB);
-        HRScaleLine(coordC, coordD);
-    }
 
     devlog::trace<grp::swvdp1_cmd>(
         "[{:05X}] Draw polylines: {}x{} - {}x{} - {}x{} - {}x{}, color {:04X}, gouraud table {:05X}, CMDPMOD = {:04X}",
         cmdAddress, xa, ya, xb, yb, xc, yc, xd, yd, color, gouraudTable >> 3u, mode.u16);
 
-    if (VDP1IsQuadSystemClipped<deinterlace>(coordA, coordB, coordC, coordD)) {
+    if (VDP1IsQuadSystemClipped<deinterlace>(HRClipCoord(coordA), HRClipCoord(coordB), HRClipCoord(coordC),
+                                             HRClipCoord(coordD))) {
         return;
     }
 
@@ -2340,22 +2370,30 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolylines(uint32 cmdAddress) {
         lineParams.gouraudLeft = gouraudA;
         lineParams.gouraudRight = gouraudB;
     }
-    VDP1PlotLine<false, deinterlace, transparentMeshes>(coordA, coordB, lineParams, regs1, doubleDensity);
+    HRForEachLine(coordA, coordB, [&](CoordS32 a, CoordS32 b) {
+        VDP1PlotLine<false, deinterlace, transparentMeshes>(a, b, lineParams, regs1, doubleDensity);
+    });
     if (mode.gouraudEnable) {
         lineParams.gouraudLeft = gouraudB;
         lineParams.gouraudRight = gouraudC;
     }
-    VDP1PlotLine<false, deinterlace, transparentMeshes>(coordB, coordC, lineParams, regs1, doubleDensity);
+    HRForEachLine(coordB, coordC, [&](CoordS32 a, CoordS32 b) {
+        VDP1PlotLine<false, deinterlace, transparentMeshes>(a, b, lineParams, regs1, doubleDensity);
+    });
     if (mode.gouraudEnable) {
         lineParams.gouraudLeft = gouraudC;
         lineParams.gouraudRight = gouraudD;
     }
-    VDP1PlotLine<false, deinterlace, transparentMeshes>(coordC, coordD, lineParams, regs1, doubleDensity);
+    HRForEachLine(coordC, coordD, [&](CoordS32 a, CoordS32 b) {
+        VDP1PlotLine<false, deinterlace, transparentMeshes>(a, b, lineParams, regs1, doubleDensity);
+    });
     if (mode.gouraudEnable) {
         lineParams.gouraudLeft = gouraudD;
         lineParams.gouraudRight = gouraudA;
     }
-    VDP1PlotLine<false, deinterlace, transparentMeshes>(coordD, coordA, lineParams, regs1, doubleDensity);
+    HRForEachLine(coordD, coordA, [&](CoordS32 a, CoordS32 b) {
+        VDP1PlotLine<false, deinterlace, transparentMeshes>(a, b, lineParams, regs1, doubleDensity);
+    });
 }
 
 template <bool deinterlace, bool transparentMeshes>
@@ -2377,15 +2415,12 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawLine(uint32 cmdAddress) {
     const sint32 doubleV = m_VDP1doubleV;
     CoordS32 coordA{xa, ya << doubleV};
     CoordS32 coordB{xb, yb << doubleV};
-    if (m_hrPass) {
-        HRScaleLine(coordA, coordB);
-    }
 
     devlog::trace<grp::swvdp1_cmd>(
         "[{:05X}] Draw line: {}x{} - {}x{}, color {:04X}, gouraud table {:05X}, CMDPMOD = {:04X}", cmdAddress, xa, ya,
         xb, yb, color, gouraudTable, mode.u16);
 
-    if (VDP1IsLineSystemClipped<deinterlace>(coordA, coordB)) {
+    if (VDP1IsLineSystemClipped<deinterlace>(HRClipCoord(coordA), HRClipCoord(coordB))) {
         return;
     }
 
@@ -2409,7 +2444,9 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawLine(uint32 cmdAddress) {
                                        (uint8)colorA.b, (uint8)colorB.r, (uint8)colorB.g, (uint8)colorB.b);
     }
 
-    VDP1PlotLine<false, deinterlace, transparentMeshes>(coordA, coordB, lineParams, regs1, doubleDensity);
+    HRForEachLine(coordA, coordB, [&](CoordS32 a, CoordS32 b) {
+        VDP1PlotLine<false, deinterlace, transparentMeshes>(a, b, lineParams, regs1, doubleDensity);
+    });
 }
 
 void SoftwareVDPRenderer::VDP1Cmd_SetSystemClipping(uint32 cmdAddress) {

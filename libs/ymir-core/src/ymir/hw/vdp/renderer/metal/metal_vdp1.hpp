@@ -422,11 +422,19 @@ private:
         return HRPrepare(vdpState.fbIndex.draw);
     }
 
+    /// @brief How many times a scaled up quad is drawn along each axis
+    struct HRCopies {
+        sint32 x = 1;
+        sint32 y = 1;
+    };
+
     /// @brief Scales up the coordinates of a quad. Native coordinates are inclusive pixel indices, so a quad covers its
     /// pixels' whole area. Each vertex is scaled and pushed outwards by the part of a native pixel that lies beyond the
     /// vertex, proportionally to its position along each axis, so that axis-aligned quads cover exactly the scaled up
     /// pixels and neighbors still tile.
-    void HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c, CoordS32 &d) const {
+    /// A quad one native pixel thin along an axis has no extent to scale on it, so it starts at the first scaled up
+    /// pixel and is drawn once for each scaled up pixel across the native one (the returned number of copies).
+    HRCopies HRScaleQuad(CoordS32 &a, CoordS32 &b, CoordS32 &c, CoordS32 &d) const {
         const sint32 s = m_hrScale;
         CoordS32 *pts[4] = {&a, &b, &c, &d};
         sint32 minX = a.x(), maxX = a.x(), minY = a.y(), maxY = a.y();
@@ -439,21 +447,61 @@ private:
         const sint32 spanX = maxX - minX;
         const sint32 spanY = maxY - minY;
         for (auto *p : pts) {
-            const sint32 ox = spanX == 0 ? (s - 1) / 2 : ((p->x() - minX) * (s - 1)) / spanX;
-            const sint32 oy = spanY == 0 ? (s - 1) / 2 : ((p->y() - minY) * (s - 1)) / spanY;
+            const sint32 ox = spanX == 0 ? 0 : ((p->x() - minX) * (s - 1)) / spanX;
+            const sint32 oy = spanY == 0 ? 0 : ((p->y() - minY) * (s - 1)) / spanY;
             p->x() = p->x() * s + ox;
             p->y() = p->y() * s + oy;
         }
+        return {spanX == 0 ? s : 1, spanY == 0 ? s : 1};
     }
 
-    /// @brief Scales up the coordinates of a line: it stays one (large) pixel thin and goes through the center of the
-    /// native pixels.
-    void HRScaleLine(CoordS32 &a, CoordS32 &b) const {
+    /// @brief Calls fn with the coordinates of the quad, or in the scaled up pass with those of each of the copies that
+    /// make up the scaled up quad.
+    template <typename Fn>
+    void HRForEachQuad(CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d, Fn &&fn) const {
+        if (!m_hrPass) {
+            fn(a, b, c, d);
+            return;
+        }
+        const HRCopies copies = HRScaleQuad(a, b, c, d);
+        for (sint32 cy = 0; cy < copies.y; ++cy) {
+            for (sint32 cx = 0; cx < copies.x; ++cx) {
+                const auto shift = [&](CoordS32 p) { return CoordS32{p.x() + cx, p.y() + cy}; };
+                fn(shift(a), shift(b), shift(c), shift(d));
+            }
+        }
+    }
+
+    /// @brief Calls fn with the end points of the line, or in the scaled up pass with those of each of the lines that
+    /// make up the scaled up line: as many side by side as the scale, so that it's as thick as a native pixel, from
+    /// the far side of the first native pixel to the far side of the last one along the major axis.
+    template <typename Fn>
+    void HRForEachLine(CoordS32 a, CoordS32 b, Fn &&fn) const {
+        if (!m_hrPass) {
+            fn(a, b);
+            return;
+        }
         const sint32 s = m_hrScale;
-        a.x() = a.x() * s + s / 2;
-        a.y() = a.y() * s + s / 2;
-        b.x() = b.x() * s + s / 2;
-        b.y() = b.y() * s + s / 2;
+        const bool xMajor = std::abs(b.x() - a.x()) >= std::abs(b.y() - a.y());
+        const auto scaleMajor = [&](sint32 from, sint32 to, sint32 &outFrom, sint32 &outTo) {
+            outFrom = from * s + (to >= from ? 0 : s - 1);
+            outTo = to * s + (to >= from ? s - 1 : 0);
+        };
+        sint32 ax, ay, bx, by;
+        if (xMajor) {
+            scaleMajor(a.x(), b.x(), ax, bx);
+            ay = a.y() * s;
+            by = b.y() * s;
+        } else {
+            scaleMajor(a.y(), b.y(), ay, by);
+            ax = a.x() * s;
+            bx = b.x() * s;
+        }
+        for (sint32 i = 0; i < s; ++i) {
+            const sint32 dx = xMajor ? 0 : i;
+            const sint32 dy = xMajor ? i : 0;
+            fn(CoordS32{ax + dx, ay + dy}, CoordS32{bx + dx, by + dy});
+        }
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -1220,9 +1268,6 @@ private:
         CoordS32 coordB{xb, ya << doubleV};
         CoordS32 coordC{xb, (yb << doubleV) + yAdd};
         CoordS32 coordD{xa, (yb << doubleV) + yAdd};
-        if (m_hrPass) {
-            HRScaleQuad(coordA, coordB, coordC, coordD);
-        }
 
         const VDP1CommandData cmdData{
             .mode = mode,
@@ -1240,7 +1285,9 @@ private:
             .flipH = control.flipH != 0,
         };
 
-        VDP1PlotTexturedQuad(spanData, cmdAddress, control, coordA, coordB, coordC, coordD);
+        HRForEachQuad(coordA, coordB, coordC, coordD, [&](CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d) {
+            VDP1PlotTexturedQuad(spanData, cmdAddress, control, a, b, c, d);
+        });
     }
 
     void VDP1Cmd_DrawScaledSprite(uint32 cmdAddress, VDP1Command::Control control) {
@@ -1338,9 +1385,6 @@ private:
         CoordS32 coordB{qxb, qyb << doubleV};
         CoordS32 coordC{qxc, (qyc << doubleV) + yAdd};
         CoordS32 coordD{qxd, (qyd << doubleV) + yAdd};
-        if (m_hrPass) {
-            HRScaleQuad(coordA, coordB, coordC, coordD);
-        }
 
         const VDP1CommandData cmdData{
             .mode = mode,
@@ -1358,7 +1402,9 @@ private:
             .flipH = control.flipH != 0,
         };
 
-        VDP1PlotTexturedQuad(spanData, cmdAddress, control, coordA, coordB, coordC, coordD);
+        HRForEachQuad(coordA, coordB, coordC, coordD, [&](CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d) {
+            VDP1PlotTexturedQuad(spanData, cmdAddress, control, a, b, c, d);
+        });
     }
 
     void VDP1Cmd_DrawDistortedSprite(uint32 cmdAddress, VDP1Command::Control control) {
@@ -1391,9 +1437,6 @@ private:
         CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
         CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
         CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
-        if (m_hrPass) {
-            HRScaleQuad(coordA, coordB, coordC, coordD);
-        }
 
         const VDP1CommandData cmdData{
             .mode = mode,
@@ -1411,7 +1454,9 @@ private:
             .flipH = control.flipH != 0,
         };
 
-        VDP1PlotTexturedQuad(spanData, cmdAddress, control, coordA, coordB, coordC, coordD);
+        HRForEachQuad(coordA, coordB, coordC, coordD, [&](CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d) {
+            VDP1PlotTexturedQuad(spanData, cmdAddress, control, a, b, c, d);
+        });
     }
 
     void VDP1Cmd_DrawPolygon(uint32 cmdAddress) {
@@ -1443,9 +1488,6 @@ private:
         CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
         CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
         CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
-        if (m_hrPass) {
-            HRScaleQuad(coordA, coordB, coordC, coordD);
-        }
 
         Color555 gouraudA;
         Color555 gouraudB;
@@ -1469,60 +1511,62 @@ private:
             .mode = mode,
         };
 
-        QuadStepper quad{coordA, coordB, coordC, coordD};
-
-        if (mode.gouraudEnable) {
-            quad.SetupGouraud(gouraudA, gouraudB, gouraudC, gouraudD);
-        }
-
-        // Optimization for the case where the quad goes outside the system clipping area.
-        // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
-        // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
-        // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more
-        // lines can be plotted because they all sit outside the system clip area.
-        //
-        // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two
-        // points poking into the screen area in a configuration similar to this:
-        //
-        //                       D
-        //                        B
-        //   +-----------------+
-        //   |            A    |
-        //   |               C |
-        //   |                 |
-        //   |                 |
-        //   |                 |
-        //   +-----------------+
-        //
-        // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so
-        // we need to check for two sequences of plotted lines rather than one.
-        bool linePlotted = false;
-        int plottedSegmentsCount = 0;
-        const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
-
-        // Interpolate linearly over edges A-D and B-C
-        for (; quad.CanStep(); quad.Step()) {
-            // Plot lines between the interpolated points
-            const CoordS32 coordL = quad.LeftEdge().Coord();
-            const CoordS32 coordR = quad.RightEdge().Coord();
+        HRForEachQuad(coordA, coordB, coordC, coordD, [&](CoordS32 a, CoordS32 b, CoordS32 c, CoordS32 d) {
+            QuadStepper quad{a, b, c, d};
 
             if (mode.gouraudEnable) {
-                spanData.gouraud0 = quad.LeftEdge().GouraudValue();
-                spanData.gouraud1 = quad.RightEdge().GouraudValue();
+                quad.SetupGouraud(gouraudA, gouraudB, gouraudC, gouraudD);
             }
 
-            if (VDP1AddSpan(coordL, coordR, spanData, false, true)) {
-                if (!linePlotted) {
-                    linePlotted = true;
-                    ++plottedSegmentsCount;
+            // Optimization for the case where the quad goes outside the system clipping area.
+            // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
+            // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
+            // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more
+            // lines can be plotted because they all sit outside the system clip area.
+            //
+            // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two
+            // points poking into the screen area in a configuration similar to this:
+            //
+            //                       D
+            //                        B
+            //   +-----------------+
+            //   |            A    |
+            //   |               C |
+            //   |                 |
+            //   |                 |
+            //   |                 |
+            //   +-----------------+
+            //
+            // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so
+            // we need to check for two sequences of plotted lines rather than one.
+            bool linePlotted = false;
+            int plottedSegmentsCount = 0;
+            const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
+
+            // Interpolate linearly over edges A-D and B-C
+            for (; quad.CanStep(); quad.Step()) {
+                // Plot lines between the interpolated points
+                const CoordS32 coordL = quad.LeftEdge().Coord();
+                const CoordS32 coordR = quad.RightEdge().Coord();
+
+                if (mode.gouraudEnable) {
+                    spanData.gouraud0 = quad.LeftEdge().GouraudValue();
+                    spanData.gouraud1 = quad.RightEdge().GouraudValue();
                 }
-            } else if (plottedSegmentsCount >= plottedSegmentsMax) {
-                // No more lines can be drawn past this point
-                break;
-            } else {
-                linePlotted = false;
+
+                if (VDP1AddSpan(coordL, coordR, spanData, false, true)) {
+                    if (!linePlotted) {
+                        linePlotted = true;
+                        ++plottedSegmentsCount;
+                    }
+                } else if (plottedSegmentsCount >= plottedSegmentsMax) {
+                    // No more lines can be drawn past this point
+                    break;
+                } else {
+                    linePlotted = false;
+                }
             }
-        }
+        });
     }
 
     void VDP1Cmd_DrawPolylines(uint32 cmdAddress) {
@@ -1554,10 +1598,6 @@ private:
         CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
         CoordS32 coordC{xc, (yc << doubleV) + yAddCD};
         CoordS32 coordD{xd, (yd << doubleV) + yAddCD};
-        if (m_hrPass) {
-            HRScaleLine(coordA, coordB);
-            HRScaleLine(coordC, coordD);
-        }
 
         Color555 gouraudA;
         Color555 gouraudB;
@@ -1585,22 +1625,22 @@ private:
             spanData.gouraud0 = gouraudA;
             spanData.gouraud1 = gouraudB;
         }
-        VDP1AddSpan(coordA, coordB, spanData, false, false);
+        HRForEachLine(coordA, coordB, [&](CoordS32 a, CoordS32 b) { VDP1AddSpan(a, b, spanData, false, false); });
         if (mode.gouraudEnable) {
             spanData.gouraud0 = gouraudB;
             spanData.gouraud1 = gouraudC;
         }
-        VDP1AddSpan(coordB, coordC, spanData, false, false);
+        HRForEachLine(coordB, coordC, [&](CoordS32 a, CoordS32 b) { VDP1AddSpan(a, b, spanData, false, false); });
         if (mode.gouraudEnable) {
             spanData.gouraud0 = gouraudC;
             spanData.gouraud1 = gouraudD;
         }
-        VDP1AddSpan(coordC, coordD, spanData, false, false);
+        HRForEachLine(coordC, coordD, [&](CoordS32 a, CoordS32 b) { VDP1AddSpan(a, b, spanData, false, false); });
         if (mode.gouraudEnable) {
             spanData.gouraud0 = gouraudD;
             spanData.gouraud1 = gouraudA;
         }
-        VDP1AddSpan(coordD, coordA, spanData, false, false);
+        HRForEachLine(coordD, coordA, [&](CoordS32 a, CoordS32 b) { VDP1AddSpan(a, b, spanData, false, false); });
     }
 
     void VDP1Cmd_DrawLine(uint32 cmdAddress) {
@@ -1619,9 +1659,6 @@ private:
 
         CoordS32 coordA{xa, ya};
         CoordS32 coordB{xb, yb};
-        if (m_hrPass) {
-            HRScaleLine(coordA, coordB);
-        }
 
         const VDP1CommandData cmdData{
             .mode = mode,
@@ -1640,7 +1677,7 @@ private:
             spanData.gouraud1.u16 = vdpState.mem1.ReadVRAM<uint16>(gouraudTable + 2u);
         }
 
-        VDP1AddSpan(coordA, coordB, spanData, false, false);
+        HRForEachLine(coordA, coordB, [&](CoordS32 a, CoordS32 b) { VDP1AddSpan(a, b, spanData, false, false); });
     }
 
     void VDP1Cmd_SetUserClipping(uint32 cmdAddress) {
