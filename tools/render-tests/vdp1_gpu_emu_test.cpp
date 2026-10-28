@@ -282,9 +282,6 @@ struct EmuGpu final : metal::Gpu {
     void UploadSpriteFB(uint32, const void *, uint32) override {}
     void RenderLayers(const metal::LayerPassParams &) override {}
     void Compose(const metal::ComposePassParams &) override {}
-    double RecentGpuMillis() const override {
-        return 0;
-    }
     void ComposeHR(const metal::LayerPassParams &, const metal::ComposePassParams &, uint32, uint32, uint32, uint32,
                    uint32) override {}
     metal::FinishedFrame FinishFrame(uint32, uint32, uint32) override {

@@ -272,56 +272,6 @@ struct MetalVDPRenderer::Impl {
 
     /// @brief The internal resolution scale from the settings.
     uint32 internalResolution = 1;
-    /// @brief The highest scale the GPU keeps up with: lowered when frames take too long and raised again when the
-    /// scale above it would fit, but never below 2 (or above the setting).
-    uint32 hrCap = 1;
-    uint32 hrCooldown = 0;
-    uint32 hrGoodFrames = 0;
-    bool hrAdaptive = true;
-
-    // The GPU time per frame (a moving average) above which the internal resolution is lowered, and the time the scale
-    // above would have to fit in to be raised again. A frame is 16.7 ms, and the screen needs the GPU too.
-    static constexpr double kHRLowerAboveMs = 9.5;
-    static constexpr double kHRRaiseBelowMs = 8.0;
-    static constexpr uint32 kHRRaiseAfterFrames = 600;
-    static constexpr uint32 kHRCooldownFrames = 90;
-
-    /// @brief Lowers or raises the internal resolution to what the GPU keeps up with. Called at the end of every frame.
-    void VDP2AdaptResolution() {
-        if (!vdp1 || compare) {
-            return;
-        }
-        if (!hrAdaptive || internalResolution <= 2) {
-            hrCap = internalResolution;
-            vdp1->SetInternalResolution(hrCap);
-            return;
-        }
-        hrCap = std::clamp<uint32>(hrCap, 2, internalResolution);
-        const double ms = gpu->RecentGpuMillis();
-        if (hrCooldown > 0) {
-            --hrCooldown;
-        }
-        if (hrCooldown == 0 && hrCap > 2 && ms > kHRLowerAboveMs) {
-            --hrCap;
-            hrCooldown = kHRCooldownFrames;
-            hrGoodFrames = 0;
-            metal::LogMessage("internal resolution lowered to %ux: the GPU took %.1f ms per frame", hrCap, ms);
-        } else if (hrCap < internalResolution) {
-            // (the cost grows about with the square of the scale, a little less in practice)
-            const double ratio = static_cast<double>((hrCap + 1) * (hrCap + 1)) / static_cast<double>(hrCap * hrCap);
-            if (ms * ratio < kHRRaiseBelowMs && hrCooldown == 0) {
-                if (++hrGoodFrames >= kHRRaiseAfterFrames) {
-                    ++hrCap;
-                    hrCooldown = kHRCooldownFrames;
-                    hrGoodFrames = 0;
-                    metal::LogMessage("internal resolution raised to %ux: the GPU took %.1f ms per frame", hrCap, ms);
-                }
-            } else {
-                hrGoodFrames = 0;
-            }
-        }
-        vdp1->SetInternalResolution(hrCap);
-    }
     uint32 statFrames = 0;
     uint32 statHrFrames = 0;
     uint32 statHrChunks = 0;
@@ -338,9 +288,6 @@ struct MetalVDPRenderer::Impl {
         cpuCommonRenderParams.enhancements.vdp1Scale = 0;
         if (vdp1) {
             // (the comparison with the software renderer is at the native resolution)
-            hrCap = internalResolution;
-            hrCooldown = 0;
-            hrGoodFrames = 0;
             vdp1->SetInternalResolution(compare ? 1 : internalResolution);
         }
     }
@@ -1223,7 +1170,6 @@ struct MetalVDPRenderer::Impl {
         }
 
         // The image of the previous frame is ready by now; this one follows
-        VDP2AdaptResolution();
         const metal::FinishedFrame finished = gpu->FinishFrame(HRes, VRes, hrFrame ? hrFrameScale : 1);
         if (finished.pixels != nullptr) {
             owner.SwCallbacks.FrameComplete(const_cast<uint32 *>(finished.pixels), finished.width, finished.height,
@@ -1260,9 +1206,6 @@ util::VoidResult<> MetalVDPRenderer::Initialize(void *device, bool gpuVDP1) {
         if (m_impl->compare) {
             metal::LogMessage("comparing the GPU's VDP1 with the software renderer's");
         }
-        m_impl->hrCap = m_impl->internalResolution;
-        // (the passes of a profile run take longer than usual, and a fixed resolution can be asked for)
-        m_impl->hrAdaptive = !metal::DiagnosticSwitch("metal-vdp-profile") && !metal::DiagnosticSwitch("metal-vdp-fixed-resolution");
         m_impl->vdp1->SetInternalResolution(m_impl->compare ? 1 : m_impl->internalResolution);
     }
     m_impl->Reset();

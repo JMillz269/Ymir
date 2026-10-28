@@ -76,11 +76,7 @@ states.
 **Internal Resolution** works with it too (2x to 4x): every VDP1 command is drawn a second time on the GPU with scaled-up
 coordinates into larger framebuffers (the normal-size one stays what the emulated CPU reads), and VDP2 composes each
 screen line once per sub-pixel, drawing the sprite layer again from the large framebuffer for each of them. This costs
-GPU time that grows with the square of the scale (4x draws and composes sixteen times). The Metal renderer therefore
-watches how long the GPU takes per frame and, if that stays above about 9.5 ms (the screen and the touch controls need
-the GPU too), lowers the scale one step at a time, down to 2x; it goes up again after ten seconds in which the next scale
-up would fit. The log says when it does. Creating a folder named `metal-vdp-fixed-resolution` in the Documents folder
-turns that off. Frames in modes that can't be
+GPU time that grows with the square of the scale (4x draws and composes sixteen times). Frames in modes that can't be
 enlarged are composed at the normal size. Skip Native Drawing is not supported by the Metal renderer yet.
 
 Diagnostics: the Metal renderer writes `metal-vdp-log.txt` to the Documents folder (started anew at every launch).
