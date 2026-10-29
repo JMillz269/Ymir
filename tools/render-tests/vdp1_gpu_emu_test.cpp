@@ -1238,6 +1238,33 @@ int main(int argc, char **argv) {
                      [&](uint32 x, uint32 y) { return swHr[size_t(y) * stride + x]; });
             }
         }
+        if (std::getenv("VDP2HR")) {
+            // Shows the frame just drawn and renders the picture with the software renderer at the internal
+            // resolution (sw_vdp2_hr.ppm)
+            sw.VDP1SwapFramebuffer();
+            stateSW->fbIndex.Flip();
+            static std::vector<uint32> frameOut;
+            static uint32 frameW = 0, frameH = 0;
+            sw.SwCallbacks.FrameComplete = CBSoftwareFrameComplete{
+                nullptr, [](uint32 *fb, uint32 fw, uint32 fh, uint32 fs, void *) {
+                    frameW = fw * fs;
+                    frameH = fh * fs;
+                    frameOut.assign(fb, fb + size_t(frameW) * frameH);
+                }};
+            sw.VDP2BeginFrame();
+            for (uint32 y = 0; y < vres; ++y) {
+                sw.VDP2RenderLine(y);
+            }
+            sw.VDP2EndFrame();
+            FILE *f = std::fopen("sw_vdp2_hr.ppm", "wb");
+            std::fprintf(f, "P6 %u %u 255\n", frameW, frameH);
+            for (uint32 v : frameOut) {
+                const uint8 rgb[3] = {uint8(v), uint8(v >> 8), uint8(v >> 16)};
+                std::fwrite(rgb, 1, 3, f);
+            }
+            std::fclose(f);
+            std::printf("software renderer picture: %ux%u\n", frameW, frameH);
+        }
         return 0;
     }
 #endif

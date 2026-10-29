@@ -236,9 +236,24 @@ bool DiagnosticSwitch(const char *name) {
     return [[NSFileManager defaultManager] fileExistsAtPath:path];
 }
 
+/// Number of MetalGpu objects alive, for the log (a renderer is created for every game and settings change)
+std::atomic<int> g_liveGpus{0};
+
 class MetalGpu final : public Gpu {
 public:
+    MetalGpu() {
+        ++g_liveGpus;
+    }
+
     ~MetalGpu() override {
+        struct LogOnExit {
+            id<MTLDevice> device;
+            ~LogOnExit() {
+                const int live = --g_liveGpus;
+                LogMessage("Metal renderer released (%d still alive); Metal memory in use: %.0f MB", live,
+                           device != nil ? [device currentAllocatedSize] / 1048576.0 : 0.0);
+            }
+        } logOnExit{m_device};
         // Wait for the GPU to finish with everything
         if (m_cmdBuf != nil) {
             EndEncoder();
@@ -998,8 +1013,9 @@ public:
             const uint64_t micros = m_gpuMicros.exchange(0);
             const uint64_t maxMicros = m_gpuMaxMicros.exchange(0);
             LogMessage("last 300 frames: gpu time average %.2f ms, worst %.2f ms; the emulation waited for the gpu %.2f ms "
-                       "per frame (scale %u)",
-                       micros / 300.0 / 1000.0, maxMicros / 1000.0, m_waitMicros / 300.0 / 1000.0, scale);
+                       "per frame (scale %u); Metal memory in use %.0f MB (%d renderers alive)",
+                       micros / 300.0 / 1000.0, maxMicros / 1000.0, m_waitMicros / 300.0 / 1000.0, scale,
+                       [m_device currentAllocatedSize] / 1048576.0, g_liveGpus.load());
             m_waitMicros = 0;
             if (m_hrStatsBuf != nil) {
                 uint32 *counts = static_cast<uint32 *>([m_hrStatsBuf contents]);
@@ -1571,6 +1587,8 @@ std::unique_ptr<Gpu> Gpu::Create(void *device, std::string &error) {
     if (!gpu->Initialize((__bridge id<MTLDevice>)device, error)) {
         return nullptr;
     }
+    LogMessage("Metal renderer created (%d alive); Metal memory in use: %.0f MB", g_liveGpus.load(),
+               [(__bridge id<MTLDevice>)device currentAllocatedSize] / 1048576.0);
     return gpu;
 }
 
