@@ -13,6 +13,10 @@
 //   DUMP=1          writes the native and scaled up framebuffers of frame 0 as images (dump_*.ppm)
 //   STATE=<file>    draws the VDP1 command list of a save state instead of the test scene and writes state_*.ppm
 //   STATE_OUT=<file> writes the test scene as a save state
+//   with STATE: VDP2=1 renders the picture with the software renderer (sw_vdp2_all.ppm, then each layer alone),
+//   RPDUMP=1 prints rotation parameter table A and its coefficients, BMDUMP=<palette base> writes the 512x256
+//   256-color bitmap at the start of VDP2 VRAM, RPPROBE=<line> prints the rotation parameter A state and screen
+//   coordinates of that line, the bitmap indices and colors they land on and how much of CRAM is filled
 // The save state options need cereal and the app's serializers on the include path
 // (-I <cereal>/include -I apps/ymir-sdl3/src).
 #include <algorithm>
@@ -976,6 +980,8 @@ int main(int argc, char **argv) {
         }
         stateSW->LoadState(save->vdp);
         stateGPU->LoadState(save->vdp);
+        sw.LoadState(save->vdp.renderer);
+        sw.PostLoadStateSync();
         static constexpr uint32 kHRes[] = {320, 352, 640, 704};
         static constexpr uint32 kVRes[] = {224, 240, 256, 256};
         const uint32 hres = kHRes[stateSW->regs2.TVMD.HRESOn & 3];
@@ -989,6 +995,131 @@ int main(int argc, char **argv) {
         for (uint32 addr : {0x0u, 0x2u, 0x6u, 0x8u, 0xAu}) {
             sw.VDP1WriteReg(addr, 0);
             vdp1.WriteReg();
+        }
+        if (std::getenv("VDP2")) {
+            const auto &r2 = save->vdp.regs2;
+            if (std::getenv("RPDUMP")) {
+                // Rotation parameter table A and the coefficients it points at
+                const uint32 rpta = ((uint32(save->vdp.regs2.RPTAU) << 16 | save->vdp.regs2.RPTAL) & 0x7FF7E) * 2;
+                const uint8 *v = save->vdp.VRAM2.data();
+                auto r32 = [&](uint32 a) { return util::ReadBE<uint32>(&v[a & 0x7FFFF]); };
+                std::printf("rotation parameter table at %05X\n", rpta);
+                static const char *kNames[] = {"Xst", "Yst", "Zst", "dXst", "dYst", "dX", "dY", "A", "B", "C", "D",
+                                               "E", "F", "PxPy", "Pz", "CxCy", "Cz", "Mx", "My", "kx", "ky", "KAst",
+                                               "dKAst", "dKAx"};
+                for (int i = 0; i < 24; ++i) {
+                    std::printf("  %-5s %08X\n", kNames[i], r32(rpta + i * 4));
+                }
+                const uint32 kast = r32(rpta + 21 * 4), dkast = r32(rpta + 22 * 4), dkax = r32(rpta + 23 * 4);
+                const uint32 ktaof = (save->vdp.regs2.KTAOF & 7) << 16;
+                for (uint32 y = 0; y < 240; y += 16) {
+                    const uint32 lineAddr = kast + dkast * y;
+                    std::printf("line %3u: KA %08X ->", y, lineAddr);
+                    for (uint32 x = 0; x < 352; x += 64) {
+                        // coefficient address (in 2-word units): the integer part of the fixed point value
+                        const uint32 ka = ((lineAddr + dkax * x) >> 16) + ktaof;
+                        std::printf(" %08X", r32(ka * 4));
+                    }
+                    std::printf("\n");
+                }
+            }
+            if (std::getenv("BMDUMP")) {
+                // The 512x256 256-color bitmap at the start of VRAM with CRAM mode 1 colors (RGB555, 2048 entries)
+                // plus a map of which pixels are nonzero
+                const uint8 *v = save->vdp.VRAM2.data();
+                const uint8 *c = save->vdp.CRAM.data();
+                const uint32 palBase = std::atoi(std::getenv("BMDUMP"));
+                FILE *f = std::fopen("rbg0_bitmap.ppm", "wb");
+                std::fprintf(f, "P6 512 256 255\n");
+                uint32 nonzero = 0;
+                for (uint32 i = 0; i < 512 * 256; ++i) {
+                    const uint8 idx = v[i];
+                    nonzero += idx != 0;
+                    const uint16 col = util::ReadBE<uint16>(&c[((palBase + idx) & 0x7FF) * 2]);
+                    const uint8 rgb[3] = {uint8((col & 31) << 3), uint8(((col >> 5) & 31) << 3),
+                                          uint8(((col >> 10) & 31) << 3)};
+                    std::fwrite(rgb, 1, 3, f);
+                }
+                std::fclose(f);
+                std::printf("bitmap: %u of %u pixels nonzero\n", nonzero, 512 * 256);
+            }
+            std::printf("VDP2: RAMCTL %04X BGON %04X CHCTLB %04X PLSZ %04X MPOFR %04X RPMD %04X RPRCTL %04X KTCTL %04X "
+                        "KTAOF %04X RPTAU %04X RPTAL %04X PRIR %04X CCCTL %04X SFCCMD %04X LNCLEN %04X\n",
+                        r2.RAMCTL, r2.BGON, r2.CHCTLB, r2.PLSZ, r2.MPOFR, r2.RPMD, r2.RPRCTL, r2.KTCTL, r2.KTAOF,
+                        r2.RPTAU, r2.RPTAL, r2.PRIR, r2.CCCTL, r2.SFCCMD, r2.LNCLEN);
+            // Renders the picture with the software renderer: all layers, then each layer alone (sw_vdp2_*.ppm)
+            static std::vector<uint32> frameOut;
+            static uint32 frameW = 0, frameH = 0;
+            sw.SwCallbacks.FrameComplete = CBSoftwareFrameComplete{
+                nullptr, [](uint32 *fb, uint32 fw, uint32 fh, uint32 fs, void *) {
+                    frameW = fw * fs;
+                    frameH = fh * fs;
+                    frameOut.assign(fb, fb + size_t(frameW) * frameH);
+                }};
+            auto render = [&](const std::string &name, int only) {
+                for (int i = 0; i < 6; ++i) {
+                    dbg.enabledLayers[i] = only < 0 || i == only;
+                }
+                stateSW->state2.UpdateEnabledBGs(stateSW->regs2, dbg);
+                sw.UpdateEnabledLayers();
+                sw.VDP2BeginFrame();
+                for (uint32 y = 0; y < vres; ++y) {
+                    sw.VDP2RenderLine(y);
+                }
+                sw.VDP2EndFrame();
+                FILE *f = std::fopen(name.c_str(), "wb");
+                std::fprintf(f, "P6 %u %u 255\n", frameW, frameH);
+                for (uint32 v : frameOut) {
+                    const uint8 rgb[3] = {uint8(v), uint8(v >> 8), uint8(v >> 16)};
+                    std::fwrite(rgb, 1, 3, f);
+                }
+                std::fclose(f);
+            };
+            if (const char *probe = std::getenv("RPPROBE")) {
+                // Renders down to a line and prints the rotation parameter A state and line output there
+                const uint32 py = std::atoi(probe);
+                sw.VDP2BeginFrame();
+                for (uint32 y = 0; y <= py; ++y) {
+                    sw.VDP2RenderLine(y);
+                }
+                const auto &st = stateSW->state2.rotParamStates[0];
+                const auto &rp = stateSW->regs2.rotParams[0];
+                const auto &lo = sw.m_rotParamLineOutputs[0];
+                std::printf("line %u: Xst %08X Yst %08X KA %08X coeffTable %d dataSize %u mode %u perDot %d "
+                            "coeffAccess %d%d%d%d\n",
+                            py, st.Xst, st.Yst, st.KA, rp.coeffTableEnable, rp.coeffDataSize,
+                            uint32(rp.coeffDataMode), stateSW->regs2.vramControl.perDotRotationCoeffs,
+                            stateSW->state2.coeffAccess[0], stateSW->state2.coeffAccess[1],
+                            stateSW->state2.coeffAccess[2], stateSW->state2.coeffAccess[3]);
+                for (uint32 x = 0; x < 352; x += 32) {
+                    std::printf("  x %3u: (%d, %d)%s\n", x, lo.screenCoords[x].x(), lo.screenCoords[x].y(),
+                                lo.transparent[x] ? " transparent" : "");
+                }
+                const uint8 *v = save->vdp.VRAM2.data();
+                const uint8 *c = save->vdp.CRAM.data();
+                std::printf("BMPNB %04X CRAOFB %04X\n", save->vdp.regs2.BMPNB, save->vdp.regs2.CRAOFB);
+                for (uint32 row = 0; row < 0x800; row += 0x40) {
+                    uint32 nz = 0;
+                    for (uint32 i = 0; i < 0x40; ++i) {
+                        nz += util::ReadBE<uint16>(&c[(row + i) * 2]) != 0;
+                    }
+                    std::printf("  CRAM %03X-%03X: %2u of 64 nonzero, first %04X %04X %04X %04X\n", row, row + 0x3F, nz,
+                                util::ReadBE<uint16>(&c[row * 2]), util::ReadBE<uint16>(&c[row * 2 + 2]),
+                                util::ReadBE<uint16>(&c[row * 2 + 4]), util::ReadBE<uint16>(&c[row * 2 + 6]));
+                }
+                for (uint32 x = 0; x < 352; x += 32) {
+                    const auto [bx, by] = lo.screenCoords[x];
+                    const uint8 idx = v[(uint32(by) & 255) * 512 + (uint32(bx) & 511)];
+                    std::printf("  x %3u: bitmap index %02X, CRAM[%03X] %04X\n", x, idx, 0x400 + idx,
+                                util::ReadBE<uint16>(&c[(0x400 + idx) * 2]));
+                }
+                sw.VDP2EndFrame();
+            }
+            render("sw_vdp2_all.ppm", -1);
+            for (int i = 0; i < 6; ++i) {
+                render("sw_vdp2_layer" + std::to_string(i) + ".ppm", i);
+            }
+            return 0;
         }
         vdp1.ResyncFromCPU();
         // Two erase + swap cycles so that the scaled up framebuffers are in line, then the frame
