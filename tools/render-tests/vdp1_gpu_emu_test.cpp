@@ -7,6 +7,14 @@
 // Usage: vdp1_gpu_emu_test [seed] [scale]
 //
 // With a scale above 1 the scaled up framebuffers (internal resolution) are compared with those of the software renderer.
+//
+// Environment variables:
+//   WARMUP=1        erases and swaps twice before drawing so that the scaled up framebuffers are in line from frame 0
+//   DUMP=1          writes the native and scaled up framebuffers of frame 0 as images (dump_*.ppm)
+//   STATE=<file>    draws the VDP1 command list of a save state instead of the test scene and writes state_*.ppm
+//   STATE_OUT=<file> writes the test scene as a save state
+// The save state options need cereal and the app's serializers on the include path
+// (-I <cereal>/include -I apps/ymir-sdl3/src).
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -31,6 +39,14 @@
 #undef private
 
 #include "ymir/hw/vdp/renderer/metal/metal_vdp1.hpp"
+
+// Replaying the VDP1 command list of a save state (STATE=path) needs cereal and the app's serializers on the include
+// path (-I <cereal>/include -I apps/ymir-sdl3/src)
+#if __has_include(<cereal/cereal.hpp>) && __has_include(<serdes/cereal_savestate.hpp>)
+    #include <cereal/archives/portable_binary.hpp>
+    #include <serdes/cereal_savestate.hpp>
+    #define HAVE_SAVESTATE_REPLAY 1
+#endif
 
 #include <algorithm>
 #include <cstdarg>
@@ -944,6 +960,157 @@ int main(int argc, char **argv) {
         vdp1.SetInternalResolution(scale);
     }
 
+#ifdef HAVE_SAVESTATE_REPLAY
+    if (const char *statePath = std::getenv("STATE")) {
+        // Draws the VDP1 command list of a save state with both renderers and writes the native and scaled up
+        // framebuffers as images (state_*.ppm) for a look at what the scaled up framebuffer gets wrong
+        auto save = std::make_unique<savestate::SaveState>();
+        {
+            std::ifstream in{statePath, std::ios::binary};
+            if (!in) {
+                std::printf("can't open %s\n", statePath);
+                return 1;
+            }
+            cereal::PortableBinaryInputArchive archive{in};
+            archive(*save);
+        }
+        stateSW->LoadState(save->vdp);
+        stateGPU->LoadState(save->vdp);
+        static constexpr uint32 kHRes[] = {320, 352, 640, 704};
+        static constexpr uint32 kVRes[] = {224, 240, 256, 256};
+        const uint32 hres = kHRes[stateSW->regs2.TVMD.HRESOn & 3];
+        const uint32 vres = kVRes[stateSW->regs2.TVMD.VRESOn & 3];
+        std::printf("state: TVMD %04X (%ux%u), TVMR %04X FBCR %04X, draw FB %u\n", stateSW->regs2.ReadTVMD(), hres,
+                    vres, stateSW->regs1.ReadTVMR(), stateSW->regs1.ReadFBCR(), stateSW->fbIndex.draw);
+        sw.VDP2SetResolution(hres, vres, false);
+        vdp1.SetVRes(vres);
+        stateSW->state2.UpdateEnabledBGs(stateSW->regs2, dbg);
+        stateGPU->state2.UpdateEnabledBGs(stateGPU->regs2, dbg);
+        for (uint32 addr : {0x0u, 0x2u, 0x6u, 0x8u, 0xAu}) {
+            sw.VDP1WriteReg(addr, 0);
+            vdp1.WriteReg();
+        }
+        vdp1.ResyncFromCPU();
+        // Two erase + swap cycles so that the scaled up framebuffers are in line, then the frame
+        for (int frame = 0; frame < 3; frame++) {
+            sw.VDP1EraseFramebuffer(0);
+            vdp1.EraseFramebuffer(0);
+            sw.VDP1BeginFrame();
+            vdp1.BeginFrame();
+            uint32 cmds = 0;
+            if (frame == 2) {
+                // Walks the command list like the VDP1: jumps, calls and returns, at most 20000 commands
+                uint32 addr = 0, retAddr = 0;
+                bool called = false;
+                for (; cmds < 20000; ++cmds) {
+                    const VDP1Command::Control ctrl{.u16 = util::ReadBE<uint16>(&stateSW->mem1.VRAM[addr])};
+                    if (ctrl.end) {
+                        break;
+                    }
+                    if (!ctrl.skip) {
+                        sw.VDP1ExecuteCommand(addr, ctrl);
+                        vdp1.ExecuteCommand(addr, ctrl);
+                    }
+                    const uint32 link = uint32(util::ReadBE<uint16>(&stateSW->mem1.VRAM[addr + 2])) << 3u;
+                    switch (ctrl.jumpMode) {
+                    case VDP1Command::JumpType::Next: addr += 0x20; break;
+                    case VDP1Command::JumpType::Assign: addr = link; break;
+                    case VDP1Command::JumpType::Call:
+                        if (!called) {
+                            retAddr = addr + 0x20;
+                            called = true;
+                        }
+                        addr = link;
+                        break;
+                    case VDP1Command::JumpType::Return:
+                        if (called) {
+                            addr = retAddr;
+                            called = false;
+                        } else {
+                            addr += 0x20;
+                        }
+                        break;
+                    }
+                    addr &= 0x7FFFF;
+                }
+            }
+            sw.VDP1EndFrame();
+            vdp1.FlushWork();
+            if (frame < 2) {
+                sw.VDP1SwapFramebuffer();
+                vdp1.SwapFramebuffer();
+                stateSW->fbIndex.Flip();
+                stateGPU->fbIndex.Flip();
+                continue;
+            }
+            const uint8 fbi = stateGPU->fbIndex.draw;
+            const uint32 w = hres, h = vres, s = scale;
+            const size_t stride = size_t(512) * s;
+            const uint16 *swHr = sw.m_hrDraw[fbi].data();
+            auto native = [&](const uint8 *fb, uint32 x, uint32 y) {
+                const uint8 *n = &fb[(size_t(y) * 512 + x) * 2];
+                return uint16((uint16(n[0]) << 8) | n[1]);
+            };
+            auto gpuHr = [&](uint32 x, uint32 y) {
+                const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * s * s + (size_t(y) * stride + x) * 2];
+                return uint16((uint16(g[0]) << 8) | g[1]);
+            };
+            uint32 nd = 0, hd = 0, holesGpu = 0, holesSw = 0;
+            for (uint32 y = 0; y < h; ++y) {
+                for (uint32 x = 0; x < w; ++x) {
+                    const uint16 sv = native(stateSW->mem1.FBRAM[fbi].data(), x, y);
+                    nd += sv != native(&gpu.fbram[fbi * 256 * 1024], x, y);
+                    if (s > 1 && sv != 0) {
+                        for (uint32 sy = 0; sy < s; ++sy) {
+                            for (uint32 sx = 0; sx < s; ++sx) {
+                                holesGpu += gpuHr(x * s + sx, y * s + sy) == 0;
+                                holesSw += swHr[size_t(y * s + sy) * stride + x * s + sx] == 0;
+                            }
+                        }
+                    }
+                }
+            }
+            if (s > 1) {
+                for (uint32 y = 0; y < h * s; ++y) {
+                    for (uint32 x = 0; x < w * s; ++x) {
+                        hd += gpuHr(x, y) != swHr[size_t(y) * stride + x];
+                    }
+                }
+            }
+            std::printf("%u commands; native: %u pixels differ (GPU vs software)", cmds, nd);
+            if (s > 1) {
+                std::printf("; %ux: %u pixels differ, scaled up pixels left empty where the native pixel is drawn: "
+                            "GPU %u, software %u",
+                            s, hd, holesGpu, holesSw);
+            }
+            std::printf("\n");
+            auto dump = [&](const char *name, uint32 dw, uint32 dh, auto pixelAt) {
+                FILE *f = std::fopen(name, "wb");
+                std::fprintf(f, "P6 %u %u 255\n", dw, dh);
+                for (uint32 y = 0; y < dh; ++y) {
+                    for (uint32 x = 0; x < dw; ++x) {
+                        const uint16 v = pixelAt(x, y);
+                        // RGB pixels as they are, palette pixels as gray levels of their index
+                        const uint8 rgb[3] = {
+                            uint8(v & 0x8000 ? (v & 31) << 3 : v & 0xFF), uint8(v & 0x8000 ? ((v >> 5) & 31) << 3 : v & 0xFF),
+                            uint8(v & 0x8000 ? ((v >> 10) & 31) << 3 : v & 0xFF)};
+                        std::fwrite(rgb, 1, 3, f);
+                    }
+                }
+                std::fclose(f);
+            };
+            dump("state_native.ppm", w * s, h * s,
+                 [&](uint32 x, uint32 y) { return native(stateSW->mem1.FBRAM[fbi].data(), x / s, y / s); });
+            if (s > 1) {
+                dump("state_gpu_hr.ppm", w * s, h * s, gpuHr);
+                dump("state_sw_hr.ppm", w * s, h * s,
+                     [&](uint32 x, uint32 y) { return swHr[size_t(y) * stride + x]; });
+            }
+        }
+        return 0;
+    }
+#endif
+
     auto w2 = [&](uint32 addr, uint16 v) {
         stateSW->regs2.Write(addr, v);
         stateGPU->regs2.Write(addr, v);
@@ -1064,6 +1231,16 @@ int main(int argc, char **argv) {
     put(0x0005, 0, 0x0000, 0x7FFF, 0, 0, 220, 170, 300, 170, 300, 215, 220, 215);
     put(0x8000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
+#ifdef HAVE_SAVESTATE_REPLAY
+    if (const char *outPath = std::getenv("STATE_OUT")) {
+        // Writes the scene as a save state (only the VDP part is meaningful) to check the replay with
+        auto save = std::make_unique<savestate::SaveState>();
+        stateSW->SaveState(save->vdp);
+        std::ofstream out{outPath, std::ios::binary};
+        cereal::PortableBinaryOutputArchive archive{out};
+        archive(*save);
+    }
+#endif
     vdp1.ResyncFromCPU();
     if (std::getenv("WARMUP")) {
         // Two erase + swap cycles with nothing drawn so that the scaled up framebuffers are in line when drawing starts
