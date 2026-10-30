@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <mutex>
 #include <cstring>
+#include <ctime>
+#include <pthread.h>
 #include <string>
 #include <vector>
 
@@ -1068,6 +1070,7 @@ public:
     }
 
     FinishedFrame FinishFrame(uint32 width, uint32 height, uint32 scale) override {
+        SampleFrameTimes();
         EnsureFrame();
         FrameSlot &slot = m_slots[m_currentSlot];
 
@@ -1091,6 +1094,7 @@ public:
                        micros / 300.0 / 1000.0, maxMicros / 1000.0, m_waitMicros / 300.0 / 1000.0, scale,
                        [m_device currentAllocatedSize] / 1048576.0, g_liveGpus.load());
             m_waitMicros = 0;
+            LogFrameTimes();
             if (m_hrStatsBuf != nil) {
                 uint32 *counts = static_cast<uint32 *>([m_hrStatsBuf contents]);
                 const uint32 sampled = counts[0] + counts[1];
@@ -1263,6 +1267,22 @@ private:
     bool m_debugClearCheck = false;
     std::array<uint32, 4> m_logDrawsByMode{};
     uint32 m_logFrames = 0;
+
+    // Frame times (for the log): the time between frames, the CPU time of the thread that finishes the frames (the
+    // emulation thread) and of the whole process, summed since the last report, and the worst thermal state seen
+    struct FrameTimes {
+        uint32 frames = 0;
+        double intervalMs = 0.0, worstIntervalMs = 0.0;
+        uint32 slowFrames = 0; ///< frames that took longer than a 60 Hz frame (with some slack)
+        double threadCpuMs = 0.0, worstThreadCpuMs = 0.0;
+        double processCpuMs = 0.0;
+        int worstThermal = 0;
+    } m_frameTimes;
+    bool m_frameTimesStarted = false;
+    pthread_t m_frameThread{};
+    std::chrono::steady_clock::time_point m_lastFrameTime{};
+    double m_lastThreadCpuMs = 0.0;
+    double m_lastProcessCpuMs = 0.0;
     std::array<std::array<Pipeline, 4>, 2> m_polyDraw;
     std::array<std::array<Pipeline, 3>, 2> m_merger;
     Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrDownsample, m_hrSprite, m_hrCompose, m_hrReplicate;
@@ -1398,6 +1418,67 @@ private:
             pipeline.slots.push_back(slot);
         }
         return true;
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
+    // Frame time statistics (for the log)
+
+    static double CpuClockMs(clockid_t clock) {
+        timespec ts{};
+        if (clock_gettime(clock, &ts) != 0) {
+            return 0.0;
+        }
+        return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+    }
+
+    /// Notes the times of the frame that is being finished (called at the start of every FinishFrame)
+    void SampleFrameTimes() {
+        const auto now = std::chrono::steady_clock::now();
+        const double threadCpu = CpuClockMs(CLOCK_THREAD_CPUTIME_ID);
+        const double processCpu = CpuClockMs(CLOCK_PROCESS_CPUTIME_ID);
+        const pthread_t self = pthread_self();
+        // (the thread CPU time only adds up while the same thread finishes the frames)
+        if (m_frameTimesStarted && pthread_equal(self, m_frameThread)) {
+            FrameTimes &t = m_frameTimes;
+            const double interval = std::chrono::duration<double, std::milli>(now - m_lastFrameTime).count();
+            const double threadCpuDelta = threadCpu - m_lastThreadCpuMs;
+            ++t.frames;
+            t.intervalMs += interval;
+            t.worstIntervalMs = std::max(t.worstIntervalMs, interval);
+            if (interval > 1000.0 / 60.0 + 2.0) {
+                ++t.slowFrames;
+            }
+            t.threadCpuMs += threadCpuDelta;
+            t.worstThreadCpuMs = std::max(t.worstThreadCpuMs, threadCpuDelta);
+            t.processCpuMs += processCpu - m_lastProcessCpuMs;
+            if (t.frames % 30 == 1) {
+                t.worstThermal = std::max(t.worstThermal, static_cast<int>([[NSProcessInfo processInfo] thermalState]));
+            }
+        }
+        m_frameTimesStarted = true;
+        m_frameThread = self;
+        m_lastFrameTime = now;
+        m_lastThreadCpuMs = threadCpu;
+        m_lastProcessCpuMs = processCpu;
+    }
+
+    /// Logs the frame times since the last report and starts over
+    void LogFrameTimes() {
+        FrameTimes &t = m_frameTimes;
+        if (t.frames == 0) {
+            return;
+        }
+        NSProcessInfo *info = [NSProcessInfo processInfo];
+        static const char *const kThermalNames[] = {"nominal", "fair", "serious", "critical"};
+        const int thermal = std::clamp(std::max(t.worstThermal, static_cast<int>(info.thermalState)), 0, 3);
+        const double n = t.frames;
+        LogMessage("last %u frames: %.1f fps (frame interval average %.2f ms, worst %.2f ms, %u frames slower than "
+                   "60 Hz); emulation thread CPU time per frame average %.2f ms, worst %.2f ms; whole app CPU time per "
+                   "frame %.2f ms; thermal state %s%s",
+                   t.frames, 1000.0 * n / t.intervalMs, t.intervalMs / n, t.worstIntervalMs, t.slowFrames,
+                   t.threadCpuMs / n, t.worstThreadCpuMs, t.processCpuMs / n, kThermalNames[thermal],
+                   info.lowPowerModeEnabled ? ", Low Power Mode on" : "");
+        t = {};
     }
 
     // -------------------------------------------------------------------------------------------------------------
