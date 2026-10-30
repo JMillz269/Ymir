@@ -39,6 +39,7 @@
 #include <blockingconcurrentqueue.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <filesystem>
@@ -298,6 +299,9 @@ struct SharedContext {
         size_t currBackFramebuffer = 0;
         std::mutex mtxFramebuffer;
         bool updated = false;
+        // The renderer hands its images to the graphics context on the GPU (the Metal renderer with a display sink):
+        // the framebuffers above aren't filled, the display draws the context's latest image instead
+        std::atomic<bool> directDisplay = false;
 
         // Internal resolution multiplier of the frame currently in the display framebuffer texture (GUI thread)
         uint32 texScale = 1;

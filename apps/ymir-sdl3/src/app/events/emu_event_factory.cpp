@@ -110,6 +110,11 @@ EmuEvent SwitchVDPRenderer(bool verbose) {
             if (auto *metalCtx = gfxCtx.As<gfx::MetalGraphicsContext>()) {
                 auto result = vdp.UseMetalRenderer(metalCtx->GetDevice(), settings.video.useMetalVDP1);
                 if (result) {
+                    // Its images go straight to the display on the GPU, unless that's turned off
+                    metalCtx->ResetDisplayOutputTextures();
+                    if (settings.video.useMetalDirectDisplay) {
+                        result.Value()->SetDisplaySink(metalCtx->GetDisplaySink());
+                    }
                     ctx.screen.frameReadyEvent.Set(); // unblock main thread in case video sync is enabled
                     notifySuccess("Metal renderer initialized successfully");
                     return;

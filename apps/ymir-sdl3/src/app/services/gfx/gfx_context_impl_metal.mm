@@ -7,6 +7,8 @@
 
 #include <ymir/util/string.hpp>
 
+#include <ymir/hw/vdp/renderer/vdp_renderer_hw_metal.hpp>
+
 #include <backends/imgui_impl_metal.h>
 #include <backends/imgui_impl_sdl3.h>
 
@@ -29,8 +31,12 @@
 CMRC_DECLARE(ymir_sdl3_shaders);
 
 #include <algorithm>
+#include <array>
+#include <cstring>
+#include <optional>
 #include <cmath>
 #include <deque>
+#include <mutex>
 
 using namespace ymir::gpu;
 
@@ -183,6 +189,130 @@ static MTLVertexDescriptor *CreateQuadVertexDescriptor() {
 }
 
 // -----------------------------------------------------------------------------
+// Images handed over by the Metal VDP renderer on the GPU
+
+/// Three textures the Metal VDP renderer copies its finished images into in turn (see ymir::vdp::MetalDisplaySink),
+/// which the display draws from without the images going through the CPU. Two shared events order the two sides on the
+/// GPU: the renderer signals the number of each image once it's copied, and the display signals the number of the image
+/// it drew once it's done with it; the renderer only waits for that before writing over an image the display drew.
+class MetalDisplayFrames final : public ymir::vdp::MetalDisplaySink {
+public:
+    static constexpr uint32 kCount = 3;
+    // Large enough for the largest image: 704x512, or 352x256 at the highest internal resolution (4x)
+    static constexpr uint32 kWidth = 352 * 4;
+    static constexpr uint32 kHeight = 256 * 4;
+
+    explicit MetalDisplayFrames(id<MTLDevice> device)
+        : m_device(device) {
+        m_readyEvent = [device newSharedEvent];
+        m_releaseEvent = [device newSharedEvent];
+    }
+
+    /// An image the display can draw
+    struct Frame {
+        id<MTLTexture> texture = nil;
+        uint32 slot = 0;
+        uint64 number = 0;
+        uint32 width = 0;
+        uint32 height = 0;
+        uint32 scale = 1;
+    };
+
+    bool AcquireTarget(uint32 width, uint32 height, uint32 scale, Target &target) override {
+        if (m_readyEvent == nil || m_releaseEvent == nil || width * scale > kWidth || height * scale > kHeight) {
+            return false;
+        }
+        std::lock_guard lock{m_mutex};
+        const uint64 number = m_nextNumber;
+        Slot &slot = m_slots[number % kCount];
+        if (slot.texture == nil) {
+            MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                            width:kWidth
+                                                                                           height:kHeight
+                                                                                        mipmapped:NO];
+            desc.usage = MTLTextureUsageShaderRead;
+            desc.storageMode = MTLStorageModePrivate;
+            slot.texture = [m_device newTextureWithDescriptor:desc];
+            if (slot.texture == nil) {
+                return false;
+            }
+            slot.texture.label = @"[Ymir] Metal VDP renderer image";
+        }
+        ++m_nextNumber;
+
+        target = {};
+        if (slot.drawn) {
+            // The display drew the image this texture holds: wait until it's done with it
+            target.releaseEvent = (__bridge void *)m_releaseEvent;
+            target.releaseValue = slot.number;
+        }
+        slot.number = number;
+        slot.width = width;
+        slot.height = height;
+        slot.scale = scale;
+        slot.drawn = false;
+        target.texture = (__bridge void *)slot.texture;
+        target.readyEvent = (__bridge void *)m_readyEvent;
+        target.readyValue = number;
+        return true;
+    }
+
+    void TargetSubmitted(uint64 readyValue) override {
+        std::lock_guard lock{m_mutex};
+        m_submitted = std::max(m_submitted, readyValue);
+    }
+
+    /// Gets the latest image handed over, if any, and notes that the display draws it. The caller waits for the ready
+    /// event to reach its number before reading it and signals the release event with its number when done.
+    bool AcquireLatest(Frame &frame) {
+        std::lock_guard lock{m_mutex};
+        if (m_submitted == 0) {
+            return false;
+        }
+        const uint32 index = static_cast<uint32>(m_submitted % kCount);
+        Slot &slot = m_slots[index];
+        if (slot.number != m_submitted || slot.texture == nil) {
+            return false;
+        }
+        slot.drawn = true;
+        frame = {slot.texture, index, slot.number, slot.width, slot.height, slot.scale};
+        return true;
+    }
+
+    /// Stops offering the images handed over so far (when the renderer is replaced)
+    void Reset() {
+        std::lock_guard lock{m_mutex};
+        m_submitted = 0;
+    }
+
+    id<MTLSharedEvent> ReadyEvent() const {
+        return m_readyEvent;
+    }
+
+    id<MTLSharedEvent> ReleaseEvent() const {
+        return m_releaseEvent;
+    }
+
+private:
+    struct Slot {
+        id<MTLTexture> texture = nil;
+        uint64 number = 0;
+        uint32 width = 0;
+        uint32 height = 0;
+        uint32 scale = 1;
+        bool drawn = false; // the display drew this image (and signals the release event with its number when done)
+    };
+
+    id<MTLDevice> m_device = nil;
+    id<MTLSharedEvent> m_readyEvent = nil;
+    id<MTLSharedEvent> m_releaseEvent = nil;
+    std::mutex m_mutex;
+    std::array<Slot, kCount> m_slots{};
+    uint64 m_nextNumber = 1;
+    uint64 m_submitted = 0; // the latest image whose copy has been committed
+};
+
+// -----------------------------------------------------------------------------
 
 struct MetalGraphicsContext::Impl {
     explicit Impl(const MetalGraphicsContextSpec &spec)
@@ -219,6 +349,13 @@ struct MetalGraphicsContext::Impl {
     id<MTLSamplerState> smpLinear = nil;
 
     DrawTextureConstants drawTextureConstants;
+
+    // Images of the Metal VDP renderer, handed over on the GPU, with the IDs of their textures and the number of the
+    // one acquired for the frame being drawn (0 if none)
+    std::shared_ptr<MetalDisplayFrames> displayFrames;
+    std::array<TextureID, MetalDisplayFrames::kCount> displayFrameIDs{
+        kInvalidTextureID, kInvalidTextureID, kInvalidTextureID};
+    uint64 displayFrameDrawn = 0;
 
     id<CAMetalDrawable> currentDrawable = nil;
     id<MTLCommandBuffer> cmdListFrame = nil;
@@ -518,6 +655,7 @@ struct MetalGraphicsContext::Impl {
             if (device == nil) {
                 return util::ErrorMessage{"Failed to create Metal device"};
             }
+            displayFrames = std::make_shared<MetalDisplayFrames>(device);
 
             if (![device supportsFamily:static_cast<MTLGPUFamily>(spec.featureLevel)]) {
                 return util::ErrorMessage{"Metal device does not support requested feature level"};
@@ -708,7 +846,13 @@ struct MetalGraphicsContext::Impl {
 
     void Shutdown() {
         @autoreleasepool {
+            ReleaseDisplayFrame();
             WaitForGPU();
+            if (displayFrames) {
+                // (the renderer must never wait for a display that is gone)
+                displayFrames->ReleaseEvent().signaledValue = UINT64_MAX;
+                displayFrames->Reset();
+            }
             DeletePendingTextures(true);
 
             for (auto &[texID, tex] : textures) {
@@ -855,6 +999,8 @@ struct MetalGraphicsContext::Impl {
             [renderEncoderFrame endEncoding];
             renderEncoderFrame = nil;
         }
+        // (an image of the renderer acquired for this frame is released with it at the latest)
+        ReleaseDisplayFrame();
 
         @autoreleasepool {
             if (currentDrawable != nil && cmdListFrame != nil) {
@@ -1125,7 +1271,10 @@ struct MetalGraphicsContext::Impl {
             rttPassDesc.colorAttachments[0].loadAction = MTLLoadActionLoad;
             rttPassDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-            id<MTLCommandBuffer> rttCmdBuf = [cmdQueue commandBuffer];
+            // Drawn in the frame's command buffer if there is one, ahead of what is drawn on screen; otherwise in a
+            // command buffer of its own, which is waited for
+            const bool ownCmdBuf = cmdListFrame == nil;
+            id<MTLCommandBuffer> rttCmdBuf = ownCmdBuf ? [cmdQueue commandBuffer] : cmdListFrame;
 
             // Optionally upscale the source with MetalFX first, then scale the result into the destination
             id<MTLTexture> srcResource = srcTexture->resource;
@@ -1170,8 +1319,10 @@ struct MetalGraphicsContext::Impl {
                                             atIndex:0];
                 [rttEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
                 [rttEncoder endEncoding];
-                [rttCmdBuf commit];
-                [rttCmdBuf waitUntilCompleted];
+                if (ownCmdBuf) {
+                    [rttCmdBuf commit];
+                    [rttCmdBuf waitUntilCompleted];
+                }
                 return {};
             }
 
@@ -1199,8 +1350,10 @@ struct MetalGraphicsContext::Impl {
             // Draw rectangle
             [rttEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             [rttEncoder endEncoding];
-            [rttCmdBuf commit];
-            [rttCmdBuf waitUntilCompleted];
+            if (ownCmdBuf) {
+                [rttCmdBuf commit];
+                [rttCmdBuf waitUntilCompleted];
+            }
         }
 
         return {};
@@ -1262,6 +1415,124 @@ struct MetalGraphicsContext::Impl {
         }
 
         return {};
+    }
+
+    // -------------------------------------------------------------------------
+    // Images of the Metal VDP renderer
+
+    /// Raises the release event to the given number unless it's there already (the renderer waits for it)
+    void SignalReleaseOnCPU(uint64 number) {
+        id<MTLSharedEvent> event = displayFrames->ReleaseEvent();
+        if (event.signaledValue < number) {
+            event.signaledValue = number;
+        }
+    }
+
+    /// The texture ID under which the display draws the image texture of the given slot
+    TextureID DisplayFrameTextureID(const MetalDisplayFrames::Frame &frame) {
+        TextureID &id = displayFrameIDs[frame.slot];
+        auto it = id != kInvalidTextureID ? textures.find(id) : textures.end();
+        if (it == textures.end() || it->second.resource != frame.texture) {
+            if (id == kInvalidTextureID) {
+                id = texIDMgr.GetNextTextureID();
+            }
+            TextureInstance instance{};
+            instance.spec = {
+                .width = MetalDisplayFrames::kWidth,
+                .height = MetalDisplayFrames::kHeight,
+                .format = PixelFormat::R8G8B8A8_UNORM,
+                .access = TextureAccess::Static,
+                .filterMode = TextureFilterMode::Nearest,
+                .name = "[Ymir] Metal VDP renderer image",
+            };
+            instance.resource = frame.texture;
+            textures[id] = std::move(instance);
+        }
+        return id;
+    }
+
+    /// Gets the latest image of the Metal VDP renderer for the frame being drawn; the frame's command buffer waits on
+    /// the GPU for the image to be ready
+    std::optional<DisplayTextureSpec> AcquireDisplayFrame() {
+        if (!displayFrames) {
+            return std::nullopt;
+        }
+        ReleaseDisplayFrame();
+        MetalDisplayFrames::Frame frame{};
+        if (!displayFrames->AcquireLatest(frame)) {
+            return std::nullopt;
+        }
+        if (!BeginFrame() || cmdListFrame == nil) {
+            // Can't draw it this time; the renderer may write over it
+            SignalReleaseOnCPU(frame.number);
+            return std::nullopt;
+        }
+        if (renderEncoderFrame != nil) {
+            [renderEncoderFrame endEncoding];
+            renderEncoderFrame = nil;
+        }
+        [cmdListFrame encodeWaitForEvent:displayFrames->ReadyEvent() value:frame.number];
+        displayFrameDrawn = frame.number;
+        return DisplayTextureSpec{
+            .id = DisplayFrameTextureID(frame),
+            .width = frame.width,
+            .height = frame.height,
+            .scale = frame.scale,
+        };
+    }
+
+    /// Lets the renderer write over the image acquired for this frame once the GPU is done drawing it
+    void ReleaseDisplayFrame() {
+        if (displayFrameDrawn == 0 || !displayFrames) {
+            return;
+        }
+        if (renderEncoderFrame != nil) {
+            [renderEncoderFrame endEncoding];
+            renderEncoderFrame = nil;
+        }
+        if (cmdListFrame != nil) {
+            [cmdListFrame encodeSignalEvent:displayFrames->ReleaseEvent() value:displayFrameDrawn];
+        } else {
+            SignalReleaseOnCPU(displayFrameDrawn);
+        }
+        displayFrameDrawn = 0;
+    }
+
+    /// Copies the latest image of the Metal VDP renderer to memory, rows packed (for screenshots)
+    util::ValueResult<size_t> DownloadDisplayFrame(void *buffer, size_t size) {
+        MetalDisplayFrames::Frame frame{};
+        if (!displayFrames || !displayFrames->AcquireLatest(frame)) {
+            return util::ErrorMessage{"No image to download"};
+        }
+        const uint32 w = frame.width * frame.scale;
+        const uint32 h = frame.height * frame.scale;
+        const size_t bytes = size_t(w) * h * sizeof(uint32);
+        @autoreleasepool {
+            id<MTLBuffer> readback = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cmdBuf = [cmdQueue commandBuffer];
+            if (readback == nil || cmdBuf == nil) {
+                SignalReleaseOnCPU(frame.number);
+                return util::ErrorMessage{"Could not allocate the download buffer"};
+            }
+            [cmdBuf encodeWaitForEvent:displayFrames->ReadyEvent() value:frame.number];
+            id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+            [blit copyFromTexture:frame.texture
+                         sourceSlice:0
+                         sourceLevel:0
+                        sourceOrigin:MTLOriginMake(0, 0, 0)
+                          sourceSize:MTLSizeMake(w, h, 1)
+                            toBuffer:readback
+                   destinationOffset:0
+              destinationBytesPerRow:w * sizeof(uint32)
+            destinationBytesPerImage:bytes];
+            [blit endEncoding];
+            [cmdBuf encodeSignalEvent:displayFrames->ReleaseEvent() value:frame.number];
+            [cmdBuf commit];
+            [cmdBuf waitUntilCompleted];
+            const size_t copySize = std::min(size, bytes);
+            std::memcpy(buffer, [readback contents], copySize);
+            return copySize;
+        }
     }
 
     void ClearScreen(gfx::ColorRGBA color) {
@@ -1422,24 +1693,25 @@ util::VoidResult<> MetalGraphicsContext::DrawTextureRotated(TextureID textureID,
 }
 
 std::optional<DisplayTextureSpec> MetalGraphicsContext::AcquireCurrentDisplayOutputTexture() {
-    // TODO: find and update index of the latest complete display output texture, emit transition to copy destination
-    // barrier and return its texture ID, width and height
-    return std::nullopt;
+    return m_impl->AcquireDisplayFrame();
 }
 
 void MetalGraphicsContext::ReleaseCurrentDisplayOutputTexture() {
-    // TODO: if the display texture was previously acquired, emit a transition to pixel shading barrier and mark as
-    // released
+    m_impl->ReleaseDisplayFrame();
 }
 
 void MetalGraphicsContext::ResetDisplayOutputTextures() {
-    // TODO: clear display texture state
+    if (m_impl->displayFrames) {
+        m_impl->displayFrames->Reset();
+    }
 }
 
 util::ValueResult<size_t> MetalGraphicsContext::DownloadDisplayOutputTexture(void *buffer, size_t size) {
-    // TODO: if using hardware renderer, copy latest display output texture to buffer and return number of bytes copied.
-    // Return 0 if using software renderer.
-    return util::ErrorMessage{"Unimplemented"};
+    return m_impl->DownloadDisplayFrame(buffer, size);
+}
+
+std::shared_ptr<ymir::vdp::MetalDisplaySink> MetalGraphicsContext::GetDisplaySink() const {
+    return m_impl->displayFrames;
 }
 
 util::VoidResult<> MetalGraphicsContext::SetPresentMode(PresentMode mode) {

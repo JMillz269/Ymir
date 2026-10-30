@@ -8,7 +8,8 @@ VDP2 (the background layers, the sprite layer made from the VDP1 framebuffer and
 same compute shaders the Direct3D 12 renderer uses. VDP1 is rendered either by the software renderer this class is
 derived from, or, if requested, on the GPU too (polygons, sprites and lines, again with the Direct3D 12 renderer's
 shaders). The finished image is read back and delivered through the software renderer's frame callback, so the frontend
-needs no changes.
+needs no changes, unless the frontend gives the renderer a MetalDisplaySink: the image then goes straight into a texture
+of the frontend on the GPU, and the frame callback is called with no pixels.
 */
 
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
@@ -18,6 +19,37 @@ needs no changes.
 #include <memory>
 
 namespace ymir::vdp {
+
+/// @brief Takes the finished images of the Metal renderer on the GPU, for a frontend that displays them with Metal: the
+/// renderer copies every image into a texture the sink gives it instead of reading it back to the CPU.
+///
+/// The renderer calls these on the emulator thread. The objects are passed as `void *` (bridged Objective-C pointers)
+/// so that this header stays plain C++.
+class MetalDisplaySink {
+public:
+    virtual ~MetalDisplaySink() = default;
+
+    /// @brief Where to copy an image to.
+    struct Target {
+        void *texture = nullptr;      ///< `id<MTLTexture>`, RGBA 8-bit, at least (width * scale) x (height * scale)
+        void *readyEvent = nullptr;   ///< `id<MTLSharedEvent>` the renderer signals with `readyValue` once it's copied
+        uint64 readyValue = 0;
+        void *releaseEvent = nullptr; ///< optional `id<MTLSharedEvent>`: the copy waits for it to reach `releaseValue`
+        uint64 releaseValue = 0;      ///< (the frontend may still be reading what the texture held)
+    };
+
+    /// @brief Gets the texture for the image being finished.
+    /// @param[in] width the width of the image (native pixels)
+    /// @param[in] height the height of the image (native pixels)
+    /// @param[in] scale the internal resolution scale of the image
+    /// @param[out] target where to copy the image to
+    /// @return `false` to have the image read back and delivered through the frame callback instead
+    virtual bool AcquireTarget(uint32 width, uint32 height, uint32 scale, Target &target) = 0;
+
+    /// @brief Notes that the commands copying the image (and signaling `readyValue`) have been committed, so the image
+    /// can be displayed.
+    virtual void TargetSubmitted(uint64 readyValue) = 0;
+};
 
 class MetalVDPRenderer final : public SoftwareVDPRenderer {
     MetalVDPRenderer(VDPState &state, const config::VDP2DebugRender &vdp2DebugRenderOptions,
@@ -44,6 +76,10 @@ public:
     // Configuration
 
     void UpdateEnhancements() override;
+
+    /// @brief Has the finished images copied into the sink's textures instead of read back (nullptr: read back). Call
+    /// on the emulator thread.
+    void SetDisplaySink(std::shared_ptr<MetalDisplaySink> sink);
 
     // -------------------------------------------------------------------------
     // Basics and save states

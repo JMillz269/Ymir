@@ -93,8 +93,10 @@ many milliseconds per frame the GPU spent on each kind of pass (VDP1 drawing and
 size, erasing and writes, the VDP2 layers and composition, and the passes of the internal resolution). That runs the
 passes in separate encoders, so it is a little slower; delete the folder for normal play.
 
-The finished image is read back from the GPU and shown through the normal display path, so all the display filters,
-upscaling and screenshots keep working. The image arrives one frame late. Internal Resolution, Transparent Meshes and
+With Direct Display (on by default) the finished image is copied into a texture of the display on the GPU, and the
+display waits for it on the GPU before scaling it (MetalFX, filters), so it never goes through the processor and arrives
+in the same frame; screenshots read it back. With it off, the image is read back from the GPU and shown through the
+normal display path, one frame late. Internal Resolution, Transparent Meshes and
 Deinterlacing need the GPU VDP1 option. With
 Transparent Meshes the mesh layer is drawn at the internal resolution too, and Skip Native Drawing works with it. If it
 can't be created the

@@ -1125,9 +1125,33 @@ public:
                        m_logDrawsByMode[2], m_logDrawsByMode[3], m_logDownloads);
         }
 
-        // Copy the image out of the GPU
+        // Hand the image to the display on the GPU if it takes it, or copy it out of the GPU
         EndEncoder();
-        if (width > 0 && height > 0) {
+        ymir::vdp::MetalDisplaySink::Target target{};
+        const bool toSink = m_displaySink != nullptr && width > 0 && height > 0 &&
+                            m_displaySink->AcquireTarget(width, height, scale, target) && target.texture != nullptr;
+        if (toSink) {
+            const uint32 outWidth = width * scale;
+            const uint32 outHeight = height * scale;
+            if (target.releaseEvent != nullptr) {
+                // (the display may still be reading the image the texture held)
+                [m_cmdBuf encodeWaitForEvent:(__bridge id<MTLSharedEvent>)target.releaseEvent value:target.releaseValue];
+            }
+            id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+            [blit copyFromTexture:(scale > 1 ? m_compositeHR : m_composite)
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 0)
+                       sourceSize:MTLSizeMake(outWidth, outHeight, 1)
+                        toTexture:(__bridge id<MTLTexture>)target.texture
+                 destinationSlice:0
+                 destinationLevel:0
+                destinationOrigin:MTLOriginMake(0, 0, 0)];
+            [blit endEncoding];
+            if (target.readyEvent != nullptr) {
+                [m_cmdBuf encodeSignalEvent:(__bridge id<MTLSharedEvent>)target.readyEvent value:target.readyValue];
+            }
+        } else if (width > 0 && height > 0) {
             id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
             const uint32 outWidth = width * scale;
             const uint32 outHeight = height * scale;
@@ -1205,8 +1229,21 @@ public:
         slot.scale = scale;
         m_cmdBuf = nil;
 
-        // The previous frame has had a whole frame's time to finish
         FinishedFrame result{};
+        if (toSink) {
+            // (the display waits for the copy on the GPU; nothing to wait for here)
+            m_displaySink->TargetSubmitted(target.readyValue);
+            result.displayed = true;
+            result.width = width;
+            result.height = height;
+            result.scale = scale;
+            m_hasPrevious = false;
+            m_currentSlot = (m_currentSlot + 1) % kNumFrameSlots;
+            m_frameStarted = false;
+            return result;
+        }
+
+        // The previous frame has had a whole frame's time to finish
         if (m_hasPrevious) {
             FrameSlot &prev = m_slots[m_previousSlot];
             const auto waitStart = std::chrono::steady_clock::now();
@@ -1225,7 +1262,16 @@ public:
         return result;
     }
 
+    void SetDisplaySink(std::shared_ptr<ymir::vdp::MetalDisplaySink> sink) override {
+        m_displaySink = std::move(sink);
+        // (a frame read back before has nothing to do with the next one read back)
+        m_hasPrevious = false;
+        LogMessage("finished images %s", m_displaySink ? "go straight to the display" : "are read back to the CPU");
+    }
+
 private:
+    std::shared_ptr<ymir::vdp::MetalDisplaySink> m_displaySink;
+
     struct FrameSlot {
         id<MTLBuffer> arena = nil;
         id<MTLBuffer> readback = nil;

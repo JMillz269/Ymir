@@ -292,10 +292,12 @@ struct DisplaySettingsView: View {
                 Toggle("Metal Renderer (Experimental)", isOn: store.bool("video.metalRenderer"))
                 Toggle("Draw Polygons and Sprites on GPU (Experimental)", isOn: store.bool("video.metalVDP1"))
                     .disabled(!store.bool("video.metalRenderer").wrappedValue)
+                Toggle("Direct Display", isOn: store.bool("video.metalDirectDisplay"))
+                    .disabled(!store.bool("video.metalRenderer").wrappedValue)
             } header: {
                 Text("Graphics Chip")
             } footer: {
-                Text("The Metal renderer draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The second switch moves the first video chip (polygons, sprites and lines) to the GPU as well; it needs the Metal renderer. The image arrives one frame later. Internal Resolution, Transparent Meshes and Deinterlacing need both switches on.")
+                Text("The Metal renderer draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The second switch moves the first video chip (polygons, sprites and lines) to the GPU as well; it needs the Metal renderer. Direct Display hands the picture straight to the screen on the GPU instead of copying it through the processor, which is faster and saves a frame of delay; turn it off if the picture misbehaves. Internal Resolution, Transparent Meshes and Deinterlacing need the first two switches on.")
             }
 
             Section {

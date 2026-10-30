@@ -112,6 +112,8 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
             [cfg](bool v) { cfg->video.useMetalRenderer = v; });
     addBool("video.metalVDP1", [cfg] { return cfg->video.useMetalVDP1.Get(); },
             [cfg](bool v) { cfg->video.useMetalVDP1 = v; });
+    addBool("video.metalDirectDisplay", [cfg] { return cfg->video.useMetalDirectDisplay.Get(); },
+            [cfg](bool v) { cfg->video.useMetalDirectDisplay = v; });
     addBool("video.skipNativeVDP1", [cfg] { return cfg->video.enhancements.skipNativeVDP1.Get(); },
             [cfg](bool v) { cfg->video.enhancements.skipNativeVDP1 = v; });
     addBool("video.threadedVDP1", [cfg] { return cfg->video.swRenderer.threadedVDP1.Get(); },

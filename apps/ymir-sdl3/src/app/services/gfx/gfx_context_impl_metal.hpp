@@ -2,6 +2,12 @@
 
 #include "gfx_context.hpp"
 
+#include <memory>
+
+namespace ymir::vdp {
+class MetalDisplaySink;
+} // namespace ymir::vdp
+
 // -----------------------------------------------------------------------------
 // Implementation
 
@@ -64,6 +70,11 @@ public:
     /// @brief Retrieves a pointer to the `id<MTLDevice>` managed by this graphics context.
     /// @return a pointer to the context's Metal device instance
     void *GetDevice() const;
+
+    /// @brief Retrieves the sink the Metal VDP renderer hands its finished images to on the GPU, which
+    /// `AcquireCurrentDisplayOutputTexture` then offers for display.
+    /// @return the sink, or nullptr if it couldn't be created
+    std::shared_ptr<ymir::vdp::MetalDisplaySink> GetDisplaySink() const;
 
 private:
     std::unique_ptr<Impl> m_impl;

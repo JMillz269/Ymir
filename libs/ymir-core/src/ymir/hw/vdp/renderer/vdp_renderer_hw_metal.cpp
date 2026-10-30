@@ -1195,7 +1195,10 @@ struct MetalVDPRenderer::Impl {
 
         // The image of the previous frame is ready by now; this one follows
         const metal::FinishedFrame finished = gpu->FinishFrame(HRes, VRes, hrFrame ? hrFrameScale : 1);
-        if (finished.pixels != nullptr) {
+        if (finished.displayed) {
+            // (the image went to the frontend's texture; the callback still marks the frame done)
+            owner.SwCallbacks.FrameComplete(nullptr, finished.width, finished.height, finished.scale);
+        } else if (finished.pixels != nullptr) {
             owner.SwCallbacks.FrameComplete(const_cast<uint32 *>(finished.pixels), finished.width, finished.height,
                                             finished.scale);
         }
@@ -1268,6 +1271,10 @@ void MetalVDPRenderer::UpdateEnhancements() {
     m_enhancements.skipNativeVDP1 = false;
     SoftwareVDPRenderer::UpdateEnhancements();
     m_impl->UpdateEnhancements();
+}
+
+void MetalVDPRenderer::SetDisplaySink(std::shared_ptr<MetalDisplaySink> sink) {
+    m_impl->gpu->SetDisplaySink(std::move(sink));
 }
 
 // -----------------------------------------------------------------------------

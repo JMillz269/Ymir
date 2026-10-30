@@ -12,6 +12,7 @@ submitted after it and not for those before it. Data passed by pointer is copied
 */
 
 #include <ymir/core/types.hpp>
+#include <ymir/hw/vdp/renderer/vdp_renderer_hw_metal.hpp>
 
 #include <memory>
 #include <string>
@@ -111,6 +112,7 @@ struct Vdp1ResyncPassParams {
 /// @brief A finished frame.
 struct FinishedFrame {
     const uint32 *pixels = nullptr; ///< (width * scale) * (height * scale) pixels, R G B A bytes, rows packed
+    bool displayed = false;         ///< the image went to the display sink (of this frame; `pixels` is null)
     uint32 width = 0;
     uint32 height = 0;
     uint32 scale = 1; ///< internal resolution scale of the image
@@ -209,8 +211,11 @@ public:
     /// @param[in] height the height of the image
     /// @param[in] scale the internal resolution scale of the image (the lines composed with `ComposeHR`), or 1
     /// @return the image of the frame before this one (the pixels stay valid until the next call), or an empty result
-    /// if it isn't available
+    /// if it isn't available; with a display sink that takes the image, a result marked `displayed` for this frame
     virtual FinishedFrame FinishFrame(uint32 width, uint32 height, uint32 scale) = 0;
+
+    /// @brief Has FinishFrame copy the image into the sink's textures instead of reading it back (nullptr: read back).
+    virtual void SetDisplaySink(std::shared_ptr<MetalDisplaySink> sink) = 0;
 };
 
 } // namespace ymir::vdp::metal

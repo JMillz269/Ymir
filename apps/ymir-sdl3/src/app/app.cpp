@@ -356,6 +356,8 @@ int App::Run(const CommandLineOptions &options) {
             [&](bool value) { m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false)); });
         videoSettings.useMetalVDP1.Observe(
             [&](bool value) { m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false)); });
+        videoSettings.useMetalDirectDisplay.Observe(
+            [&](bool value) { m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false)); });
     }
 
     // Profile priority:
@@ -999,14 +1001,18 @@ void App::RunEmulator() {
                            .w = (float)screen.width * screen.fbScale,
                            .h = (float)screen.height * screen.fbScale};
 
-        if (videoSettings.useHardwareAcceleration) {
+        if (videoSettings.useHardwareAcceleration || screen.directDisplay) {
             gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
             const std::optional<gfx::DisplayTextureSpec> hwFbTexture = gfxCtx.AcquireCurrentDisplayOutputTexture();
             if (hwFbTexture) {
                 screen.SetResolution(hwFbTexture->width, hwFbTexture->height);
 
+                // (the image may be at a higher internal resolution: the display texture was sized for its scale)
                 const gfx::TextureID dispTextureID = m_graphicsService.GetTextureID(dispTexture);
-                gfx::FRect srcRect{.x = 0.0f, .y = 0.0f, .w = (float)screen.width, .h = (float)screen.height};
+                gfx::FRect srcRect{.x = 0.0f,
+                                   .y = 0.0f,
+                                   .w = (float)screen.width * hwFbTexture->scale,
+                                   .h = (float)screen.height * hwFbTexture->scale};
                 gfxCtx.RenderToTexture(hwFbTexture->id, dispTextureID, srcRect, dstRect);
                 gfxCtx.ReleaseCurrentDisplayOutputTexture();
             }
@@ -1187,8 +1193,12 @@ void App::RunEmulator() {
                 }
                 if (settings.video.reduceLatency || !screen.updated || screen.videoSync) {
                     std::unique_lock lock{screen.mtxFramebuffer};
-                    std::copy_n(fb, size_t(width) * fbScale * height * fbScale,
-                                screen.framebuffers[screen.currBackFramebuffer].data());
+                    // (no pixels: the renderer handed the image to the graphics context on the GPU)
+                    screen.directDisplay = fb == nullptr;
+                    if (fb != nullptr) {
+                        std::copy_n(fb, size_t(width) * fbScale * height * fbScale,
+                                    screen.framebuffers[screen.currBackFramebuffer].data());
+                    }
                     screen.framebufferScales[screen.currBackFramebuffer] = fbScale;
                     screen.updated = true;
                     if (screen.videoSync) {
@@ -2214,6 +2224,18 @@ void App::RunEmulator() {
                         std::copy_n(&ss.fb[srcPos], screen.width, &ss.fb[dstPos]);
                     }
                     ss.fb.resize(screen.width * screen.height);
+                } else if (screen.directDisplay) {
+                    // The renderer handed the frame to the graphics context on the GPU; read it back from there
+                    const uint32 fbScale = screen.DisplayFramebufferScale();
+                    ss.fbWidth = screen.width * fbScale;
+                    ss.fbHeight = screen.height * fbScale;
+                    ss.fb.resize(size_t(ss.fbWidth) * ss.fbHeight);
+                    gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
+                    auto result = gfxCtx.DownloadDisplayOutputTexture(ss.fb.data(), ss.fb.size() * sizeof(uint32));
+                    if (!result) {
+                        m_context.DisplayMessage(
+                            fmt::format("Display framebuffer could not be downloaded: {}", result.Error().message));
+                    }
                 } else {
                     // The software renderer already outputs the frame in a compact vector
                     const uint32 fbScale = screen.DisplayFramebufferScale();
@@ -2256,12 +2278,15 @@ void App::RunEmulator() {
                 screen.currBackFramebuffer ^= 1u;
             }
             screen.texScale = screen.DisplayFramebufferScale();
-            const gfx::IRect area{.x = 0,
-                                  .y = 0,
-                                  .w = screen.width * screen.texScale,
-                                  .h = screen.height * screen.texScale};
-            m_graphicsService.UpdateTexture(
-                swFbTexture, &area, [&](void *data, size_t pitch) { screen.CopyFramebufferToTexture(data, pitch); });
+            if (!screen.directDisplay) {
+                const gfx::IRect area{.x = 0,
+                                      .y = 0,
+                                      .w = screen.width * screen.texScale,
+                                      .h = screen.height * screen.texScale};
+                m_graphicsService.UpdateTexture(swFbTexture, &area, [&](void *data, size_t pitch) {
+                    screen.CopyFramebufferToTexture(data, pitch);
+                });
+            }
         }
 
         auto now = clk::now();
