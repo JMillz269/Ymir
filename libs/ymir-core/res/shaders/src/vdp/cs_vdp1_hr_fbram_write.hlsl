@@ -40,9 +40,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         return;
     }
 
-    // Raw (big-endian) 16 bits of the pixel in the native framebuffer
+    // Raw (big-endian) 16 bits of the pixel in the native framebuffer (the address is relative to the start of the
+    // draw framebuffer)
     const uint nativeAddress = write.address + px * 2u;
-    const uint raw = BitExtract(g_fbramNative.Load(nativeAddress & ~3u) , (nativeAddress & 2u) * 8u, 16u);
+    const uint nativeFBAddress = drawFB * kVDP1FBSize + nativeAddress;
+    const uint raw = BitExtract(g_fbramNative.Load(nativeFBAddress & ~3u), (nativeFBAddress & 2u) * 8u, 16u);
 
     const uint pixelIndex = nativeAddress >> 1u;
     const uint nx = pixelIndex & 511u;

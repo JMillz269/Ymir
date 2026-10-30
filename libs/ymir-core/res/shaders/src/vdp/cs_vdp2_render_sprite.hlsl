@@ -561,7 +561,7 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
 // Whether the sprite data of the pixel in this plane differs from the native sprite data. Pixels that don't come out
 // the same as the native image, which is composed already, so they are skipped.
 bool HRPixelDiffers(uint2 pos) {
-    if (rotate || inHalfResH || outHalfResH || deinterlace) {
+    if (rotate || inHalfResH || outHalfResH || (deinterlace && interlaceMode >= kInterlaceModeSingleDensity)) {
         return true;
     }
     const uint address = (pos.x + pos.y * fbSize.x) * 2;
