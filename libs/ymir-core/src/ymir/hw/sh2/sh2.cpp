@@ -486,6 +486,9 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
         } else {
             m_idleStreak = 0;
         }
+    } else {
+        // The interpreter doesn't detect waiting; forget a streak left over from recompiled code
+        m_idleStreak = 0;
     }
 
     bool iterated = false;
