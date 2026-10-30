@@ -17,6 +17,8 @@
 //   RPDUMP=1 prints rotation parameter table A and its coefficients, BMDUMP=<palette base> writes the 512x256
 //   256-color bitmap at the start of VDP2 VRAM, RPPROBE=<line> prints the rotation parameter A state and screen
 //   coordinates of that line, the bitmap indices and colors they land on and how much of CRAM is filled
+//   with STATE: CRAMSEARCH=<entry> looks for 16 colors of CRAM in work RAM and VRAM, PTRSEARCH=<address> (with
+//   CRAMSEARCH) for a 32-bit value in them, WRAMDUMP=1 (with CRAMSEARCH) writes the work RAM to wramh.bin/wraml.bin
 // The save state options need cereal and the app's serializers on the include path
 // (-I <cereal>/include -I apps/ymir-sdl3/src).
 #include <algorithm>
@@ -995,6 +997,66 @@ int main(int argc, char **argv) {
         for (uint32 addr : {0x0u, 0x2u, 0x6u, 0x8u, 0xAu}) {
             sw.VDP1WriteReg(addr, 0);
             vdp1.WriteReg();
+        }
+        if (const char *memSearch = std::getenv("CRAMSEARCH")) {
+            // Looks for the 16 colors at the given CRAM entry in work RAM and VRAM and prints the 128 colors in front
+            // of every match (where a palette that starts 128 entries earlier would have the colors CRAM lacks)
+            const uint32 entry = std::strtoul(memSearch, nullptr, 16);
+            const uint8 *needle = &save->vdp.CRAM[entry * 2];
+            struct Area {
+                const char *name;
+                const uint8 *data;
+                size_t size;
+            };
+            const Area areas[] = {{"WRAM-H", save->system.WRAMHigh.data(), save->system.WRAMHigh.size()},
+                                  {"WRAM-L", save->system.WRAMLow.data(), save->system.WRAMLow.size()},
+                                  {"VDP2 VRAM", save->vdp.VRAM2.data(), save->vdp.VRAM2.size()},
+                                  {"VDP1 VRAM", save->vdp.VRAM1.data(), save->vdp.VRAM1.size()}};
+            for (const Area &area : areas) {
+                for (size_t off = 0; off + 32 <= area.size; off += 2) {
+                    if (std::memcmp(&area.data[off], needle, 32) != 0) {
+                        continue;
+                    }
+                    std::printf("%s offset %06zX matches CRAM %03X\n", area.name, off, entry);
+                    if (off >= 256) {
+                        uint32 nz = 0;
+                        for (uint32 i = 0; i < 128; ++i) {
+                            nz += util::ReadBE<uint16>(&area.data[off - 256 + i * 2]) != 0;
+                        }
+                        std::printf("  the 128 colors in front: %u nonzero, first", nz);
+                        for (uint32 i = 0; i < 8; ++i) {
+                            std::printf(" %04X", util::ReadBE<uint16>(&area.data[off - 256 + i * 2]));
+                        }
+                        std::printf("\n");
+                    }
+                }
+            }
+            if (std::getenv("WRAMDUMP")) {
+                // Writes the work RAM (wramh.bin, wraml.bin) for a closer look at the game's code and data
+                for (const Area &area : areas) {
+                    const std::string name = std::string(area.name) == "WRAM-H"   ? "wramh.bin"
+                                             : std::string(area.name) == "WRAM-L" ? "wraml.bin"
+                                                                                  : "";
+                    if (!name.empty()) {
+                        FILE *f = std::fopen(name.c_str(), "wb");
+                        std::fwrite(area.data, 1, area.size, f);
+                        std::fclose(f);
+                    }
+                }
+            }
+            if (const char *ptr = std::getenv("PTRSEARCH")) {
+                // Looks for a 32-bit value (an address, as code loads it) in work RAM
+                const uint32 value = std::strtoul(ptr, nullptr, 16);
+                for (const Area &area : areas) {
+                    for (size_t off = 0; off + 4 <= area.size; off += 2) {
+                        const uint32 v = util::ReadBE<uint32>(&area.data[off]);
+                        if ((v & 0x0FFFFFFF) == (value & 0x0FFFFFFF)) {
+                            std::printf("%s offset %06zX holds %08X\n", area.name, off, v);
+                        }
+                    }
+                }
+            }
+            return 0;
         }
         if (std::getenv("VDP2")) {
             const auto &r2 = save->vdp.regs2;
