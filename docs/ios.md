@@ -94,8 +94,8 @@ size, erasing and writes, the VDP2 layers and composition, and the passes of the
 passes in separate encoders, so it is a little slower; delete the folder for normal play.
 
 The finished image is read back from the GPU and shown through the normal display path, so all the display filters,
-upscaling and screenshots keep working. The image arrives one frame late. Deinterlacing is not supported yet and is
-ignored while the Metal renderer is on, and Internal Resolution and Transparent Meshes need the GPU VDP1 option. With
+upscaling and screenshots keep working. The image arrives one frame late. Internal Resolution, Transparent Meshes and
+Deinterlacing need the GPU VDP1 option. With
 Transparent Meshes the mesh layer is drawn at the normal size (scaled up with the rest of the image at higher internal
 resolutions), and Skip Native Drawing is not used while it's on (sprites drawn over mesh pixels have to remove them from
 the normal-size mesh layer). If it can't be created the

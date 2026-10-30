@@ -76,6 +76,7 @@ struct Vdp1DrawParams {
     uint32 numPixels = 0;   ///< total number of pixels of the spans
     uint32 mergeWidth = 0;  ///< size of the output merger dispatch in threads (one for every 2 or 4 pixels of a row)
     uint32 mergeHeight = 0;
+    uint32 mergeFields = 1; ///< 2 to merge the alternate field too (deinterlacing)
 
     bool hr = false; ///< draw into the scaled up (internal resolution) framebuffer instead of the native one
     bool transparentMesh = false; ///< use the transparent mesh variants (mesh pixels go to the mesh framebuffer)

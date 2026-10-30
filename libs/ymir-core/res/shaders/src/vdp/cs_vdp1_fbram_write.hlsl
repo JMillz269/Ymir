@@ -55,7 +55,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         g_fbramOut.Store(address + kVDP1FBRAMSize * 2, meshValue);
     }
     if (deinterlace && doubleDensity) {
-        g_fbramOut.Store(address + kVDP1FBRAMSize, value);
+        // (only the written bytes; the alternate field keeps its own pixels in the rest of the word)
+        uint altValue = g_fbramOut.Load(address + kVDP1FBRAMSize);
+        altValue &= write.andMask;
+        altValue |= write.orMask;
+        g_fbramOut.Store(address + kVDP1FBRAMSize, altValue);
         if (transparentMeshes) {
             uint meshValue = g_fbramOut.Load(address + kVDP1FBRAMSize * 3);
             meshValue &= write.andMask;

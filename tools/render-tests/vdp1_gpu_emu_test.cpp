@@ -13,6 +13,8 @@
 //   DUMP=1          writes the native and scaled up framebuffers of frame 0 as images (dump_*.ppm)
 //   STATE=<file>    draws the VDP1 command list of a save state instead of the test scene and writes state_*.ppm
 //   STATE_OUT=<file> writes the test scene as a save state
+//   SKIPNATIVE=1    Skip Native Drawing; MESH=1 Transparent Meshes; DEINTERLACE=1 deinterlacing (in both renderers)
+//   INTERLACE=1|2   draws the scene in an interlaced double density mode (2: with VDP1's double interlace drawing)
 //   with STATE: VDP2=1 renders the picture with the software renderer (sw_vdp2_all.ppm, then each layer alone),
 //   RPDUMP=1 prints rotation parameter table A and its coefficients, BMDUMP=<palette base> writes the 512x256
 //   256-color bitmap at the start of VDP2 VRAM, RPPROBE=<line> prints the rotation parameter A state and screen
@@ -486,9 +488,18 @@ struct EmuGpu final : metal::Gpu {
                     value = (writeValue << 16u) | writeValue;
                 }
                 FbStore(address, value);
+                // (a partial write erases the first pixel of the word only, in every buffer)
+                const uint32 keepMask = partialWrite ? 0xFFFF0000u : 0u;
                 if (BitTest(enhancements, 1)) {
                     // (transparent meshes: the mesh framebuffers come after the two fields)
-                    FbStore(address + 512 * 1024 * 2, 0);
+                    FbStore(address + 512 * 1024 * 2, FbLoad(address + 512 * 1024 * 2) & keepMask);
+                }
+                if (BitTest(enhancements, 0) && BitTest(dp, 3)) {
+                    // (deinterlacing: the alternate field is erased too)
+                    FbStore(address + 512 * 1024, (FbLoad(address + 512 * 1024) & keepMask) | (value & ~keepMask));
+                    if (BitTest(enhancements, 1)) {
+                        FbStore(address + 512 * 1024 * 3, FbLoad(address + 512 * 1024 * 3) & keepMask);
+                    }
                 }
             }
         }
@@ -546,6 +557,13 @@ struct EmuGpu final : metal::Gpu {
                 // (transparent meshes: the written pixels are removed from the mesh framebuffer)
                 FbStore(address + 512 * 1024 * 2, FbLoad(address + 512 * 1024 * 2) & w[i].andMask);
             }
+            if (BitTest(enhancements, 0) && BitTest(dp, 3)) {
+                // (deinterlacing: the written bytes go to the alternate field too)
+                FbStore(address + 512 * 1024, (FbLoad(address + 512 * 1024) & w[i].andMask) | w[i].orMask);
+                if (BitTest(enhancements, 1)) {
+                    FbStore(address + 512 * 1024 * 3, FbLoad(address + 512 * 1024 * 3) & w[i].andMask);
+                }
+            }
         }
     }
 
@@ -559,6 +577,7 @@ struct EmuGpu final : metal::Gpu {
     uint32 dpBits;
     uint32 shading;
     bool meshMode = false; // transparent mesh variants (POLYSPEC_TRANSPARENT_MESH)
+    uint32 enhBits = 0;    // enhancements of the dispatch's common parameters
 
     void WriteOutput(int cx, int cy, uint32 cmdIndex, uint32 value, uint32 fragmentSlot) {
         const VDP1CommandParams &cp = cmds[cmdIndex];
@@ -591,14 +610,25 @@ struct EmuGpu final : metal::Gpu {
         const bool dblInterlaceEnable = BitTest(dpBits, 4);
         const uint32 dblInterlaceDrawLine = BitExtract(dpBits, 5, 1);
         const uint32 fbW = (512u << BitExtract(dpBits, 0, 1)) * hrScale;
-        const uint32 fbOffsetFB = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale;
-        if (doubleDensity && dblInterlaceEnable && (uint32(cy) & 1) != dblInterlaceDrawLine) {
+        uint32 fbOffsetFB = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale;
+        const bool deinterlace = BitTest(enhBits, 0);
+        const uint32 fbH0 = (256u << BitExtract(dpBits, 1, 1)) * hrScale;
+        if (!deinterlace && doubleDensity && dblInterlaceEnable && (uint32(cy) & 1) != dblInterlaceDrawLine) {
             return;
         }
-        if (dblInterlaceEnable) {
+        uint32 outOffset = 0;
+        if (deinterlace && doubleDensity && (uint32(cy) & 1) != 0) {
+            // (odd lines go to the alternate field)
+            if (shading == 3) {
+                fbOffsetFB += 512 * 1024;
+            } else {
+                outOffset += fbW * fbH0;
+            }
+        }
+        if ((deinterlace && doubleDensity) || dblInterlaceEnable) {
             cy >>= 1;
         }
-        uint32 outOffset = cy * fbW + cx;
+        outOffset += cy * fbW + cx;
         if (meshMode && meshEnable) {
             // (the transparent mesh pixels go after the two fields)
             const uint32 fbH = (256u << BitExtract(dpBits, 1, 1)) * hrScale;
@@ -856,19 +886,21 @@ struct EmuGpu final : metal::Gpu {
     }
 
     // Port of cs_vdp1_output_merger (field 0; with the transparent mesh variants the mesh pixels too)
-    void MergeThread(uint32 px, uint32 py, uint32 mode) {
+    void MergeThread(uint32 px, uint32 py, uint32 mode, uint32 field) {
         const bool pixel8Bits = BitTest(dpBits, 2);
         const uint32 fbW = (512u << BitExtract(dpBits, 0, 1)) * hrScale;
         const uint32 fbH = (256u << BitExtract(dpBits, 1, 1)) * hrScale;
-        const uint32 fbOffset = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale;
         const uint32 fbramBytes = 256 * 1024 * hrScale * hrScale * 2;
+        // (the field's pixels and framebuffer come after the other field's)
+        const uint32 fbOffset = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale + field * fbramBytes;
+        const uint32 fieldIn = field * fbW * fbH;
         const uint32 inMeshDelta = fbW * fbH * 2;
         if (pixel8Bits) {
             if (mode != 0) {
                 return;
             }
             const uint32 inx = px * 4, iny = py;
-            const uint32 inOffset = inx + iny * fbW;
+            const uint32 inOffset = inx + iny * fbW + fieldIn;
             uint32 out[4], meshOut[4] = {}, seq[4], meshSeq[4] = {};
             bool has[4];
             bool any = false;
@@ -918,7 +950,7 @@ struct EmuGpu final : metal::Gpu {
         }
         const uint32 inx = px * 2, iny = py;
         if (mode == 0) {
-            const uint32 inOffset = inx + iny * fbW;
+            const uint32 inOffset = inx + iny * fbW + fieldIn;
             const uint32 outOffset = (inx + iny * fbW) * 2;
             const uint32 o0 = spriteOut[inOffset], o1 = spriteOut[inOffset + 1];
             const uint32 s0 = BitExtract(o0, 16, 16), s1 = BitExtract(o1, 16, 16);
@@ -970,7 +1002,7 @@ struct EmuGpu final : metal::Gpu {
             }
             return;
         }
-        const uint32 inOffset = inx + iny * fbW;
+        const uint32 inOffset = inx + iny * fbW + fieldIn;
         const uint32 outOffset = (inx + iny * fbW) * 2;
         const uint32 meshIn = inOffset + inMeshDelta;
         const uint32 meshAddress = outOffset + fbramBytes * 2 + fbOffset;
@@ -1117,6 +1149,7 @@ struct EmuGpu final : metal::Gpu {
         cmds = (const VDP1CommandParams *)p.commands;
         shading = p.shadingMode;
         meshMode = p.transparentMesh;
+        std::memcpy(&enhBits, &common.enhancements, 4);
         nextNode = 0;
 
         std::vector<uint32> order(p.numPixels);
@@ -1130,7 +1163,9 @@ struct EmuGpu final : metal::Gpu {
         if (shading != 3) {
             for (uint32 y = 0; y < p.mergeHeight; ++y) {
                 for (uint32 x = 0; x < p.mergeWidth; ++x) {
-                    MergeThread(x + common.mergeOriginX, y + common.mergeOriginY, p.mergeMode);
+                    for (uint32 field = 0; field < p.mergeFields; ++field) {
+                        MergeThread(x + common.mergeOriginX, y + common.mergeOriginY, p.mergeMode, field);
+                    }
                 }
             }
         }
@@ -1165,7 +1200,11 @@ int main(int argc, char **argv) {
         // doesn't skip native drawing either)
         enh.transparentMeshes = std::getenv("MESH") != nullptr;
         enh.skipNativeVDP1 = skipNative && !enh.transparentMeshes;
+        // DEINTERLACE=1: deinterlacing in both renderers (with INTERLACE=1 or 2 the scene is in an interlaced double
+        // density mode, with 2 VDP1's double interlace drawing on)
+        enh.deinterlace = std::getenv("DEINTERLACE") != nullptr;
         sw.ConfigureEnhancements(enh);
+        vdp1.SetDeinterlace(enh.deinterlace);
         vdp1.SetInternalResolution(scale);
         vdp1.SetSkipNative(skipNative);
         vdp1.SetTransparentMeshes(enh.transparentMeshes);
@@ -1549,15 +1588,22 @@ int main(int argc, char **argv) {
         stateGPU->regs1.Write<false>(addr, v);
         vdp1.WriteReg();
     };
-    w2(0x000, 0x8000);
+    const char *interlaceEnv = std::getenv("INTERLACE");
+    const uint32 interlace = interlaceEnv ? std::atoi(interlaceEnv) : 0;
+    // (LSMD = 3: double density interlace)
+    w2(0x000, interlace ? 0x80C0 : 0x8000);
     stateSW->regs2.LatchTVMD();
     stateGPU->regs2.LatchTVMD();
-    sw.VDP2SetResolution(320, 224, false);
-    vdp1.SetVRes(224);
+    sw.VDP2SetResolution(320, interlace ? 448 : 224, false);
+    vdp1.SetVRes(interlace ? 448 : 224);
     stateSW->state2.UpdateEnabledBGs(stateSW->regs2, dbg);
     stateGPU->state2.UpdateEnabledBGs(stateGPU->regs2, dbg);
 
     w1(0x000, 0x0000);
+    if (interlace == 2) {
+        // FBCR: double interlace drawing (DIE)
+        w1(0x002, 0x0008);
+    }
     w1(0x006, 0x0000);
     w1(0x008, 0x0000);
     w1(0x00A, (319 / 8) << 9 | 223);
@@ -1765,6 +1811,29 @@ int main(int argc, char **argv) {
                 filled += (s[0] | s[1]) != 0;
             }
         }
+        if (std::getenv("DEINTERLACE") && interlace) {
+            // The alternate field of the draw framebuffer
+            uint32 altDiffs = 0, altFilled = 0;
+            const SpriteFB &swAlt = sw.m_altFBRAM[fbi];
+            for (uint32 y = 0; y < 224; ++y) {
+                for (uint32 x = 0; x < 320; ++x) {
+                    const size_t o = (size_t(y) * 512 + x) * 2;
+                    const uint8 *g = &gpu.fbram[256 * 1024 * 2 + fbi * 256 * 1024 + o];
+                    altFilled += (swAlt[o] | swAlt[o + 1]) != 0;
+                    if (std::memcmp(g, &swAlt[o], 2) != 0) {
+                        if (altDiffs < 8) {
+                            std::printf("  alt (%u,%u): GPU %02X%02X sw %02X%02X\n", x, y, g[0], g[1], swAlt[o],
+                                        swAlt[o + 1]);
+                        }
+                        ++altDiffs;
+                    }
+                }
+            }
+            std::printf("  alternate field (%u pixels drawn): %u pixels differ\n", altFilled, altDiffs);
+            if (altDiffs) {
+                ++badFrames;
+            }
+        }
         if (std::getenv("MESH")) {
             // The transparent mesh framebuffer of the draw framebuffer
             uint32 meshDiffs = 0, meshFilled = 0;
@@ -1817,8 +1886,8 @@ int main(int argc, char **argv) {
                 }
             }
             // Every line where the scaled up framebuffer is not the native one scaled up has to be one the renderer
-            // reports as changed (VDP2 only composes those again)
-            {
+            // reports as changed (VDP2 only composes those again); not in interlaced modes, which aren't drawn scaled up
+            if (!interlace) {
                 uint32 first = 0, last = 0;
                 const bool any = vdp1.HRDirtyLines(fbi, first, last);
                 uint32 outside = 0;
@@ -1837,8 +1906,8 @@ int main(int argc, char **argv) {
                 }
             }
             // Shapes one native pixel thin cover all of their native pixels' scaled up pixels (checked on the axis
-            // aligned ones in the bottom strip)
-            {
+            // aligned ones in the bottom strip; not in interlaced modes)
+            if (!interlace) {
                 uint32 holes = 0;
                 for (uint32 y = 216; y < 224; ++y) {
                     for (uint32 x = 0; x < 265; ++x) {

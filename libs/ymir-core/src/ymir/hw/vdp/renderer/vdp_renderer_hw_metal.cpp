@@ -276,6 +276,8 @@ struct MetalVDPRenderer::Impl {
     bool skipNativeVDP1 = false;
     /// @brief Transparent Meshes from the settings (available when the GPU draws VDP1).
     bool transparentMeshes = false;
+    /// @brief Deinterlacing from the settings (available when the GPU draws VDP1).
+    bool deinterlace = false;
     uint32 statFrames = 0;
     uint32 statHrFrames = 0;
     uint32 statHrChunks = 0;
@@ -286,10 +288,11 @@ struct MetalVDPRenderer::Impl {
     uint32 hrFrameScale = 1;
 
     void UpdateEnhancements() {
-        // Deinterlacing is not available with this renderer; transparent meshes are when the GPU draws VDP1 (the mesh
-        // framebuffers are on the GPU then)
+        // Transparent meshes and deinterlacing are available when the GPU draws VDP1 (the mesh framebuffers and the
+        // alternate fields are on the GPU then)
         const bool meshes = vdp1 && !compare && transparentMeshes;
-        cpuCommonRenderParams.enhancements.deinterlace = 0;
+        const bool fields = vdp1 && !compare && deinterlace;
+        cpuCommonRenderParams.enhancements.deinterlace = fields;
         cpuCommonRenderParams.enhancements.transparentMeshes = meshes;
         cpuCommonRenderParams.enhancements.vdp1Scale = 0;
         if (vdp1) {
@@ -297,6 +300,7 @@ struct MetalVDPRenderer::Impl {
             vdp1->SetInternalResolution(compare ? 1 : internalResolution);
             vdp1->SetSkipNative(!compare && skipNativeVDP1);
             vdp1->SetTransparentMeshes(meshes);
+            vdp1->SetDeinterlace(fields);
         }
     }
 
@@ -1018,11 +1022,14 @@ struct MetalVDPRenderer::Impl {
             return;
         }
 
+        // (deinterlacing draws the lines of both fields)
+        const bool bothFields = cpuCommonRenderParams.enhancements.deinterlace && vdpState.regs2.TVMD.IsInterlaced();
+        const uint32 yShift = bothFields ? 1u : 0u;
         const uint32 startY = nextLayerRenderLine;
-        const uint32 numLines = y - startY + 1;
+        const uint32 numLines = (y - startY + 1) << yShift;
         nextLayerRenderLine = y + 1;
 
-        cpuCommonRenderParams.startY = startY;
+        cpuCommonRenderParams.startY = startY << yShift;
 
         metal::LayerPassParams pass = MakeLayerPass(numLines);
         gpu->RenderLayers(pass);
@@ -1244,11 +1251,12 @@ MetalVDPRenderer::Create(VDPState &state, const config::VDP2DebugRender &vdp2Deb
 // Configuration
 
 void MetalVDPRenderer::UpdateEnhancements() {
-    // The GPU draws at a higher resolution (with Skip Native Drawing) and the transparent meshes when it draws VDP1, so
-    // the software renderer's own versions are off; deinterlacing isn't available with the Metal renderer yet
+    // The GPU draws at a higher resolution (with Skip Native Drawing), the transparent meshes and both fields when it
+    // draws VDP1, so the software renderer's own versions are off
     m_impl->internalResolution = m_enhancements.internalResolution;
     m_impl->skipNativeVDP1 = m_enhancements.skipNativeVDP1;
     m_impl->transparentMeshes = m_enhancements.transparentMeshes;
+    m_impl->deinterlace = m_enhancements.deinterlace;
     m_enhancements.deinterlace = false;
     m_enhancements.transparentMeshes = false;
     m_enhancements.internalResolution = 1;

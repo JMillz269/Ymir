@@ -93,13 +93,16 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 
     }
     g_fbramOut.Store(address, value);
+    // (a partial write erases the first pixel of the word only, in every buffer)
+    const uint keepMask = partialWrite ? 0xFFFF0000u : 0u;
     if (transparentMeshes) {
-        g_fbramOut.Store(address + kVDP1FBRAMSize * 2, 0);
+        g_fbramOut.Store(address + kVDP1FBRAMSize * 2, g_fbramOut.Load(address + kVDP1FBRAMSize * 2) & keepMask);
     }
     if (deinterlace && doubleDensity) {
-        g_fbramOut.Store(address + kVDP1FBRAMSize, value);
+        const uint altValue = (g_fbramOut.Load(address + kVDP1FBRAMSize) & keepMask) | (value & ~keepMask);
+        g_fbramOut.Store(address + kVDP1FBRAMSize, altValue);
         if (transparentMeshes) {
-            g_fbramOut.Store(address + kVDP1FBRAMSize * 3, 0);
+            g_fbramOut.Store(address + kVDP1FBRAMSize * 3, g_fbramOut.Load(address + kVDP1FBRAMSize * 3) & keepMask);
         }
     }
 }

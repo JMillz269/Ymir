@@ -79,6 +79,10 @@ public:
         vramDirty.SetAll();
         VDP1FlushVRAM();
         gpu.Vdp1UploadFBRAM(0, vdpState.mem1.FBRAM.data(), static_cast<uint32>(kVDP1FBRAMSize * 2));
+        if (m_deinterlace) {
+            gpu.Vdp1UploadFBRAM(static_cast<uint32>(kVDP1FBRAMSize * 2), vdpState.mem1.FBRAM.data(),
+                                static_cast<uint32>(kVDP1FBRAMSize * 2));
+        }
         if (m_transparentMeshes) {
             VDP1ClearMeshFramebuffers();
         }
@@ -87,6 +91,7 @@ public:
         VDP1UpdateCommonRenderParams();
         cpuCommonRenderParams.displayParams.drawFB = vdpState.fbIndex.draw;
         cpuCommonRenderParams.enhancements.transparentMeshes = m_transparentMeshes;
+        cpuCommonRenderParams.enhancements.deinterlace = m_deinterlace;
     }
 
     void SetVRes(uint32 vres) {
@@ -183,6 +188,12 @@ public:
         m_skipNativeRequested = skip;
     }
 
+    /// @brief Whether to draw both fields of interlaced double density modes into the framebuffers and their
+    /// alternate fields (Deinterlacing; taken into use when the framebuffers swap).
+    void SetDeinterlace(bool enable) {
+        m_deinterlaceRequested = enable;
+    }
+
     /// @brief Whether to draw mesh sprites into the transparent mesh framebuffers instead of as a checkerboard
     /// (Transparent Meshes; taken into use when the framebuffers swap). The mesh layer is drawn at the native
     /// resolution only.
@@ -236,7 +247,7 @@ public:
         const VDP1Regs &regs1 = vdpState.regs1;
         const VDP2Regs &regs2 = vdpState.regs2;
         m_doubleV =
-            kDeinterlace && regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity && !regs1.dblInterlaceEnable;
+            m_deinterlace && regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity && !regs1.dblInterlaceEnable;
     }
 
     void ExecuteCommand(uint32 cmdAddress, VDP1Command::Control control) {
@@ -296,8 +307,6 @@ public:
     }
 
 private:
-    // Deinterlacing isn't available with the Metal renderer yet
-    static constexpr bool kDeinterlace = false;
 
     VDPState &vdpState;
     metal::Gpu &gpu;
@@ -352,6 +361,9 @@ private:
     /// @brief Transparent Meshes: requested through the settings, and in use (see VDP1HRLatch).
     bool m_transparentMeshesRequested = false;
     bool m_transparentMeshes = false;
+    /// @brief Deinterlacing: requested through the settings, and in use (see VDP1HRLatch).
+    bool m_deinterlaceRequested = false;
+    bool m_deinterlace = false;
     /// @brief Whether the native framebuffers lack what has been drawn into the scaled up ones only.
     std::array<bool, 2> m_nativeStale{};
     /// @brief Lines (native) of each scaled up framebuffer that drawing may have made differ from the native one
@@ -434,6 +446,17 @@ private:
             HRSyncNative(0);
             HRSyncNative(1);
             m_skipNative = m_skipNativeRequested;
+        }
+        if (m_deinterlaceRequested != m_deinterlace) {
+            VDP1SubmitSpans();
+            m_deinterlace = m_deinterlaceRequested;
+            cpuCommonRenderParams.enhancements.deinterlace = m_deinterlace;
+            if (m_deinterlace) {
+                // The alternate fields start out as the framebuffers
+                SyncFB();
+                gpu.Vdp1UploadFBRAM(static_cast<uint32>(kVDP1FBRAMSize * 2), vdpState.mem1.FBRAM.data(),
+                                    static_cast<uint32>(kVDP1FBRAMSize * 2));
+            }
         }
         if (m_transparentMeshesRequested != m_transparentMeshes) {
             VDP1SubmitSpans();
@@ -946,6 +969,7 @@ private:
         (hr ? m_stats.hrSpans : m_stats.nativeSpans) += batch.cpuSpanCount;
         pass.mergeWidth = regs1.tvmr.fbSizeH * scale / pixelsPerEntry;
         pass.mergeHeight = regs1.tvmr.fbSizeV * scale;
+        pass.mergeFields = !hr && m_deinterlace && vdpState.regs2.TVMD.IsInterlaced() ? 2 : 1;
         if (hr) {
             // The scaled up framebuffer is large and its pixels don't wrap around, so only merge the area drawn to
             // (pixels, antialiasing adds one more around the line)
@@ -1397,7 +1421,7 @@ private:
         const sint32 yb = ya + std::max(charSizeV, 1u) - 1u; // bottom Y
 
         const sint32 doubleV = m_doubleV ? 1 : 0;
-        const sint32 yAdd = kDeinterlace ? doubleV : 0;
+        const sint32 yAdd = m_deinterlace ? doubleV : 0;
 
         CoordS32 coordA{xa, ya << doubleV};
         CoordS32 coordB{xb, ya << doubleV};
@@ -1514,7 +1538,7 @@ private:
         qyd += state.localCoordY;
 
         const sint32 doubleV = m_doubleV ? 1 : 0;
-        const sint32 yAdd = kDeinterlace ? doubleV : 0;
+        const sint32 yAdd = m_deinterlace ? doubleV : 0;
 
         CoordS32 coordA{qxa, qya << doubleV};
         CoordS32 coordB{qxb, qyb << doubleV};
@@ -1565,8 +1589,8 @@ private:
         const bool isRegularRect = (xa == xd) && (xb == xc) && (ya == yb) && (yc == yd);
 
         const sint32 doubleV = m_doubleV ? 1 : 0;
-        const sint32 yAddAB = kDeinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
-        const sint32 yAddCD = kDeinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
+        const sint32 yAddAB = m_deinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
+        const sint32 yAddCD = m_deinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
 
         CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
         CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
@@ -1616,8 +1640,8 @@ private:
         const bool isRegularRect = (xa == xd) && (xb == xc) && (ya == yb) && (yc == yd);
 
         const sint32 doubleV = m_doubleV ? 1 : 0;
-        const sint32 yAddAB = kDeinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
-        const sint32 yAddCD = kDeinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
+        const sint32 yAddAB = m_deinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
+        const sint32 yAddCD = m_deinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
 
         CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
         CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
@@ -1728,8 +1752,8 @@ private:
         const bool isRegularRect = (xa == xd) && (xb == xc) && (ya == yb) && (yc == yd);
 
         const sint32 doubleV = m_doubleV ? 1 : 0;
-        const sint32 yAddAB = kDeinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
-        const sint32 yAddCD = kDeinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
+        const sint32 yAddAB = m_deinterlace && isRegularRect && (ya >= yc) ? doubleV : 0;
+        const sint32 yAddCD = m_deinterlace && isRegularRect && (ya < yc) ? doubleV : 0;
 
         CoordS32 coordA{xa, (ya << doubleV) + yAddAB};
         CoordS32 coordB{xb, (yb << doubleV) + yAddAB};
@@ -1794,8 +1818,9 @@ private:
         const sint32 xb = bit::sign_extend<13>(vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x10)) + state.localCoordX;
         const sint32 yb = bit::sign_extend<13>(vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x12)) + state.localCoordY;
 
-        CoordS32 coordA{xa, ya};
-        CoordS32 coordB{xb, yb};
+        const sint32 doubleV = m_doubleV ? 1 : 0;
+        CoordS32 coordA{xa, ya << doubleV};
+        CoordS32 coordB{xb, yb << doubleV};
 
         const VDP1CommandData cmdData{
             .mode = mode,

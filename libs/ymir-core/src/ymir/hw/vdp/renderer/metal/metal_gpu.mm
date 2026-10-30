@@ -658,7 +658,8 @@ public:
             m_bindHR = params.hr;
             Bind(merge, mergeStaged);
             m_bindHR = false;
-            [m_encoder dispatchThreadgroups:MTLSizeMake((params.mergeWidth + 7) / 8, (params.mergeHeight + 7) / 8, 1)
+            [m_encoder dispatchThreadgroups:MTLSizeMake((params.mergeWidth + 7) / 8, (params.mergeHeight + 7) / 8,
+                                                        std::max<uint32>(params.mergeFields, 1))
                       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
             Vdp1Barrier();
             EndEncoder();
