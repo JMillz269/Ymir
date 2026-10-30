@@ -1132,6 +1132,11 @@ struct MetalVDPRenderer::Impl {
         if (y == 0) {
             // The frame starts before VDP1 swaps its framebuffers (at the end of the last line of the vertical blank),
             // so the framebuffer to show is only known now
+            if (vdp1) {
+                // (the transparent mesh layer only has something to show if mesh sprites were drawn)
+                cpuCommonRenderParams.enhancements.transparentMeshes =
+                    vdp1->MeshLayerInUse(vdpState.fbIndex.display);
+            }
             VDP2UploadSpriteFB();
             VDP2HRBeginFrame();
         }

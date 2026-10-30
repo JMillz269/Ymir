@@ -15,6 +15,7 @@
 //   STATE_OUT=<file> writes the test scene as a save state
 //   SKIPNATIVE=1    Skip Native Drawing; MESH=1 Transparent Meshes; DEINTERLACE=1 deinterlacing (in both renderers)
 //   INTERLACE=1|2   draws the scene in an interlaced double density mode (2: with VDP1's double interlace drawing)
+//   FULLERASE=1     the erase covers all of the shown framebuffer (otherwise it leaves out the last 7 columns)
 //   with STATE: VDP2=1 renders the picture with the software renderer (sw_vdp2_all.ppm, then each layer alone),
 //   RPDUMP=1 prints rotation parameter table A and its coefficients, BMDUMP=<palette base> writes the 512x256
 //   256-color bitmap at the start of VDP2 VRAM, RPPROBE=<line> prints the rotation parameter A state and screen
@@ -326,6 +327,11 @@ struct EmuGpu final : metal::Gpu {
     void Vdp1UploadFBRAM(uint32 o, const void *d, uint32 s) override {
         std::memcpy(&fbram[o], d, s);
     }
+    void Vdp1ClearFBRAM(bool hr, uint32 o, uint32 s) override {
+        ++clears;
+        std::memset(&(hr ? fbramHR : fbram)[o], 0, s);
+    }
+    uint32 clears = 0;
     void UploadVRAM(uint32, const void *, uint32) override {}
     void UploadSpriteFB(uint32, const void *, uint32) override {}
     void RenderLayers(const metal::LayerPassParams &) override {}
@@ -1639,7 +1645,8 @@ int main(int argc, char **argv) {
     }
     w1(0x006, 0x0000);
     w1(0x008, 0x0000);
-    w1(0x00A, (319 / 8) << 9 | 223);
+    // (FULLERASE=1: the erase covers all of the shown framebuffer, as games' usually does)
+    w1(0x00A, (std::getenv("FULLERASE") ? 320 / 8 : 319 / 8) << 9 | 223);
     stateSW->regs1.LatchEraseParameters();
     stateGPU->regs1.LatchEraseParameters();
 
@@ -2043,6 +2050,11 @@ int main(int argc, char **argv) {
     if (gpu.tableMismatches) {
         std::printf("%u span table mismatches\n", gpu.tableMismatches);
         ++badFrames;
+    }
+    if (std::getenv("MESH")) {
+        // (the mesh framebuffers are cleared when a mesh sprite is drawn into a framebuffer whose shown part was
+        // erased since its last one)
+        std::printf("mesh framebuffer clears: %u\n", gpu.clears);
     }
     return badFrames;
 }

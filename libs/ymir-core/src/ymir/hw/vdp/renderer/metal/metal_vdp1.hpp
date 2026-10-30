@@ -70,6 +70,7 @@ public:
         m_hrBatch.ResetBounds();
         m_hrValid.fill(false);
         m_nativeStale.fill(false);
+        m_meshInUse.fill(false);
         HRClearDirty(0);
         HRClearDirty(1);
         m_hrPass = false;
@@ -205,6 +206,12 @@ public:
         m_hrRequested = std::clamp<uint32>(scale, 1, kHRMaxScale);
     }
 
+    /// @brief Whether VDP2 has to show the transparent mesh layer of the given framebuffer index (if not, it's clear
+    /// where VDP2 shows it).
+    bool MeshLayerInUse(uint8 fbIndex) const {
+        return MeshInUse(fbIndex);
+    }
+
     /// @brief The scale VDP1 is currently drawn at in the scaled up framebuffers (1 = they aren't in use).
     uint32 InternalResolution() const {
         return m_hrScale;
@@ -262,6 +269,12 @@ public:
         case VDP1Command::CommandType::DrawPolylinesAlt: [[fallthrough]];
         case VDP1Command::CommandType::DrawLine: {
             const uint8 drawFB = vdpState.fbIndex.draw;
+            if (m_transparentMeshes && !m_meshInUse[drawFB]) {
+                const VDP1Command::DrawMode mode{.u16 = vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x04)};
+                if (mode.meshEnable) {
+                    VDP1BeginMeshUse(drawFB);
+                }
+            }
             // (prepared first as it may need what has been drawn so far)
             const bool replay = m_hrScale > 1 && VDP1HRShouldReplay();
             if (m_hrScale > 1 && !replay) {
@@ -352,6 +365,8 @@ private:
     bool m_deinterlace = false;
     /// @brief Whether the native framebuffers lack what has been drawn into the scaled up ones only.
     std::array<bool, 2> m_nativeStale{};
+    /// @brief Whether each framebuffer index has mesh sprites in its transparent mesh framebuffers (see MeshInUse).
+    std::array<bool, 2> m_meshInUse{};
     /// @brief Lines (native) of each scaled up framebuffer that drawing may have made differ from the native one
     /// scaled up (none if last < first)
     std::array<sint32, 2> m_hrDirtyFirst{INT32_MAX, INT32_MAX};
@@ -451,6 +466,7 @@ private:
             HRInvalidate(1);
             VDP1SubmitSpans();
             m_transparentMeshes = m_transparentMeshesRequested;
+            m_meshInUse.fill(false);
             cpuCommonRenderParams.enhancements.transparentMeshes = m_transparentMeshes;
             if (m_transparentMeshes) {
                 VDP1ClearMeshFramebuffers();
@@ -482,6 +498,7 @@ private:
         VDP1CommonRenderParams params = cpuCommonRenderParams;
         params.displayParams.drawFB = fbIndex;
         params.enhancements.vdp1Scale = m_hrScale - 1;
+        params.enhancements.transparentMeshes = MeshInUse(fbIndex);
         metal::Vdp1ResyncPassParams pass{};
         pass.constants = &params;
         pass.constantsSize = sizeof(params);
@@ -514,6 +531,7 @@ private:
             VDP1CommonRenderParams params = cpuCommonRenderParams;
             params.displayParams.drawFB = fbIndex;
             params.enhancements.vdp1Scale = m_hrScale - 1;
+            params.enhancements.transparentMeshes = MeshInUse(fbIndex);
             metal::Vdp1ResyncPassParams pass{};
             pass.constants = &params;
             pass.constantsSize = sizeof(params);
@@ -637,7 +655,7 @@ private:
     /// @brief Constructs a polygon drawing shader index from its variant options.
     size_t MakeVDP1PolyDrawShaderIndex(VDP1Command::DrawMode mode) const {
         size_t value = 0;
-        bit::deposit_into<0>(value, m_transparentMeshes);
+        bit::deposit_into<0>(value, MeshInUse(vdpState.fbIndex.draw));
         if (mode.msbOn) {
             // MSB -> mode 3 (MSB)
             bit::deposit_into<1, 2>(value, 3);
@@ -658,7 +676,7 @@ private:
     /// @brief Constructs an output merger shader index from its variant options.
     size_t MakeVDP1OutputMergerShaderIndex(VDP1Command::DrawMode mode) const {
         size_t value = 0;
-        bit::deposit_into<0>(value, m_transparentMeshes);
+        bit::deposit_into<0>(value, MeshInUse(vdpState.fbIndex.draw));
         if (vdpState.regs1.tvmr.pixel8Bits) {
             // 8-bit sprite data -> mode 0 (Copy) -- shading modes not supported
             bit::deposit_into<1, 2>(value, 0);
@@ -766,6 +784,7 @@ private:
         } constants{};
         static_assert(offsetof(Constants, writeCount) == sizeof(VDP1CommonRenderParams));
         constants.common = cpuCommonRenderParams;
+        constants.common.enhancements.transparentMeshes = MeshInUse(vdpState.fbIndex.draw);
         constants.writeCount = static_cast<HLSLuint>(cpuFBRAMWritesList.size());
 
         // A scaled up framebuffer that can't follow the writes is given up before they reach the native one
@@ -843,6 +862,7 @@ private:
         } constants{};
         static_assert(offsetof(Constants, erase) == sizeof(VDP1CommonRenderParams));
         constants.common = cpuCommonRenderParams;
+        constants.common.enhancements.transparentMeshes = MeshInUse(vdpState.fbIndex.display);
         constants.erase = cpuEraseParams;
 
         // The scaled up framebuffer is erased too, if it's in use and the erase area is one it can follow (it has to be
@@ -872,6 +892,51 @@ private:
             gpu.Vdp1Erase(pass);
         }
 
+        // Once all of the part of the framebuffer that is shown has been erased, it has no mesh pixels VDP2 could show
+        // (its mesh framebuffers are cleared before a mesh sprite is drawn into it again)
+        if (cycles == 0 && VDP1EraseCoversDisplay()) {
+            m_meshInUse[eraseFB] = false;
+        }
+
+        fbramGpuDirty = true;
+    }
+
+    /// @brief Whether the erase about to be done (or just done) covers all of the framebuffer VDP2 shows, in a mode
+    /// where VDP2 shows the framebuffer pixels as they are (no rotation, 16-bit pixels, normal resolution).
+    bool VDP1EraseCoversDisplay() const {
+        const VDP1Regs &regs1 = vdpState.regs1;
+        const VDP2Regs &regs2 = vdpState.regs2;
+        if (regs1.tvmr.fbRotEnable || regs1.tvmr.pixel8Bits || regs1.tvmr.hdtvEnable ||
+            regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity || (regs2.TVMD.HRESOn & 6) != 0) {
+            return false;
+        }
+        const uint32 hres = (regs2.TVMD.HRESOn & 1) ? 352 : 320;
+        const auto &coords = cpuEraseParams.coords;
+        return coords.x1 == 0 && coords.y1 == 0 && (coords.x3 << 3) + 1 >= hres && coords.y3 + 1 >= VRes;
+    }
+
+    /// @brief Whether the transparent mesh framebuffers of the given index are in use: transparent meshes are on and a
+    /// mesh sprite has been drawn into it since the part of it that is shown was last erased. If not, the mesh
+    /// framebuffers are all clear where VDP2 shows them, and the passes leave them alone.
+    bool MeshInUse(uint8 fbIndex) const {
+        return m_transparentMeshes && m_meshInUse[fbIndex];
+    }
+
+    /// @brief Starts using the transparent mesh framebuffers of the given index (a mesh sprite is about to be drawn into
+    /// it): they are cleared, as the passes didn't keep them up to date while they weren't in use.
+    void VDP1BeginMeshUse(uint8 fbIndex) {
+        VDP1SubmitSpans();
+        // (native: the mesh framebuffers and their alternate fields are in the second half of the memory)
+        gpu.Vdp1ClearFBRAM(false, static_cast<uint32>(kVDP1FBRAMSize * (4 + fbIndex)),
+                           static_cast<uint32>(kVDP1FBRAMSize));
+        gpu.Vdp1ClearFBRAM(false, static_cast<uint32>(kVDP1FBRAMSize * (6 + fbIndex)),
+                           static_cast<uint32>(kVDP1FBRAMSize));
+        if (m_hrScale > 1 && m_hrValid[fbIndex]) {
+            // (scaled up: the mesh framebuffers follow the two framebuffers)
+            const uint32 hrFBSize = static_cast<uint32>(kVDP1FBRAMSize * m_hrScale * m_hrScale);
+            gpu.Vdp1ClearFBRAM(true, hrFBSize * (2 + fbIndex), hrFBSize);
+        }
+        m_meshInUse[fbIndex] = true;
         fbramGpuDirty = true;
     }
 

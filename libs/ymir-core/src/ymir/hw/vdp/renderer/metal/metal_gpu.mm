@@ -470,6 +470,18 @@ public:
         UploadTo(m_fbram, offset, data, size);
     }
 
+    void Vdp1ClearFBRAM(bool hr, uint32 offset, uint32 size) override {
+        id<MTLBuffer> buffer = hr ? m_fbramHR : m_fbram;
+        if (buffer == nil || size == 0 || offset + size > buffer.length) {
+            return;
+        }
+        EnsureFrame();
+        EndEncoder();
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        [blit fillBuffer:buffer range:NSMakeRange(offset, size) value:0x00];
+        [blit endEncoding];
+    }
+
     bool Vdp1EnableHR(std::string &error) override {
         if (m_fbramHR != nil) {
             return true;

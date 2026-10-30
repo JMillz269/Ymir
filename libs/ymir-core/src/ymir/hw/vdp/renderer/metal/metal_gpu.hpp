@@ -143,6 +143,10 @@ public:
     /// Same memory as `UploadSpriteFB`.
     virtual void Vdp1UploadFBRAM(uint32 offset, const void *data, uint32 size) = 0;
 
+    /// @brief Clears a part of the VDP1 framebuffer memory (`hr` = false) or of the scaled up framebuffer memory (`hr`
+    /// = true) to zero, in order with the passes.
+    virtual void Vdp1ClearFBRAM(bool hr, uint32 offset, uint32 size) = 0;
+
     /// @brief Draws a batch of spans and merges the result into the framebuffer.
     virtual void Vdp1Draw(const Vdp1DrawParams &params) = 0;
 
