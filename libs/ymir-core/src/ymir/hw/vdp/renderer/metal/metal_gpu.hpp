@@ -40,6 +40,7 @@ struct LayerPassParams {
 
     uint32 hres = 0;     ///< width of the display in pixels
     uint32 numLines = 0; ///< number of lines to draw, starting at the line stored in `common`
+    bool meshLayer = false; ///< draw the transparent mesh layer too (Transparent Meshes)
 };
 
 /// @brief Inputs of the composition pass.
@@ -77,6 +78,7 @@ struct Vdp1DrawParams {
     uint32 mergeHeight = 0;
 
     bool hr = false; ///< draw into the scaled up (internal resolution) framebuffer instead of the native one
+    bool transparentMesh = false; ///< use the transparent mesh variants (mesh pixels go to the mesh framebuffer)
 };
 
 /// @brief Inputs of the VDP1 framebuffer erase pass.

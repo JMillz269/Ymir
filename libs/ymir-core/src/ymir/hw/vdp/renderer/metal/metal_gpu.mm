@@ -35,23 +35,38 @@ namespace {
     constexpr const char *kHRReplicateShaderPath = "src/vdp/cs_vdp2_hr_replicate.metallib";
     /// Largest internal resolution scale
     constexpr uint32 kMaxHRScale = 4;
-    // (the variants are named after the mesh mode and the shading or merging mode; only the checkerboard mesh mode is
-    // used, as transparent meshes aren't available with this renderer)
+    // (the variants are named after the mesh mode and the shading or merging mode: [0] checkerboard meshes,
+    // [1] transparent meshes)
     // (the polygon drawing variants used find the span of a pixel through a table, see Vdp1DrawParams)
     /// Pixels drawn by a thread group of the polygon drawing shaders: 64 threads drawing 4 pixels each
     /// (POLYSPEC_PIXELS_PER_THREAD of the variants below)
     constexpr uint32 kPolyDrawPixelsPerGroup = 64 * 4;
 
-    constexpr const char *kPolyDrawShaderPaths[4] = {
-        "src/vdp/cs_vdp1_polydraw_0_0_st.metallib",
-        "src/vdp/cs_vdp1_polydraw_0_1_st.metallib",
-        "src/vdp/cs_vdp1_polydraw_0_2_st.metallib",
-        "src/vdp/cs_vdp1_polydraw_0_3_st.metallib",
+    constexpr const char *kPolyDrawShaderPaths[2][4] = {
+        {
+            "src/vdp/cs_vdp1_polydraw_0_0_st.metallib",
+            "src/vdp/cs_vdp1_polydraw_0_1_st.metallib",
+            "src/vdp/cs_vdp1_polydraw_0_2_st.metallib",
+            "src/vdp/cs_vdp1_polydraw_0_3_st.metallib",
+        },
+        {
+            "src/vdp/cs_vdp1_polydraw_1_0_st.metallib",
+            "src/vdp/cs_vdp1_polydraw_1_1_st.metallib",
+            "src/vdp/cs_vdp1_polydraw_1_2_st.metallib",
+            "src/vdp/cs_vdp1_polydraw_1_3_st.metallib",
+        },
     };
-    constexpr const char *kMergerShaderPaths[3] = {
-        "src/vdp/cs_vdp1_output_merger_0_0.metallib",
-        "src/vdp/cs_vdp1_output_merger_0_1.metallib",
-        "src/vdp/cs_vdp1_output_merger_0_2.metallib",
+    constexpr const char *kMergerShaderPaths[2][3] = {
+        {
+            "src/vdp/cs_vdp1_output_merger_0_0.metallib",
+            "src/vdp/cs_vdp1_output_merger_0_1.metallib",
+            "src/vdp/cs_vdp1_output_merger_0_2.metallib",
+        },
+        {
+            "src/vdp/cs_vdp1_output_merger_1_0.metallib",
+            "src/vdp/cs_vdp1_output_merger_1_1.metallib",
+            "src/vdp/cs_vdp1_output_merger_1_2.metallib",
+        },
     };
 
     /// Texel buffers are emulated by 2D textures this wide (the default width of SPIRV-Cross)
@@ -378,16 +393,18 @@ public:
             return true;
         }
 
-        for (uint32 i = 0; i < 4; ++i) {
-            m_polyDraw[i].vdp1 = true;
-            if (!CreatePipeline(kPolyDrawShaderPaths[i], m_polyDraw[i], error)) {
-                return false;
+        for (uint32 mesh = 0; mesh < 2; ++mesh) {
+            for (uint32 i = 0; i < 4; ++i) {
+                m_polyDraw[mesh][i].vdp1 = true;
+                if (!CreatePipeline(kPolyDrawShaderPaths[mesh][i], m_polyDraw[mesh][i], error)) {
+                    return false;
+                }
             }
-        }
-        for (uint32 i = 0; i < 3; ++i) {
-            m_merger[i].vdp1 = true;
-            if (!CreatePipeline(kMergerShaderPaths[i], m_merger[i], error)) {
-                return false;
+            for (uint32 i = 0; i < 3; ++i) {
+                m_merger[mesh][i].vdp1 = true;
+                if (!CreatePipeline(kMergerShaderPaths[mesh][i], m_merger[mesh][i], error)) {
+                    return false;
+                }
             }
         }
         m_erase.vdp1 = true;
@@ -444,7 +461,11 @@ public:
     }
 
     void Vdp1UploadFBRAM(uint32 offset, const void *data, uint32 size) override {
-        UploadSpriteFB(offset, data, size);
+        // (anywhere in the framebuffer memory: the framebuffers, their alternate fields and the transparent meshes)
+        if (size == 0 || m_fbram == nil || offset + size > m_fbram.length) {
+            return;
+        }
+        UploadTo(m_fbram, offset, data, size);
     }
 
     bool Vdp1EnableHR(std::string &error) override {
@@ -601,7 +622,7 @@ public:
         EnsureCompute();
 
         // Draw the spans
-        const Pipeline &draw = m_polyDraw[params.shadingMode];
+        const Pipeline &draw = m_polyDraw[params.transparentMesh ? 1 : 0][params.shadingMode];
         [m_encoder setComputePipelineState:draw.state];
         m_bindHR = params.hr;
         Bind(draw, staged);
@@ -632,7 +653,7 @@ public:
             EnsureCompute();
             // (the draw above has been recorded already; if the arena was emptied to make room the encoder is a new one)
 
-            const Pipeline &merge = m_merger[params.mergeMode];
+            const Pipeline &merge = m_merger[params.transparentMesh ? 1 : 0][params.mergeMode];
             [m_encoder setComputePipelineState:merge.state];
             m_bindHR = params.hr;
             Bind(merge, mergeStaged);
@@ -901,13 +922,14 @@ public:
         Profile(5);
         EnsureCompute();
 
-        // Sprite layer
+        // Sprite layer (and the transparent mesh layer as the second slice)
         const Pipeline &sprite = hr ? m_hrSprite : m_sprite;
         [m_encoder setComputePipelineState:sprite.state];
         m_bindHR = hr;
         Bind(sprite, staged);
         m_bindHR = false;
-        [m_encoder dispatchThreadgroups:MTLSizeMake((params.hres + 31) / 32, params.numLines, 1)
+        [m_encoder dispatchThreadgroups:MTLSizeMake((params.hres + 31) / 32, params.numLines,
+                                                    !hr && params.meshLayer ? 2 : 1)
                   threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         if (hr) {
             return;
@@ -1221,8 +1243,8 @@ private:
     bool m_debugClearCheck = false;
     std::array<uint32, 4> m_logDrawsByMode{};
     uint32 m_logFrames = 0;
-    std::array<Pipeline, 4> m_polyDraw;
-    std::array<Pipeline, 3> m_merger;
+    std::array<std::array<Pipeline, 4>, 2> m_polyDraw;
+    std::array<std::array<Pipeline, 3>, 2> m_merger;
     Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrDownsample, m_hrSprite, m_hrCompose, m_hrReplicate;
     id<MTLTexture> m_compositeHR = nil; ///< scaled up output image
     id<MTLTexture> m_hrSpriteLayer = nil; ///< sprite layer of the scaled up image (see the internal resolution shaders)

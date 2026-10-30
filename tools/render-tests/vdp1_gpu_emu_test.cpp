@@ -431,6 +431,8 @@ struct EmuGpu final : metal::Gpu {
         std::memcpy(&ev, &erase.erase, 4);
         std::memcpy(&vb, &erase.vblank, 4);
         Select(p.hr, p.constants);
+        uint32 enhancements;
+        std::memcpy(&enhancements, &common.enhancements, 4);
         const uint32 drawFB = BitExtract(dp, 7, 1);
         const uint32 drawFBOffset = (drawFB ^ 1) * 256 * 1024 * hrScale * hrScale;
         const bool vblankErase = BitTest(vb, 0);
@@ -484,6 +486,10 @@ struct EmuGpu final : metal::Gpu {
                     value = (writeValue << 16u) | writeValue;
                 }
                 FbStore(address, value);
+                if (BitTest(enhancements, 1)) {
+                    // (transparent meshes: the mesh framebuffers come after the two fields)
+                    FbStore(address + 512 * 1024 * 2, 0);
+                }
             }
         }
     }
@@ -528,12 +534,18 @@ struct EmuGpu final : metal::Gpu {
             return;
         }
         Select(false, p.constants);
+        uint32 enhancements;
+        std::memcpy(&enhancements, &common.enhancements, 4);
         for (uint32 i = 0; i < p.count; ++i) {
             const uint32 address = w[i].address + drawFBOffset;
             uint32 value = FbLoad(address);
             value &= w[i].andMask;
             value |= w[i].orMask;
             FbStore(address, value);
+            if (BitTest(enhancements, 1)) {
+                // (transparent meshes: the written pixels are removed from the mesh framebuffer)
+                FbStore(address + 512 * 1024 * 2, FbLoad(address + 512 * 1024 * 2) & w[i].andMask);
+            }
         }
     }
 
@@ -546,6 +558,7 @@ struct EmuGpu final : metal::Gpu {
     const VDP1CommandParams *cmds;
     uint32 dpBits;
     uint32 shading;
+    bool meshMode = false; // transparent mesh variants (POLYSPEC_TRANSPARENT_MESH)
 
     void WriteOutput(int cx, int cy, uint32 cmdIndex, uint32 value, uint32 fragmentSlot) {
         const VDP1CommandParams &cp = cmds[cmdIndex];
@@ -568,7 +581,7 @@ struct EmuGpu final : metal::Gpu {
             }
         }
         const bool meshEnable = BitTest(pmodcolr, 8);
-        if (meshEnable && (((cx / int(hrScale)) ^ (cy / int(hrScale))) & 1)) {
+        if (!meshMode && meshEnable && (((cx / int(hrScale)) ^ (cy / int(hrScale))) & 1)) {
             return;
         }
         if (hrScale > 1 && (cx >= int(512 * hrScale) || cy >= int(256 * hrScale))) {
@@ -586,6 +599,11 @@ struct EmuGpu final : metal::Gpu {
             cy >>= 1;
         }
         uint32 outOffset = cy * fbW + cx;
+        if (meshMode && meshEnable) {
+            // (the transparent mesh pixels go after the two fields)
+            const uint32 fbH = (256u << BitExtract(dpBits, 1, 1)) * hrScale;
+            outOffset += fbW * fbH * 2;
+        }
         const bool pixel8Bits = BitTest(dpBits, 2);
         if (shading == 0) {
             spriteOut[outOffset] = std::max(spriteOut[outOffset], value);
@@ -793,6 +811,16 @@ struct EmuGpu final : metal::Gpu {
         }
         return fc;
     }
+    uint32 LatestSeq(uint32 listHead) {
+        uint32 latest = 0;
+        uint32 curr = listHead;
+        for (uint32 visited = 0; curr != 0xFFFFFFFF && visited < 32; ++visited) {
+            latest = std::max(latest, BitExtract(frags[curr].data, 16, 16));
+            curr = frags[curr].next;
+        }
+        return latest;
+    }
+
     uint32 HalfTransparentBlend(uint32 baseColor, uint32 listHead) {
         if (listHead == 0xFFFFFFFF) {
             return baseColor;
@@ -827,22 +855,32 @@ struct EmuGpu final : metal::Gpu {
         return Color555ToUint16(finalColor);
     }
 
+    // Port of cs_vdp1_output_merger (field 0; with the transparent mesh variants the mesh pixels too)
     void MergeThread(uint32 px, uint32 py, uint32 mode) {
         const bool pixel8Bits = BitTest(dpBits, 2);
         const uint32 fbW = (512u << BitExtract(dpBits, 0, 1)) * hrScale;
+        const uint32 fbH = (256u << BitExtract(dpBits, 1, 1)) * hrScale;
         const uint32 fbOffset = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale;
+        const uint32 fbramBytes = 256 * 1024 * hrScale * hrScale * 2;
+        const uint32 inMeshDelta = fbW * fbH * 2;
         if (pixel8Bits) {
             if (mode != 0) {
                 return;
             }
             const uint32 inx = px * 4, iny = py;
             const uint32 inOffset = inx + iny * fbW;
-            uint32 out[4];
+            uint32 out[4], meshOut[4] = {}, seq[4], meshSeq[4] = {};
             bool has[4];
             bool any = false;
             for (int i = 0; i < 4; ++i) {
                 out[i] = spriteOut[inOffset + i];
-                has[i] = BitExtract(out[i], 16, 16) != 0;
+                seq[i] = BitExtract(out[i], 16, 16);
+                has[i] = seq[i] != 0;
+                if (meshMode) {
+                    meshOut[i] = spriteOut[inOffset + inMeshDelta + i];
+                    meshSeq[i] = BitExtract(meshOut[i], 16, 16);
+                    has[i] = has[i] || meshSeq[i] != 0;
+                }
                 any |= has[i];
             }
             if (!any) {
@@ -850,73 +888,152 @@ struct EmuGpu final : metal::Gpu {
             }
             for (int i = 0; i < 4; ++i) {
                 spriteOut[inOffset + i] = 0;
+                if (meshMode) {
+                    spriteOut[inOffset + inMeshDelta + i] = 0;
+                }
             }
             const uint32 outOffset = inx + iny * fbW;
             uint32 v = FbLoad(outOffset + fbOffset);
             for (int i = 0; i < 4; ++i) {
-                if (has[i]) {
+                if (seq[i] != 0) {
                     v &= ~(0xFFu << (i * 8));
                     v |= BitExtract(out[i], 0, 8) << (i * 8);
                 }
             }
             FbStore(outOffset + fbOffset, v);
+            if (meshMode) {
+                const uint32 outMeshOffset = outOffset + fbramBytes * 2;
+                v = FbLoad(outMeshOffset + fbOffset);
+                for (int i = 0; i < 4; ++i) {
+                    if (has[i]) {
+                        v &= ~(0xFFu << (i * 8));
+                        if (meshSeq[i] > seq[i]) {
+                            v |= BitExtract(meshOut[i], 0, 8) << (i * 8);
+                        }
+                    }
+                }
+                FbStore(outMeshOffset + fbOffset, v);
+            }
             return;
         }
         const uint32 inx = px * 2, iny = py;
-        const uint32 inOffset = inx + iny * fbW;
-        const uint32 outOffset = (inx + iny * fbW) * 2;
         if (mode == 0) {
-            uint32 o0 = spriteOut[inOffset], o1 = spriteOut[inOffset + 1];
-            const bool h0 = BitExtract(o0, 16, 16) != 0, h1 = BitExtract(o1, 16, 16) != 0;
+            const uint32 inOffset = inx + iny * fbW;
+            const uint32 outOffset = (inx + iny * fbW) * 2;
+            const uint32 o0 = spriteOut[inOffset], o1 = spriteOut[inOffset + 1];
+            const uint32 s0 = BitExtract(o0, 16, 16), s1 = BitExtract(o1, 16, 16);
+            uint32 m0 = 0, m1 = 0, ms0 = 0, ms1 = 0;
+            bool h0 = s0 != 0, h1 = s1 != 0;
+            if (meshMode) {
+                m0 = spriteOut[inOffset + inMeshDelta];
+                m1 = spriteOut[inOffset + inMeshDelta + 1];
+                ms0 = BitExtract(m0, 16, 16);
+                ms1 = BitExtract(m1, 16, 16);
+                h0 = h0 || ms0 != 0;
+                h1 = h1 || ms1 != 0;
+            }
             if (!h0 && !h1) {
                 return;
             }
             spriteOut[inOffset] = 0;
             spriteOut[inOffset + 1] = 0;
+            if (meshMode) {
+                spriteOut[inOffset + inMeshDelta] = 0;
+                spriteOut[inOffset + inMeshDelta + 1] = 0;
+            }
             uint32 v = FbLoad(outOffset + fbOffset);
-            if (h0) {
+            if (s0 != 0) {
                 v &= ~0xFFFFu;
                 v |= ByteSwap16(o0);
             }
-            if (h1) {
+            if (s1 != 0) {
                 v &= ~0xFFFF0000u;
                 v |= ByteSwap16(o1) << 16u;
             }
             FbStore(outOffset + fbOffset, v);
-        } else if (mode == 1) {
-            const uint32 s0 = std::min(spriteOut[inOffset], 5u), s1 = std::min(spriteOut[inOffset + 1], 5u);
-            if (s0 == 0 && s1 == 0) {
-                return;
-            }
-            spriteOut[inOffset] = 0;
-            spriteOut[inOffset + 1] = 0;
-            uint32 v = FbLoad(outOffset + fbOffset);
-            if (s0 != 0) {
-                Color555x c = Uint16ToColor555(ByteSwap16(v));
-                if (c.a != 0) {
-                    c.r >>= s0;
-                    c.g >>= s0;
-                    c.b >>= s0;
+            if (meshMode) {
+                const uint32 outMeshOffset = outOffset + fbramBytes * 2;
+                v = FbLoad(outMeshOffset + fbOffset);
+                if (h0) {
                     v &= ~0xFFFFu;
-                    v |= ByteSwap16(Color555ToUint16(c));
+                    if (ms0 > s0) {
+                        v |= ByteSwap16(m0);
+                    }
                 }
-            }
-            if (s1 != 0) {
-                Color555x c = Uint16ToColor555(ByteSwap16(v >> 16u));
-                if (c.a != 0) {
-                    c.r >>= s1;
-                    c.g >>= s1;
-                    c.b >>= s1;
+                if (h1) {
                     v &= ~0xFFFF0000u;
-                    v |= ByteSwap16(Color555ToUint16(c)) << 16u;
+                    if (ms1 > s1) {
+                        v |= ByteSwap16(m1) << 16u;
+                    }
                 }
+                FbStore(outMeshOffset + fbOffset, v);
             }
-            FbStore(outOffset + fbOffset, v);
-        } else {
-            const uint32 h0 = listHeads[inOffset], h1 = listHeads[inOffset + 1];
-            if (h0 == 0xFFFFFFFF && h1 == 0xFFFFFFFF) {
+            return;
+        }
+        const uint32 inOffset = inx + iny * fbW;
+        const uint32 outOffset = (inx + iny * fbW) * 2;
+        const uint32 meshIn = inOffset + inMeshDelta;
+        const uint32 meshAddress = outOffset + fbramBytes * 2 + fbOffset;
+        if (mode == 1) {
+            const uint32 c0 = spriteOut[inOffset], c1 = spriteOut[inOffset + 1];
+            const uint32 s0 = std::min(c0, 5u), s1 = std::min(c1, 5u);
+            if (s0 != 0 || s1 != 0) {
+                spriteOut[inOffset] = 0;
+                spriteOut[inOffset + 1] = 0;
+                uint32 v = FbLoad(outOffset + fbOffset);
+                for (uint32 i = 0; i < 2; ++i) {
+                    const uint32 sh = i == 0 ? s0 : s1;
+                    if (sh == 0) {
+                        continue;
+                    }
+                    Color555x c = Uint16ToColor555(ByteSwap16(v >> (i * 16)));
+                    if (c.a != 0) {
+                        c.r >>= sh;
+                        c.g >>= sh;
+                        c.b >>= sh;
+                        v &= ~(0xFFFFu << (i * 16));
+                        v |= ByteSwap16(Color555ToUint16(c)) << (i * 16);
+                    }
+                }
+                FbStore(outOffset + fbOffset, v);
+            }
+            if (!meshMode) {
                 return;
             }
+            // Port of MergeMesh16 (shadow)
+            const uint32 m0 = spriteOut[meshIn], m1 = spriteOut[meshIn + 1];
+            if (m0 == 0 && m1 == 0 && c0 == 0 && c1 == 0) {
+                return;
+            }
+            spriteOut[meshIn] = 0;
+            spriteOut[meshIn + 1] = 0;
+            const uint32 sprite = FbLoad(outOffset + fbOffset);
+            uint32 mv = FbLoad(meshAddress);
+            for (uint32 i = 0; i < 2; ++i) {
+                const uint32 ms = i == 0 ? m0 : m1, sh = i == 0 ? c0 : c1;
+                if (ms == 0 && sh == 0) {
+                    continue;
+                }
+                uint32 value = 0;
+                if (ms != 0) {
+                    Color555x c = Uint16ToColor555(ByteSwap16(sprite >> (i * 16)));
+                    if (c.a != 0) {
+                        c.r >>= 1;
+                        c.g >>= 1;
+                        c.b >>= 1;
+                    }
+                    value = ByteSwap16(Color555ToUint16(c));
+                }
+                mv &= ~(0xFFFFu << (i * 16));
+                mv |= value << (i * 16);
+            }
+            FbStore(meshAddress, mv);
+            return;
+        }
+        // Half-transparency
+        const uint32 h0 = listHeads[inOffset], h1 = listHeads[inOffset + 1];
+        const uint32 latest0 = meshMode ? LatestSeq(h0) : 0, latest1 = meshMode ? LatestSeq(h1) : 0;
+        if (h0 != 0xFFFFFFFF || h1 != 0xFFFFFFFF) {
             listHeads[inOffset] = 0xFFFFFFFF;
             listHeads[inOffset + 1] = 0xFFFFFFFF;
             uint32 v = FbLoad(outOffset + fbOffset);
@@ -924,6 +1041,42 @@ struct EmuGpu final : metal::Gpu {
                 ByteSwap16(HalfTransparentBlend(ByteSwap16(v), h0));
             FbStore(outOffset + fbOffset, v);
         }
+        if (!meshMode) {
+            return;
+        }
+        // Port of MergeMesh16 (half-transparency)
+        const uint32 mh[2] = {listHeads[meshIn], listHeads[meshIn + 1]};
+        const uint32 latestSprite[2] = {latest0, latest1};
+        if (mh[0] == 0xFFFFFFFF && mh[1] == 0xFFFFFFFF && latest0 == 0 && latest1 == 0) {
+            return;
+        }
+        listHeads[meshIn] = 0xFFFFFFFF;
+        listHeads[meshIn + 1] = 0xFFFFFFFF;
+        const uint32 sprite = FbLoad(outOffset + fbOffset);
+        uint32 mv = FbLoad(meshAddress);
+        for (uint32 i = 0; i < 2; ++i) {
+            uint32 latestMesh = 0, latestData = 0;
+            uint32 curr = mh[i];
+            for (uint32 visited = 0; curr != 0xFFFFFFFF && visited < 32; ++visited) {
+                const uint32 seq = BitExtract(frags[curr].data, 16, 16);
+                if (seq >= latestMesh) {
+                    latestMesh = seq;
+                    latestData = frags[curr].data;
+                }
+                curr = frags[curr].next;
+            }
+            if (latestMesh == 0 && latestSprite[i] == 0) {
+                continue;
+            }
+            uint32 value = 0;
+            if (latestMesh > latestSprite[i]) {
+                const Color555x sc = Uint16ToColor555(ByteSwap16(sprite >> (i * 16)));
+                value = ByteSwap16(Color555ToUint16(HalfBlendOne(sc, latestData)));
+            }
+            mv &= ~(0xFFFFu << (i * 16));
+            mv |= value << (i * 16);
+        }
+        FbStore(meshAddress, mv);
     }
 
     void Vdp1Draw(const metal::Vdp1DrawParams &p) override {
@@ -963,6 +1116,7 @@ struct EmuGpu final : metal::Gpu {
         }
         cmds = (const VDP1CommandParams *)p.commands;
         shading = p.shadingMode;
+        meshMode = p.transparentMesh;
         nextNode = 0;
 
         std::vector<uint32> order(p.numPixels);
@@ -1006,10 +1160,15 @@ int main(int argc, char **argv) {
         config::Enhancements enh{};
         enh.internalResolution = scale;
         // SKIPNATIVE=1: draw VDP1 into the scaled up framebuffers only (Skip Native Drawing) in both renderers
-        enh.skipNativeVDP1 = std::getenv("SKIPNATIVE") != nullptr;
+        const bool skipNative = std::getenv("SKIPNATIVE") != nullptr;
+        // MESH=1: Transparent Meshes in both renderers (the GPU path draws natively too then, so the software renderer
+        // doesn't skip native drawing either)
+        enh.transparentMeshes = std::getenv("MESH") != nullptr;
+        enh.skipNativeVDP1 = skipNative && !enh.transparentMeshes;
         sw.ConfigureEnhancements(enh);
         vdp1.SetInternalResolution(scale);
-        vdp1.SetSkipNative(enh.skipNativeVDP1);
+        vdp1.SetSkipNative(skipNative);
+        vdp1.SetTransparentMeshes(enh.transparentMeshes);
     }
 
 #ifdef HAVE_SAVESTATE_REPLAY
@@ -1495,8 +1654,18 @@ int main(int argc, char **argv) {
     put(0x0006, 0, 0x0000, 0x83E0, 0, 0, 233, 216, 233, 223, 0, 0, 0, 0);
     put(0x0005, 0, 0x0000, 0xFFFF, 0, 0, 240, 217, 260, 217, 260, 222, 240, 222);
     put(0x0006, 0, 0x0000, 0xFC00, 0, 0, 270, 222, 315, 217, 0, 0, 0, 0);
+    // mesh sprites and polygons over the scene, and a sprite drawn over part of a mesh afterwards (which removes those
+    // mesh pixels with transparent meshes)
+    put(0x0002, 0, 0x0128, 0, 0x20000 >> 3, (2 << 8) | 16, 120, 120, 230, 130, 220, 200, 110, 190);
+    put(0x0004, 0, 0x0100, 0x801F, 0, 0, 20, 30, 140, 40, 120, 110, 30, 90);
+    put(0x0004, 0, 0x0104, 0x83E0, 0, 0, 200, 140, 300, 150, 290, 200, 210, 210, 0x23000 >> 3);
+    put(0x0004, 0, 0x0000, 0x8210, 0, 0, 180, 150, 240, 150, 240, 180, 180, 180);
     // lines
     put(0x0006, 0, 0x0003, 0xFFFF, 0, 0, 10, 210, 310, 100, 0, 0, 0, 0);
+    // half-transparent mesh sprite over the line and the meshes
+    put(0x0002, 0, 0x012B, 0, 0x20000 >> 3, (2 << 8) | 16, 150, 110, 260, 115, 255, 160, 145, 150);
+    // shadow mesh polygon over sprites and meshes
+    put(0x0004, 0, 0x0101, 0x8000, 0, 0, 100, 60, 200, 70, 190, 140, 110, 130);
     put(0x0005, 0, 0x0000, 0x7FFF, 0, 0, 220, 170, 300, 170, 300, 215, 220, 215);
     put(0x8000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
@@ -1594,6 +1763,28 @@ int main(int argc, char **argv) {
             for (uint32 x = 0; x < 320; ++x) {
                 const uint8 *s = &stateSW->mem1.FBRAM[fbi][(size_t(y) * 512 + x) * 2];
                 filled += (s[0] | s[1]) != 0;
+            }
+        }
+        if (std::getenv("MESH")) {
+            // The transparent mesh framebuffer of the draw framebuffer
+            uint32 meshDiffs = 0, meshFilled = 0;
+            for (uint32 y = 0; y < 224; ++y) {
+                for (uint32 x = 0; x < 320; ++x) {
+                    const size_t o = (size_t(y) * 512 + x) * 2;
+                    const uint8 *g = &gpu.fbram[256 * 1024 * 4 + fbi * 256 * 1024 + o];
+                    const uint8 *m = &sw.m_meshFBRAM[0][fbi][o];
+                    meshFilled += (m[0] | m[1]) != 0;
+                    if (std::memcmp(g, m, 2) != 0) {
+                        if (meshDiffs < (std::getenv("MESHALL") ? 100000u : 8u)) {
+                            std::printf("  mesh (%u,%u): GPU %02X%02X sw %02X%02X\n", x, y, g[0], g[1], m[0], m[1]);
+                        }
+                        ++meshDiffs;
+                    }
+                }
+            }
+            std::printf("  mesh framebuffer (%u pixels drawn): %u pixels differ\n", meshFilled, meshDiffs);
+            if (meshDiffs) {
+                ++badFrames;
             }
         }
         std::printf("frame %d (FB %u, %u pixels drawn): %u pixels differ", frame, fbi, filled, diffs);

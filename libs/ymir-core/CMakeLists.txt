@@ -468,9 +468,11 @@ endforeach ()
 
 # Polygon drawing variants that find the span of a pixel through a table instead of searching (used by the Metal
 # renderer)
-foreach (_shading_mode RANGE 3)
-    set(_macros "POLYSPEC_TRANSPARENT_MESH=0|POLYSPEC_SHADING_MODE=${_shading_mode}|POLYSPEC_SPAN_TABLE=1|POLYSPEC_PIXELS_PER_THREAD=4")
-    list(APPEND COMPUTE_SHADER_SOURCES "res/shaders/src/vdp/cs_vdp1_polydraw.hlsl|0_${_shading_mode}_st|${_macros}")
+foreach (_mesh_mode RANGE 1)
+    foreach (_shading_mode RANGE 3)
+        set(_macros "POLYSPEC_TRANSPARENT_MESH=${_mesh_mode}|POLYSPEC_SHADING_MODE=${_shading_mode}|POLYSPEC_SPAN_TABLE=1|POLYSPEC_PIXELS_PER_THREAD=4")
+        list(APPEND COMPUTE_SHADER_SOURCES "res/shaders/src/vdp/cs_vdp1_polydraw.hlsl|${_mesh_mode}_${_shading_mode}_st|${_macros}")
+    endforeach ()
 endforeach ()
 
 ## TODO: add per-platform shader code if needed

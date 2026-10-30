@@ -275,10 +275,61 @@ void Merge8(uint2 pos, uint field) {
     // Shadow does not apply to 8-bit mode.
 }
 
-void Merge16(uint2 pos, uint field) {
-    Merge16Single(pos, field);
 #if POLYSPEC_TRANSPARENT_MESH
-    Merge16Single(pos, field + 2);
+// Like the software renderer: a shadow mesh pixel stores the sprite pixel under it, halved if it's opaque, in the mesh
+// framebuffer, and a shadow sprite pixel removes the mesh pixel under it. (The counts don't say which came last; the mesh
+// pixels are taken as the later ones.)
+void MergeMesh16(uint2 pos, uint field, uint2 shifts) {
+    const uint2 inPos = uint2(pos.x * 2, pos.y);
+    const uint inOffset = inPos.x + inPos.y * fbSize.x + field * fbSize.x * fbSize.y;
+    const uint meshInOffset = inOffset + fbSize.x * fbSize.y * 2;
+
+    const uint shift0 = shifts[0];
+    const uint shift1 = shifts[1];
+    const uint meshShift0 = g_internalSpriteOut[meshInOffset + 0];
+    const uint meshShift1 = g_internalSpriteOut[meshInOffset + 1];
+    if (meshShift0 == 0 && meshShift1 == 0 && shift0 == 0 && shift1 == 0) {
+        return;
+    }
+    g_internalSpriteOut[meshInOffset + 0] = 0;
+    g_internalSpriteOut[meshInOffset + 1] = 0;
+
+    // (the sprite pixels have been merged already)
+    const uint outOffset = (inPos.x + inPos.y * fbSize.x) * 2 + field * fbramBytes;
+    const uint spriteValue = g_fbramOut.Load(outOffset + fbOffset);
+    const uint meshAddress = outOffset + fbramBytes * 2 + fbOffset;
+    uint meshValue = g_fbramOut.Load(meshAddress);
+    [unroll]
+    for (uint i = 0; i < 2; ++i) {
+        const uint meshShift = i == 0 ? meshShift0 : meshShift1;
+        const uint shift = i == 0 ? shift0 : shift1;
+        if (meshShift == 0 && shift == 0) {
+            continue;
+        }
+        uint value = 0;
+        if (meshShift != 0) {
+            uint4 color = Uint16ToColor555(ByteSwap16(spriteValue >> (i * 16u)));
+            if (color.a != 0u) {
+                color.rgb >>= 1u;
+            }
+            value = ByteSwap16(Color555ToUint16(color));
+        }
+        meshValue &= ~(0xFFFFu << (i * 16u));
+        meshValue |= value << (i * 16u);
+    }
+    g_fbramOut.Store(meshAddress, meshValue);
+}
+#endif
+
+void Merge16(uint2 pos, uint field) {
+#if POLYSPEC_TRANSPARENT_MESH
+    // (Merge16Single clears the counts of the sprite pixels)
+    const uint inOffset = pos.x * 2 + pos.y * fbSize.x + field * fbSize.x * fbSize.y;
+    const uint2 shifts = uint2(g_internalSpriteOut[inOffset + 0], g_internalSpriteOut[inOffset + 1]);
+    Merge16Single(pos, field);
+    MergeMesh16(pos, field, shifts);
+#else
+    Merge16Single(pos, field);
 #endif
 }
 
@@ -344,6 +395,18 @@ uint HalfTransparentBlend(uint baseColor, uint listHead) {
     return Color555ToUint16(finalColor);
 }
 
+// The sequence number of the latest fragment of the list (0 if empty)
+uint LatestSeq(uint listHead) {
+    uint latest = 0;
+    uint curr = listHead;
+    for (uint visited = 0; curr != 0xFFFFFFFF && visited < 32; ++visited) {
+        const OITFragment frag = g_fragments[curr];
+        latest = max(latest, BitExtract(frag.data, 16, 16));
+        curr = frag.next;
+    }
+    return latest;
+}
+
 void Merge16Single(uint2 pos, uint field) {
     const uint2 inPos = uint2(pos.x * 2, pos.y);
     const uint inOffset = inPos.x + inPos.y * fbSize.x + field * fbSize.x * fbSize.y;
@@ -379,10 +442,62 @@ void Merge8(uint2 pos, uint field) {
     // Half-Transparency does not apply to 8-bit mode.
 }
 
-void Merge16(uint2 pos, uint field) {
-    Merge16Single(pos, field);
 #if POLYSPEC_TRANSPARENT_MESH
-    Merge16Single(pos, field + 2);
+// Like the software renderer: a half-transparent mesh pixel is blended with the sprite pixel under it and stored in the
+// mesh framebuffer (so only the latest one counts), and a sprite pixel removes the mesh pixel under it
+void MergeMesh16(uint2 pos, uint field, uint2 latestSprite) {
+    const uint2 inPos = uint2(pos.x * 2, pos.y);
+    const uint meshInOffset = inPos.x + inPos.y * fbSize.x + (field + 2) * fbSize.x * fbSize.y;
+    const uint2 heads = uint2(g_listHeads[meshInOffset + 0], g_listHeads[meshInOffset + 1]);
+    if (all(heads == 0xFFFFFFFF) && all(latestSprite == 0)) {
+        return;
+    }
+    g_listHeads[meshInOffset + 0] = 0xFFFFFFFF;
+    g_listHeads[meshInOffset + 1] = 0xFFFFFFFF;
+
+    // (the sprite pixels have been merged already)
+    const uint outOffset = (inPos.x + inPos.y * fbSize.x) * 2 + field * fbramBytes;
+    const uint spriteValue = g_fbramOut.Load(outOffset + fbOffset);
+    const uint meshAddress = outOffset + fbramBytes * 2 + fbOffset;
+    uint meshValue = g_fbramOut.Load(meshAddress);
+    [unroll]
+    for (uint i = 0; i < 2; ++i) {
+        // The latest mesh fragment
+        uint latestMesh = 0;
+        uint latestData = 0;
+        uint curr = heads[i];
+        for (uint visited = 0; curr != 0xFFFFFFFF && visited < 32; ++visited) {
+            const OITFragment frag = g_fragments[curr];
+            const uint seq = BitExtract(frag.data, 16, 16);
+            if (seq >= latestMesh) {
+                latestMesh = seq;
+                latestData = frag.data;
+            }
+            curr = frag.next;
+        }
+        if (latestMesh == 0 && latestSprite[i] == 0) {
+            continue;
+        }
+        uint value = 0;
+        if (latestMesh > latestSprite[i]) {
+            const uint4 sprite = Uint16ToColor555(ByteSwap16(spriteValue >> (i * 16u)));
+            value = ByteSwap16(Color555ToUint16(HalfTransparentBlendOne(sprite, latestData)));
+        }
+        meshValue &= ~(0xFFFFu << (i * 16u));
+        meshValue |= value << (i * 16u);
+    }
+    g_fbramOut.Store(meshAddress, meshValue);
+}
+#endif
+
+void Merge16(uint2 pos, uint field) {
+#if POLYSPEC_TRANSPARENT_MESH
+    const uint inOffset = pos.x * 2 + pos.y * fbSize.x + field * fbSize.x * fbSize.y;
+    const uint2 latest = uint2(LatestSeq(g_listHeads[inOffset + 0]), LatestSeq(g_listHeads[inOffset + 1]));
+    Merge16Single(pos, field);
+    MergeMesh16(pos, field, latest);
+#else
+    Merge16Single(pos, field);
 #endif
 }
 

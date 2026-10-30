@@ -79,10 +79,14 @@ public:
         vramDirty.SetAll();
         VDP1FlushVRAM();
         gpu.Vdp1UploadFBRAM(0, vdpState.mem1.FBRAM.data(), static_cast<uint32>(kVDP1FBRAMSize * 2));
+        if (m_transparentMeshes) {
+            VDP1ClearMeshFramebuffers();
+        }
         fbramGpuDirty = false;
 
         VDP1UpdateCommonRenderParams();
         cpuCommonRenderParams.displayParams.drawFB = vdpState.fbIndex.draw;
+        cpuCommonRenderParams.enhancements.transparentMeshes = m_transparentMeshes;
     }
 
     void SetVRes(uint32 vres) {
@@ -179,6 +183,13 @@ public:
         m_skipNativeRequested = skip;
     }
 
+    /// @brief Whether to draw mesh sprites into the transparent mesh framebuffers instead of as a checkerboard
+    /// (Transparent Meshes; taken into use when the framebuffers swap). The mesh layer is drawn at the native
+    /// resolution only.
+    void SetTransparentMeshes(bool enable) {
+        m_transparentMeshesRequested = enable;
+    }
+
     /// @brief Sets the internal resolution scale to use from the next framebuffer swap on (1 = native).
     void SetInternalResolution(uint32 scale) {
         m_hrRequested = std::clamp<uint32>(scale, 1, kHRMaxScale);
@@ -240,14 +251,27 @@ public:
         case VDP1Command::CommandType::DrawPolylines: [[fallthrough]];
         case VDP1Command::CommandType::DrawPolylinesAlt: [[fallthrough]];
         case VDP1Command::CommandType::DrawLine: {
-            // (prepared first as it may need what has been drawn so far)
             const uint8 drawFB = vdpState.fbIndex.draw;
+            if (m_transparentMeshes) {
+                const VDP1Command::DrawMode mode{.u16 = vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x04)};
+                if (mode.meshEnable) {
+                    // Transparent mesh sprites only go into the native mesh framebuffer (the mesh layer is drawn at
+                    // the native resolution), so the scaled up framebuffer stays as it is
+                    HRSyncNative(drawFB);
+                    m_hrPass = false;
+                    VDP1DrawCommand(cmdAddress, control);
+                    break;
+                }
+            }
+            // (prepared first as it may need what has been drawn so far)
             const bool replay = m_hrScale > 1 && VDP1HRShouldReplay();
             if (m_hrScale > 1 && !replay) {
                 // Drawn at the native resolution only, so the scaled up framebuffer no longer follows it
                 HRInvalidate(drawFB);
             }
-            if (replay && m_skipNative) {
+            // (with transparent meshes the native framebuffer is drawn too: a sprite drawn over mesh pixels removes
+            // them from the native mesh framebuffer)
+            if (replay && m_skipNative && !m_transparentMeshes) {
                 // Only the scaled up framebuffer is drawn; the native one is filled from it when it's needed
                 m_nativeStale[drawFB] = true;
             } else {
@@ -272,9 +296,8 @@ public:
     }
 
 private:
-    // These enhancements aren't available with the Metal renderer yet
+    // Deinterlacing isn't available with the Metal renderer yet
     static constexpr bool kDeinterlace = false;
-    static constexpr bool kTransparentMeshes = false;
 
     VDPState &vdpState;
     metal::Gpu &gpu;
@@ -326,6 +349,9 @@ private:
     /// @brief Skip Native Drawing: requested through the settings, and in use (see VDP1HRLatch).
     bool m_skipNativeRequested = false;
     bool m_skipNative = false;
+    /// @brief Transparent Meshes: requested through the settings, and in use (see VDP1HRLatch).
+    bool m_transparentMeshesRequested = false;
+    bool m_transparentMeshes = false;
     /// @brief Whether the native framebuffers lack what has been drawn into the scaled up ones only.
     std::array<bool, 2> m_nativeStale{};
     /// @brief Lines (native) of each scaled up framebuffer that drawing may have made differ from the native one
@@ -409,6 +435,21 @@ private:
             HRSyncNative(1);
             m_skipNative = m_skipNativeRequested;
         }
+        if (m_transparentMeshesRequested != m_transparentMeshes) {
+            VDP1SubmitSpans();
+            m_transparentMeshes = m_transparentMeshesRequested;
+            cpuCommonRenderParams.enhancements.transparentMeshes = m_transparentMeshes;
+            if (m_transparentMeshes) {
+                VDP1ClearMeshFramebuffers();
+            }
+        }
+    }
+
+    /// @brief Clears the transparent mesh framebuffers (and their alternate fields) on the GPU.
+    void VDP1ClearMeshFramebuffers() {
+        const std::vector<uint8> zeros(kVDP1FBRAMSize * 2 * 2, 0);
+        gpu.Vdp1UploadFBRAM(static_cast<uint32>(kVDP1FBRAMSize * 2 * 2), zeros.data(),
+                            static_cast<uint32>(zeros.size()));
     }
 
     /// @brief Fills the native framebuffer of the given index from the scaled up one if only the scaled up one has been
@@ -428,6 +469,7 @@ private:
         VDP1CommonRenderParams params = cpuCommonRenderParams;
         params.displayParams.drawFB = fbIndex;
         params.enhancements.vdp1Scale = m_hrScale - 1;
+        params.enhancements.transparentMeshes = 0;
         metal::Vdp1ResyncPassParams pass{};
         pass.constants = &params;
         pass.constantsSize = sizeof(params);
@@ -460,6 +502,8 @@ private:
             VDP1CommonRenderParams params = cpuCommonRenderParams;
             params.displayParams.drawFB = fbIndex;
             params.enhancements.vdp1Scale = m_hrScale - 1;
+            params.enhancements.transparentMeshes = 0;
+        params.enhancements.transparentMeshes = 0;
             metal::Vdp1ResyncPassParams pass{};
             pass.constants = &params;
             pass.constantsSize = sizeof(params);
@@ -583,7 +627,7 @@ private:
     /// @brief Constructs a polygon drawing shader index from its variant options.
     size_t MakeVDP1PolyDrawShaderIndex(VDP1Command::DrawMode mode) const {
         size_t value = 0;
-        bit::deposit_into<0>(value, kTransparentMeshes);
+        bit::deposit_into<0>(value, m_transparentMeshes);
         if (mode.msbOn) {
             // MSB -> mode 3 (MSB)
             bit::deposit_into<1, 2>(value, 3);
@@ -604,7 +648,7 @@ private:
     /// @brief Constructs an output merger shader index from its variant options.
     size_t MakeVDP1OutputMergerShaderIndex(VDP1Command::DrawMode mode) const {
         size_t value = 0;
-        bit::deposit_into<0>(value, kTransparentMeshes);
+        bit::deposit_into<0>(value, m_transparentMeshes);
         if (vdpState.regs1.tvmr.pixel8Bits) {
             // 8-bit sprite data -> mode 0 (Copy) -- shading modes not supported
             bit::deposit_into<1, 2>(value, 0);
@@ -731,6 +775,7 @@ private:
         // The scaled up framebuffer gets the pixels that were written
         if (m_hrScale > 1 && m_hrValid[drawFB]) {
             constants.common.enhancements.vdp1Scale = m_hrScale - 1;
+            constants.common.enhancements.transparentMeshes = 0;
             pass.hr = true;
             gpu.Vdp1WriteFB(pass);
             m_stats.hrWriteEntries += pass.count;
@@ -812,6 +857,7 @@ private:
                 HRClearDirty(eraseFB);
             }
             constants.common.enhancements.vdp1Scale = m_hrScale - 1;
+            constants.common.enhancements.transparentMeshes = 0;
             pass.hr = true;
             pass.width *= m_hrScale;
             pass.height *= m_hrScale;
@@ -870,6 +916,10 @@ private:
         static_assert(offsetof(Constants, polyDraw) == sizeof(VDP1CommonRenderParams));
         constants.common = cpuCommonRenderParams;
         constants.common.enhancements.vdp1Scale = hr ? m_hrScale - 1 : 0;
+        if (hr) {
+            // (the scaled up framebuffers have no transparent mesh layer)
+            constants.common.enhancements.transparentMeshes = 0;
+        }
         constants.polyDraw = cpuPolyDrawParams;
         const uint32 scale = hr ? m_hrScale : 1;
 
@@ -925,6 +975,7 @@ private:
             ++m_stats.hrBatches;
         }
         pass.hr = hr;
+        pass.transparentMesh = !hr && bit::extract<0>(currPolyDrawShaderIndex) != 0;
         gpu.Vdp1Draw(pass);
 
         fbramGpuDirty = true;
