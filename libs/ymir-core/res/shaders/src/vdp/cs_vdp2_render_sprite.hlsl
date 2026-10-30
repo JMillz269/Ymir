@@ -25,7 +25,8 @@ RWTexture2DArray<uint> g_spriteAttrsOut : register(u2);
 
 #ifdef HR_SPRITE
 // The sprite layer of the scaled up image (one pixel for every sub-pixel), what g_layerOut and g_spriteAttrsOut hold for
-// the native image. Sub-pixels whose sprite data is the native pixel's get kHRSameAsNative as their attributes.
+// the native image, with the transparent mesh layer from row kHRMeshLayerRow on. Sub-pixels whose sprite data (and
+// mesh data) is the native pixel's get kHRSameAsNative as their attributes.
 RWTexture2D<uint4> g_hrSpriteLayerOut : register(u3);
 RWTexture2D<uint> g_hrSpriteAttrsOut : register(u4);
 // Counts (for the log): every 64th sub-pixel that was looked at, and how many of those differ
@@ -55,6 +56,7 @@ static const bool useSpriteWindow = BitTest(g_commonParams.spriteParams, 20);
 static const uint spriteDisplayFB = BitExtract(g_commonParams.spriteParams, 23, 1);
 
 static const bool deinterlace = BitTest(g_commonParams.enhancements, 0);
+static const bool transparentMeshes = BitTest(g_commonParams.enhancements, 1);
 
 #ifdef HR_SPRITE
 static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
@@ -86,17 +88,25 @@ uint ReadSprite8(uint address, uint field) {
     return BitExtract(g_spriteFB.Load(address & ~3), (address & 3) * 8, 8);
 }
 
-uint ReadSprite16(uint address, uint field) {
 #ifdef HR_SPRITE
-    // Internal resolution variant: g_spriteFB holds the scaled up framebuffers (two of 512x256 16-bit pixels, scaled)
-    // and every call reads the sub-pixel the thread works on of the native pixel the address is for.
+// Internal resolution variant: g_spriteFB holds the scaled up framebuffers (two of 512x256 16-bit pixels, scaled, and
+// the two transparent mesh framebuffers after them), and every read is of the sub-pixel the thread works on of the
+// native pixel the address is for.
+uint ReadHRSprite16(uint address, uint base) {
     const uint pixel = address >> 1;
     const uint nativeX = pixel % fbSize.x;
     const uint nativeY = pixel / fbSize.x;
     const uint hrX = nativeX * hrScale + g_hrSubX;
     const uint hrY = nativeY * hrScale + g_hrSubY;
-    const uint hrAddress = spriteDisplayFB * kVDP1FBRAMSize * hrScale * hrScale + (hrY * fbSize.x * hrScale + hrX) * 2;
+    const uint hrAddress =
+        base + spriteDisplayFB * kVDP1FBRAMSize * hrScale * hrScale + (hrY * fbSize.x * hrScale + hrX) * 2;
     return ByteSwap16(g_spriteFB.Load(hrAddress & ~3) >> ((hrAddress & 2) * 8));
+}
+#endif
+
+uint ReadSprite16(uint address, uint field) {
+#ifdef HR_SPRITE
+    return ReadHRSprite16(address, 0);
 #else
     address += kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset;
     return ByteSwap16(g_spriteFB.Load(address & ~3) >> ((address & 2) * 8));
@@ -108,7 +118,11 @@ uint ReadMesh8(uint address, uint field) {
 }
 
 uint ReadMesh16(uint address, uint field) {
+#ifdef HR_SPRITE
+    return ReadHRSprite16(address, kVDP1FBRAMSize * 2 * hrScale * hrScale);
+#else
     return ReadSprite16(kVDP1MeshFBOffset + address, field);
+#endif
 }
 
 uint ReadVRAM16(uint address) {
@@ -553,6 +567,14 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
     return output;
 }
 
+// The sprite attributes of an output, as the composition reads them
+uint SpriteAttrs(SpriteOutput output) {
+    return output.colorCalcRatio |
+           ((output.colorMSB ? 1u : 0u) << kSpriteAttrBitColorMSB) |
+           ((output.shadowOrWindow ? 1u : 0u) << kSpriteAttrBitShadowWindow) |
+           (output.special << kSpriteAttrBitSpecial);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Entrypoint
 
@@ -567,7 +589,16 @@ bool HRPixelDiffers(uint2 pos) {
     const uint address = (pos.x + pos.y * fbSize.x) * 2;
     const uint nativeAddress = address + kSpriteFBBaseOffset;
     const uint nativeWord = ByteSwap16(g_spriteFBNative.Load(nativeAddress & ~3) >> ((nativeAddress & 2) * 8));
-    return nativeWord != ReadSprite16(address, 0);
+    if (nativeWord != ReadSprite16(address, 0)) {
+        return true;
+    }
+    if (transparentMeshes) {
+        const uint nativeMeshAddress = nativeAddress + kVDP1MeshFBOffset;
+        const uint nativeMeshWord =
+            ByteSwap16(g_spriteFBNative.Load(nativeMeshAddress & ~3) >> ((nativeMeshAddress & 2) * 8));
+        return nativeMeshWord != ReadMesh16(address, 0);
+    }
+    return false;
 }
 #endif
 
@@ -593,11 +624,13 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 outCoord = uint2(drawCoord.x, GetY(drawCoord.y));
     const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, 0);
     g_hrSpriteLayerOut[hrPos] = output.layer;
-    g_hrSpriteAttrsOut[hrPos] =
-        output.colorCalcRatio |
-        ((output.colorMSB ? 1u : 0u) << kSpriteAttrBitColorMSB) |
-        ((output.shadowOrWindow ? 1u : 0u) << kSpriteAttrBitShadowWindow) |
-        (output.special << kSpriteAttrBitSpecial);
+    g_hrSpriteAttrsOut[hrPos] = SpriteAttrs(output);
+    if (transparentMeshes) {
+        const SpriteOutput meshOutput = DrawSprite(drawCoord, outCoord.xy, 1);
+        const uint2 meshPos = uint2(hrPos.x, hrPos.y + kHRMeshLayerRow);
+        g_hrSpriteLayerOut[meshPos] = meshOutput.layer;
+        g_hrSpriteAttrsOut[meshPos] = SpriteAttrs(meshOutput);
+    }
 }
 #else
 [numthreads(32, 1, 1)]
@@ -606,10 +639,6 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 outCoord = uint2(drawCoord.x, GetY(drawCoord.y));
     const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, id.z);
     g_layerOut[uint3(outCoord.xy, id.z + 6)] = output.layer;
-    g_spriteAttrsOut[uint3(outCoord.xy, id.z)] =
-        output.colorCalcRatio |
-        ((output.colorMSB ? 1u : 0u) << kSpriteAttrBitColorMSB) |
-        ((output.shadowOrWindow ? 1u : 0u) << kSpriteAttrBitShadowWindow) |
-        (output.special << kSpriteAttrBitSpecial);
+    g_spriteAttrsOut[uint3(outCoord.xy, id.z)] = SpriteAttrs(output);
 }
 #endif

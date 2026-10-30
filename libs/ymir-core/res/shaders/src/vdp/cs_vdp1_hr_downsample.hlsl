@@ -18,6 +18,7 @@ RWByteAddressBuffer g_fbramOut : register(u1);
 
 static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
 static const uint drawFB = BitExtract(g_commonParams.displayParams, 7, 1);
+static const bool transparentMeshes = BitTest(g_commonParams.enhancements, 1);
 
 uint ReadHRPixel(uint address) {
     const uint word = g_fbramHRIn.Load(address & ~3u);
@@ -37,4 +38,12 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint raw0 = ReadHRPixel(rowAddress + nx * hrScale * 2u);
     const uint raw1 = ReadHRPixel(rowAddress + (nx + 1u) * hrScale * 2u);
     g_fbramOut.Store(drawFB * kVDP1FBSize + id.x * 4u, raw0 | (raw1 << 16u));
+    if (transparentMeshes) {
+        // (the scaled up mesh framebuffers follow the two scaled up framebuffers, the native ones are at the start of
+        // the second half of the native framebuffer memory)
+        const uint meshRowAddress = rowAddress + kVDP1FBRAMSize * hrScale * hrScale;
+        const uint mesh0 = ReadHRPixel(meshRowAddress + nx * hrScale * 2u);
+        const uint mesh1 = ReadHRPixel(meshRowAddress + (nx + 1u) * hrScale * 2u);
+        g_fbramOut.Store(kVDP1FBRAMSize * 2 + drawFB * kVDP1FBSize + id.x * 4u, mesh0 | (mesh1 << 16u));
+    }
 }

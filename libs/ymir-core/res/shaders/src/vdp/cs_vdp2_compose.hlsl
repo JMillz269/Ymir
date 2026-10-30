@@ -22,7 +22,7 @@ RWTexture2D<float4> g_compositeOut : register(u1);
 #ifdef HR_COMPOSE
 // Internal resolution variant: the sprite layer of every sub-pixel, as the internal resolution variant of the sprite
 // layer pass leaves it (sub-pixels with the native sprite data are marked; the output has the native image there
-// already). The other layers are the native ones.
+// already), with the transparent mesh layer from row kHRMeshLayerRow on. The other layers are the native ones.
 Texture2D<uint4> g_hrSpriteLayerIn : register(t7);
 Texture2D<uint> g_hrSpriteAttrsIn : register(t8);
 static const uint kHRSameAsNative = 0x8000;
@@ -30,7 +30,8 @@ static const uint kHRSameAsNative = 0x8000;
 static uint4 g_hrSpriteLayer;
 static uint g_hrSpriteAttrs;
 // Everything else is the same for all sub-pixels of a native pixel, so it's read once per native pixel (see
-// HRComposeSetup) and kept here: the BG layer pixels (packed RGBA), the mesh layer pixel and attributes, the color
+// HRComposeSetup) and kept here: the BG layer pixels (packed RGBA), the mesh layer pixel and attributes (replaced by
+// the sub-pixel's with transparent meshes), the color
 // calculation window, the back and line screen colors and the layer stack without the sprite layer.
 static uint g_hrRBG0, g_hrNBG0RBG1, g_hrNBG1, g_hrNBG2, g_hrNBG3, g_hrMesh;
 static uint g_hrMeshSpriteAttrs;
@@ -630,28 +631,37 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     // pixel's (the others have the native image already). Sub-pixels with the same sprite layer pixel come out the
     // same, so the last few results are kept and reused.
     const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
-    uint cacheLayer0 = 0, cacheAttrs0 = 0xFFFFFFFF, cacheColor0 = 0;
-    uint cacheLayer1 = 0, cacheAttrs1 = 0xFFFFFFFF, cacheColor1 = 0;
-    uint cacheLayer2 = 0, cacheAttrs2 = 0xFFFFFFFF, cacheColor2 = 0;
-    uint cacheLayer3 = 0, cacheAttrs3 = 0xFFFFFFFF, cacheColor3 = 0;
+    uint cacheLayer0 = 0, cacheMesh0 = 0, cacheAttrs0 = 0xFFFFFFFF, cacheColor0 = 0;
+    uint cacheLayer1 = 0, cacheMesh1 = 0, cacheAttrs1 = 0xFFFFFFFF, cacheColor1 = 0;
+    uint cacheLayer2 = 0, cacheMesh2 = 0, cacheAttrs2 = 0xFFFFFFFF, cacheColor2 = 0;
+    uint cacheLayer3 = 0, cacheMesh3 = 0, cacheAttrs3 = 0xFFFFFFFF, cacheColor3 = 0;
     uint cacheNext = 0;
     bool setUp = false;
     for (uint sub = 0; sub < hrScale * hrScale; ++sub) {
         const uint2 hrPos = outCoord * hrScale + uint2(sub % hrScale, sub / hrScale);
-        const uint attrs = g_hrSpriteAttrsIn[hrPos];
-        if (attrs == kHRSameAsNative) {
+        const uint spriteAttrs = g_hrSpriteAttrsIn[hrPos];
+        if (spriteAttrs == kHRSameAsNative) {
             continue;
         }
         const uint4 layer = g_hrSpriteLayerIn[hrPos];
-        const uint key = layer.r | (layer.g << 8u) | (layer.b << 16u) | (layer.a << 24u);
+        const uint key = PackPixel(layer);
+        // The transparent mesh layer of the sub-pixel (in the rows after the sprite layer's)
+        uint meshKey = 0;
+        uint meshAttrs = 0;
+        if (transparentMeshes) {
+            const uint2 meshPos = uint2(hrPos.x, hrPos.y + kHRMeshLayerRow);
+            meshKey = PackPixel(g_hrSpriteLayerIn[meshPos]);
+            meshAttrs = g_hrSpriteAttrsIn[meshPos];
+        }
+        const uint attrs = spriteAttrs | (meshAttrs << 16u);
         uint color;
-        if (cacheAttrs0 == attrs && cacheLayer0 == key) {
+        if (cacheAttrs0 == attrs && cacheLayer0 == key && cacheMesh0 == meshKey) {
             color = cacheColor0;
-        } else if (cacheAttrs1 == attrs && cacheLayer1 == key) {
+        } else if (cacheAttrs1 == attrs && cacheLayer1 == key && cacheMesh1 == meshKey) {
             color = cacheColor1;
-        } else if (cacheAttrs2 == attrs && cacheLayer2 == key) {
+        } else if (cacheAttrs2 == attrs && cacheLayer2 == key && cacheMesh2 == meshKey) {
             color = cacheColor2;
-        } else if (cacheAttrs3 == attrs && cacheLayer3 == key) {
+        } else if (cacheAttrs3 == attrs && cacheLayer3 == key && cacheMesh3 == meshKey) {
             color = cacheColor3;
         } else {
             if (!setUp) {
@@ -659,23 +669,31 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
                 setUp = true;
             }
             g_hrSpriteLayer = layer;
-            g_hrSpriteAttrs = attrs;
+            g_hrSpriteAttrs = spriteAttrs;
+            if (transparentMeshes) {
+                g_hrMesh = meshKey;
+                g_hrMeshSpriteAttrs = meshAttrs;
+            }
             const uint3 rgb = Compose(drawCoord);
             color = rgb.r | (rgb.g << 8u) | (rgb.b << 16u);
             if (cacheNext == 0) {
                 cacheLayer0 = key;
+                cacheMesh0 = meshKey;
                 cacheAttrs0 = attrs;
                 cacheColor0 = color;
             } else if (cacheNext == 1) {
                 cacheLayer1 = key;
+                cacheMesh1 = meshKey;
                 cacheAttrs1 = attrs;
                 cacheColor1 = color;
             } else if (cacheNext == 2) {
                 cacheLayer2 = key;
+                cacheMesh2 = meshKey;
                 cacheAttrs2 = attrs;
                 cacheColor2 = color;
             } else {
                 cacheLayer3 = key;
+                cacheMesh3 = meshKey;
                 cacheAttrs3 = attrs;
                 cacheColor3 = color;
             }

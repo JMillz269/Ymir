@@ -56,7 +56,12 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             }
         }
         const uint hrWriteValue = BitExtract(g_eraseParams.erase, 0, 16);
-        g_fbramOut.Store(drawFBOffset + (hrPos.y * 512u * hrScale + hrPos.x) * 2, (hrWriteValue << 16u) | hrWriteValue);
+        const uint hrAddress = drawFBOffset + (hrPos.y * 512u * hrScale + hrPos.x) * 2;
+        g_fbramOut.Store(hrAddress, (hrWriteValue << 16u) | hrWriteValue);
+        if (transparentMeshes) {
+            // (the scaled up mesh framebuffers follow the two scaled up framebuffers)
+            g_fbramOut.Store(hrAddress + hrFBBytes * 2, 0);
+        }
         return;
     }
 

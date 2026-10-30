@@ -59,6 +59,11 @@ static const uint drawFB = BitExtract(g_commonParams.displayParams, 7, 1);
 
 static const uint fbOffset = drawFB * fbBytes;
 
+// The transparent mesh outputs and framebuffers come after the alternate field's at the native size, and right after
+// the main ones in the scaled up passes (which never draw both fields)
+static const uint meshPlane = hrScale > 1 ? 1u : 2u;
+static const uint meshFBOffset = fbramBytes * meshPlane;
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Mergers
 
@@ -86,7 +91,7 @@ void Merge8(uint2 pos, uint field) {
     bool hasPixel2 = seqNum2 != 0;
     bool hasPixel3 = seqNum3 != 0;
 #if POLYSPEC_TRANSPARENT_MESH
-    const uint inMeshOffset = inOffset + fbSize.x * fbSize.y * 2;
+    const uint inMeshOffset = inOffset + fbSize.x * fbSize.y * meshPlane;
     const uint meshOut0 = g_internalSpriteOut[inMeshOffset + 0];
     const uint meshOut1 = g_internalSpriteOut[inMeshOffset + 1];
     const uint meshOut2 = g_internalSpriteOut[inMeshOffset + 2];
@@ -137,7 +142,7 @@ void Merge8(uint2 pos, uint field) {
     }
     g_fbramOut.Store(outOffset + fbOffset, fbramValue);
 #if POLYSPEC_TRANSPARENT_MESH
-    const uint outMeshOffset = outOffset + fbramBytes * 2;
+    const uint outMeshOffset = outOffset + meshFBOffset;
     fbramValue = g_fbramOut.Load(outMeshOffset + fbOffset);
     if (hasPixel0) {
         fbramValue &= ~0xFFu;
@@ -181,7 +186,7 @@ void Merge16(uint2 pos, uint field) {
     bool hasPixel0 = seqNum0 != 0;
     bool hasPixel1 = seqNum1 != 0;
 #if POLYSPEC_TRANSPARENT_MESH
-    const uint inMeshOffset = inOffset + fbSize.x * fbSize.y * 2;
+    const uint inMeshOffset = inOffset + fbSize.x * fbSize.y * meshPlane;
     const uint meshOut0 = g_internalSpriteOut[inMeshOffset + 0];
     const uint meshOut1 = g_internalSpriteOut[inMeshOffset + 1];
     const uint meshSeqNum0 = BitExtract(meshOut0, 16, 16);
@@ -214,7 +219,7 @@ void Merge16(uint2 pos, uint field) {
     }
     g_fbramOut.Store(outOffset + fbOffset, fbramValue);
 #if POLYSPEC_TRANSPARENT_MESH
-    const uint outMeshOffset = outOffset + fbramBytes * 2;
+    const uint outMeshOffset = outOffset + meshFBOffset;
     fbramValue = g_fbramOut.Load(outMeshOffset + fbOffset);
     if (hasPixel0) {
         fbramValue &= ~0xFFFFu;
@@ -282,7 +287,7 @@ void Merge8(uint2 pos, uint field) {
 void MergeMesh16(uint2 pos, uint field, uint2 shifts) {
     const uint2 inPos = uint2(pos.x * 2, pos.y);
     const uint inOffset = inPos.x + inPos.y * fbSize.x + field * fbSize.x * fbSize.y;
-    const uint meshInOffset = inOffset + fbSize.x * fbSize.y * 2;
+    const uint meshInOffset = inOffset + fbSize.x * fbSize.y * meshPlane;
 
     const uint shift0 = shifts[0];
     const uint shift1 = shifts[1];
@@ -297,7 +302,7 @@ void MergeMesh16(uint2 pos, uint field, uint2 shifts) {
     // (the sprite pixels have been merged already)
     const uint outOffset = (inPos.x + inPos.y * fbSize.x) * 2 + field * fbramBytes;
     const uint spriteValue = g_fbramOut.Load(outOffset + fbOffset);
-    const uint meshAddress = outOffset + fbramBytes * 2 + fbOffset;
+    const uint meshAddress = outOffset + meshFBOffset + fbOffset;
     uint meshValue = g_fbramOut.Load(meshAddress);
     [unroll]
     for (uint i = 0; i < 2; ++i) {
@@ -447,7 +452,7 @@ void Merge8(uint2 pos, uint field) {
 // mesh framebuffer (so only the latest one counts), and a sprite pixel removes the mesh pixel under it
 void MergeMesh16(uint2 pos, uint field, uint2 latestSprite) {
     const uint2 inPos = uint2(pos.x * 2, pos.y);
-    const uint meshInOffset = inPos.x + inPos.y * fbSize.x + (field + 2) * fbSize.x * fbSize.y;
+    const uint meshInOffset = inPos.x + inPos.y * fbSize.x + (field + meshPlane) * fbSize.x * fbSize.y;
     const uint2 heads = uint2(g_listHeads[meshInOffset + 0], g_listHeads[meshInOffset + 1]);
     if (all(heads == 0xFFFFFFFF) && all(latestSprite == 0)) {
         return;
@@ -458,7 +463,7 @@ void MergeMesh16(uint2 pos, uint field, uint2 latestSprite) {
     // (the sprite pixels have been merged already)
     const uint outOffset = (inPos.x + inPos.y * fbSize.x) * 2 + field * fbramBytes;
     const uint spriteValue = g_fbramOut.Load(outOffset + fbOffset);
-    const uint meshAddress = outOffset + fbramBytes * 2 + fbOffset;
+    const uint meshAddress = outOffset + meshFBOffset + fbOffset;
     uint meshValue = g_fbramOut.Load(meshAddress);
     [unroll]
     for (uint i = 0; i < 2; ++i) {

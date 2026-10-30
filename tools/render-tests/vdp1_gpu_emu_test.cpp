@@ -305,11 +305,12 @@ struct LineStepperH {
 struct EmuGpu final : metal::Gpu {
     std::vector<uint8> vram = std::vector<uint8>(kVDP1VRAMSize);
     std::vector<uint8> fbram = std::vector<uint8>(kVDP1FBRAMSize * 2 * 2 * 2);
-    std::vector<uint8> fbramHR = std::vector<uint8>(kVDP1FBRAMSize * 32);
+    // (the two scaled up framebuffers at the highest scale, then their transparent mesh framebuffers)
+    std::vector<uint8> fbramHR = std::vector<uint8>(kVDP1FBRAMSize * 64);
     uint8 *cur = nullptr; // framebuffer memory of the pass being run
     uint32 hrScale = 1;   // scale of the pass being run
-    std::vector<uint32> spriteOut = std::vector<uint32>(1u << 21);
-    std::vector<uint32> listHeads = std::vector<uint32>(1u << 21, 0xFFFFFFFF);
+    std::vector<uint32> spriteOut = std::vector<uint32>(1u << 22);
+    std::vector<uint32> listHeads = std::vector<uint32>(1u << 22, 0xFFFFFFFF);
     struct Frag {
         uint32 data, next;
     };
@@ -372,19 +373,30 @@ struct EmuGpu final : metal::Gpu {
         uint32 dp;
         std::memcpy(&dp, &common.displayParams, 4);
         const uint32 drawFB = BitExtract(dp, 7, 1);
-        for (uint32 id = 0; id < 512 * 256 / 2; ++id) {
-            uint32 word;
-            std::memcpy(&word, &fbram[drawFB * 256 * 1024 + id * 4], 4);
-            const uint32 nx = (id * 2) & 511, ny = (id * 2) >> 9;
+        uint32 enh;
+        std::memcpy(&enh, &common.enhancements, 4);
+        auto upscale = [&](uint32 word, uint32 nx, uint32 ny, uint32 base) {
             const uint32 raw0 = BitExtract(word, 0, 16), raw1 = BitExtract(word, 16, 16);
             for (uint32 dy = 0; dy < hrScale; ++dy) {
-                const uint32 rowAddress = drawFB * 256 * 1024 * hrScale * hrScale +
-                                          ((ny * hrScale + dy) * 512 * hrScale + nx * hrScale) * 2;
+                const uint32 rowAddress = base + ((ny * hrScale + dy) * 512 * hrScale + nx * hrScale) * 2;
                 for (uint32 m = 0; m < hrScale; ++m) {
                     const uint32 lo = (m * 2) < hrScale ? raw0 : raw1;
                     const uint32 hi = (m * 2 + 1) < hrScale ? raw0 : raw1;
                     FbStore(rowAddress + m * 4, lo | (hi << 16));
                 }
+            }
+        };
+        for (uint32 id = 0; id < 512 * 256 / 2; ++id) {
+            const uint32 nx = (id * 2) & 511, ny = (id * 2) >> 9;
+            const uint32 base = drawFB * 256 * 1024 * hrScale * hrScale;
+            uint32 word;
+            std::memcpy(&word, &fbram[drawFB * 256 * 1024 + id * 4], 4);
+            upscale(word, nx, ny, base);
+            if (BitTest(enh, 1)) {
+                // (transparent meshes: the native mesh framebuffers are at 1 MB, the scaled up ones follow the two
+                // scaled up framebuffers)
+                std::memcpy(&word, &fbram[512 * 1024 * 2 + drawFB * 256 * 1024 + id * 4], 4);
+                upscale(word, nx, ny, base + 512 * 1024 * hrScale * hrScale);
             }
         }
     }
@@ -397,6 +409,8 @@ struct EmuGpu final : metal::Gpu {
         uint32 dp;
         std::memcpy(&dp, &common.displayParams, 4);
         const uint32 drawFB = BitExtract(dp, 7, 1);
+        uint32 enh;
+        std::memcpy(&enh, &common.enhancements, 4);
         auto readHRPixel = [&](uint32 address) {
             uint32 word;
             std::memcpy(&word, &fbramHR[address & ~3u], 4);
@@ -410,6 +424,13 @@ struct EmuGpu final : metal::Gpu {
             const uint32 raw1 = readHRPixel(rowAddress + (nx + 1) * hrScale * 2);
             const uint32 word = raw0 | (raw1 << 16);
             std::memcpy(&fbram[drawFB * 256 * 1024 + id * 4], &word, 4);
+            if (BitTest(enh, 1)) {
+                const uint32 meshRowAddress = rowAddress + 512 * 1024 * hrScale * hrScale;
+                const uint32 mesh0 = readHRPixel(meshRowAddress + nx * hrScale * 2);
+                const uint32 mesh1 = readHRPixel(meshRowAddress + (nx + 1) * hrScale * 2);
+                const uint32 meshWord = mesh0 | (mesh1 << 16);
+                std::memcpy(&fbram[512 * 1024 * 2 + drawFB * 256 * 1024 + id * 4], &meshWord, 4);
+            }
         }
     }
 
@@ -460,7 +481,11 @@ struct EmuGpu final : metal::Gpu {
                         }
                     }
                     const uint32 wv = BitExtract(ev, 0, 16);
-                    FbStore(drawFBOffset + (hy * 512u * hrScale + hx) * 2, (wv << 16) | wv);
+                    const uint32 hrAddress = drawFBOffset + (hy * 512u * hrScale + hx) * 2;
+                    FbStore(hrAddress, (wv << 16) | wv);
+                    if (BitTest(enhancements, 1)) {
+                        FbStore(hrAddress + 256 * 1024 * hrScale * hrScale * 2, 0);
+                    }
                     continue;
                 }
                 const uint32 posx = idx * 2 + eraseX1, posy = idy + eraseY1;
@@ -515,6 +540,8 @@ struct EmuGpu final : metal::Gpu {
         if (p.hr) {
             Select(true, p.constants);
             const uint32 drawFB = BitExtract(dp, 7, 1);
+            uint32 hrEnh;
+            std::memcpy(&hrEnh, &common.enhancements, 4);
             for (uint32 id = 0; id < p.count * 2; ++id) {
                 const uint32 index = id >> 1, px = id & 1;
                 const uint32 mask = BitExtract(w[index].andMask, px * 16, 16);
@@ -539,6 +566,11 @@ struct EmuGpu final : metal::Gpu {
                         v &= ~(0xFFFFu << shift);
                         v |= raw << shift;
                         FbStore(address & ~3u, v);
+                        if (BitTest(hrEnh, 1)) {
+                            // (the written bytes are removed from the scaled up mesh framebuffer)
+                            const uint32 meshAddress = (address + 512 * 1024 * hrScale * hrScale) & ~3u;
+                            FbStore(meshAddress, FbLoad(meshAddress) & ~((0xFFFFu & ~mask) << shift));
+                        }
                     }
                 }
             }
@@ -629,10 +661,11 @@ struct EmuGpu final : metal::Gpu {
             cy >>= 1;
         }
         outOffset += cy * fbW + cx;
-        if (meshMode && meshEnable) {
-            // (the transparent mesh pixels go after the two fields)
+        if (meshMode && meshEnable && shading != 3) {
+            // (the transparent mesh pixels go after the two fields, or after the main ones in the scaled up passes;
+            // MSB On sets the bit in the framebuffer)
             const uint32 fbH = (256u << BitExtract(dpBits, 1, 1)) * hrScale;
-            outOffset += fbW * fbH * 2;
+            outOffset += fbW * fbH * (hrScale > 1 ? 1 : 2);
         }
         const bool pixel8Bits = BitTest(dpBits, 2);
         if (shading == 0) {
@@ -894,7 +927,8 @@ struct EmuGpu final : metal::Gpu {
         // (the field's pixels and framebuffer come after the other field's)
         const uint32 fbOffset = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale + field * fbramBytes;
         const uint32 fieldIn = field * fbW * fbH;
-        const uint32 inMeshDelta = fbW * fbH * 2;
+        const uint32 meshPlane = hrScale > 1 ? 1 : 2;
+        const uint32 inMeshDelta = fbW * fbH * meshPlane;
         if (pixel8Bits) {
             if (mode != 0) {
                 return;
@@ -934,7 +968,7 @@ struct EmuGpu final : metal::Gpu {
             }
             FbStore(outOffset + fbOffset, v);
             if (meshMode) {
-                const uint32 outMeshOffset = outOffset + fbramBytes * 2;
+                const uint32 outMeshOffset = outOffset + fbramBytes * meshPlane;
                 v = FbLoad(outMeshOffset + fbOffset);
                 for (int i = 0; i < 4; ++i) {
                     if (has[i]) {
@@ -984,7 +1018,7 @@ struct EmuGpu final : metal::Gpu {
             }
             FbStore(outOffset + fbOffset, v);
             if (meshMode) {
-                const uint32 outMeshOffset = outOffset + fbramBytes * 2;
+                const uint32 outMeshOffset = outOffset + fbramBytes * meshPlane;
                 v = FbLoad(outMeshOffset + fbOffset);
                 if (h0) {
                     v &= ~0xFFFFu;
@@ -1005,7 +1039,7 @@ struct EmuGpu final : metal::Gpu {
         const uint32 inOffset = inx + iny * fbW + fieldIn;
         const uint32 outOffset = (inx + iny * fbW) * 2;
         const uint32 meshIn = inOffset + inMeshDelta;
-        const uint32 meshAddress = outOffset + fbramBytes * 2 + fbOffset;
+        const uint32 meshAddress = outOffset + fbramBytes * meshPlane + fbOffset;
         if (mode == 1) {
             const uint32 c0 = spriteOut[inOffset], c1 = spriteOut[inOffset + 1];
             const uint32 s0 = std::min(c0, 5u), s1 = std::min(c1, 5u);
@@ -1196,10 +1230,9 @@ int main(int argc, char **argv) {
         enh.internalResolution = scale;
         // SKIPNATIVE=1: draw VDP1 into the scaled up framebuffers only (Skip Native Drawing) in both renderers
         const bool skipNative = std::getenv("SKIPNATIVE") != nullptr;
-        // MESH=1: Transparent Meshes in both renderers (the GPU path draws natively too then, so the software renderer
-        // doesn't skip native drawing either)
+        // MESH=1: Transparent Meshes in both renderers
         enh.transparentMeshes = std::getenv("MESH") != nullptr;
-        enh.skipNativeVDP1 = skipNative && !enh.transparentMeshes;
+        enh.skipNativeVDP1 = skipNative;
         // DEINTERLACE=1: deinterlacing in both renderers (with INTERLACE=1 or 2 the scene is in an interlaced double
         // density mode, with 2 VDP1's double interlace drawing on)
         enh.deinterlace = std::getenv("DEINTERLACE") != nullptr;
@@ -1964,6 +1997,43 @@ int main(int argc, char **argv) {
                 ++badFrames;
             }
             std::printf("\n");
+            if (std::getenv("MESH") && !interlace) {
+                // The scaled up transparent mesh framebuffer (after the two scaled up framebuffers), and the lines
+                // where it isn't the native one scaled up have to be reported as changed too
+                const uint16 *swMesh = sw.m_hrMesh[fbi].data();
+                const size_t meshBase = size_t(256) * 1024 * scale * scale * 2;
+                uint32 first = 0, last = 0;
+                const bool any = vdp1.HRDirtyLines(fbi, first, last);
+                uint32 mdiffs = 0, mfilled = 0, outside = 0;
+                for (uint32 y = 0; y < 224 * scale; ++y) {
+                    for (uint32 x = 0; x < 320 * scale; ++x) {
+                        const uint8 *g =
+                            &gpu.fbramHR[meshBase + fbi * 256 * 1024 * scale * scale + (size_t(y) * stride + x) * 2];
+                        const uint16 gv = (uint16(g[0]) << 8) | g[1];
+                        const uint16 sv = swMesh[size_t(y) * stride + x];
+                        mfilled += sv != 0;
+                        if (gv != sv) {
+                            if (mdiffs < 8) {
+                                std::printf("  hr mesh (%u,%u): GPU %04X sw %04X\n", x, y, gv, sv);
+                            }
+                            ++mdiffs;
+                        }
+                        const uint8 *n = &gpu.fbram[512 * 1024 * 2 + fbi * 256 * 1024 +
+                                                    (size_t(y / scale) * 512 + x / scale) * 2];
+                        if (std::memcmp(g, n, 2) != 0 && !(any && y / scale >= first && y / scale <= last)) {
+                            ++outside;
+                        }
+                    }
+                }
+                std::printf("  scaled up mesh framebuffer (%u pixels drawn): %u pixels differ\n", mfilled, mdiffs);
+                if (outside) {
+                    std::printf("  %u mesh pixels differ from the native ones scaled up outside the reported lines\n",
+                                outside);
+                }
+                if (mdiffs || outside) {
+                    ++badFrames;
+                }
+            }
         }
         sw.VDP1SwapFramebuffer();
         vdp1.SwapFramebuffer();

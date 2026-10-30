@@ -106,6 +106,10 @@ static const bool evenOddCoordSelect = BitTest(g_commonParams.displayParams, 6);
 
 static const bool deinterlace = BitTest(g_commonParams.enhancements, 0);
 
+// The transparent mesh output comes after the alternate field's at the native size, and right after the main output in
+// the scaled up passes (which never draw both fields)
+static const uint meshPlane = hrScale > 1 ? 1u : 2u;
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Helpers
 
@@ -599,9 +603,10 @@ void WriteOutput(int2 coord, OutData data, uint outSlot) {
 
     outOffset += coord.y * fbSize.x + coord.x;
 
-#if POLYSPEC_TRANSPARENT_MESH
+#if POLYSPEC_TRANSPARENT_MESH && POLYSPEC_SHADING_MODE != POLYSPEC_SHADING_MODE_MSB
+    // (like the software renderer, MSB On sets the bit in the framebuffer for mesh sprites too)
     if (meshEnable) {
-        outOffset += fbSize.x * fbSize.y * 2;
+        outOffset += fbSize.x * fbSize.y * meshPlane;
     }
 #endif
 

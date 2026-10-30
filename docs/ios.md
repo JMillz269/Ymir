@@ -96,9 +96,8 @@ passes in separate encoders, so it is a little slower; delete the folder for nor
 The finished image is read back from the GPU and shown through the normal display path, so all the display filters,
 upscaling and screenshots keep working. The image arrives one frame late. Internal Resolution, Transparent Meshes and
 Deinterlacing need the GPU VDP1 option. With
-Transparent Meshes the mesh layer is drawn at the normal size (scaled up with the rest of the image at higher internal
-resolutions), and Skip Native Drawing is not used while it's on (sprites drawn over mesh pixels have to remove them from
-the normal-size mesh layer). If it can't be created the
+Transparent Meshes the mesh layer is drawn at the internal resolution too, and Skip Native Drawing works with it. If it
+can't be created the
 setting is turned off again and the software renderer is used.
 
 `tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer

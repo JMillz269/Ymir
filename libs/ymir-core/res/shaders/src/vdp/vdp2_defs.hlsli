@@ -31,6 +31,10 @@ static const uint kPageSizes[2][2] = { { 13, 14 }, { 11, 12 } };
 static const uint kMaxNormalResH = 352;
 static const uint kMaxNormalResV = 256;
 
+// The sprite layer textures of the scaled up image (internal resolution) hold the sprite layer of every sub-pixel at
+// the highest scale (4) in their first rows and the transparent mesh layer in the rows after them, starting at this one
+static const uint kHRMeshLayerRow = kMaxNormalResV * 4;
+
 static const uint kMaxResH = 704;
 static const uint kMaxResV = 512;
 

@@ -73,9 +73,11 @@ namespace {
     constexpr NSUInteger kTexelBufferWidth = 4096;
 
     /// Entries of the buffers with an entry for every pixel of the VDP1 framebuffer (internal sprite output and OIT list
-    /// heads); the area a shader can address in them is a multiple of the width of a texel buffer
+    /// heads): the framebuffer and the transparent mesh one, each with its alternate field at the native size, or the
+    /// scaled up framebuffer and mesh one; the area a shader can address in them is a multiple of the width of a texel
+    /// buffer
     constexpr NSUInteger kVDP1PixelBufferEntries =
-        std::max<NSUInteger>(kVDP1FBRAMSize * 2 * 2, 512 * 256 * kMaxHRScale * kMaxHRScale);
+        std::max<NSUInteger>(kVDP1FBRAMSize * 2 * 2, 512 * 256 * kMaxHRScale * kMaxHRScale * 2);
 
     /// Pixels in the buffers the finished images are copied to: the largest image, scaled up by the highest internal
     /// resolution if that is larger
@@ -489,21 +491,19 @@ public:
         }
         m_compositeHR = Create2DTexture(MTLPixelFormatRGBA8Unorm, kMaxNormalResH * kMaxHRScale,
                                         kMaxNormalResV * kMaxHRScale, 1);
+        // (the transparent mesh layer is in the second half of the rows, see kHRMeshLayerRow in the shaders)
         m_hrSpriteLayer = Create2DTexture(MTLPixelFormatRGBA8Uint, kMaxNormalResH * kMaxHRScale,
-                                          kMaxNormalResV * kMaxHRScale, 1);
+                                          kMaxNormalResV * kMaxHRScale * 2, 1);
         m_hrSpriteAttrs = Create2DTexture(MTLPixelFormatR16Uint, kMaxNormalResH * kMaxHRScale,
-                                          kMaxNormalResV * kMaxHRScale, 1);
+                                          kMaxNormalResV * kMaxHRScale * 2, 1);
         if (m_compositeHR == nil || m_hrSpriteLayer == nil || m_hrSpriteAttrs == nil) {
             error = "Could not allocate the GPU textures for the VDP2 internal resolution output";
             return false;
         }
-        // (two framebuffers of 512x256 16-bit pixels, scaled up)
-        const NSUInteger bytes = kVDP1FBRAMSize * 2 * kMaxHRScale * kMaxHRScale;
+        // (two framebuffers of 512x256 16-bit pixels, scaled up, then their transparent mesh framebuffers)
+        const NSUInteger bytes = kVDP1FBRAMSize * 2 * 2 * kMaxHRScale * kMaxHRScale;
         m_fbramHR = [m_device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
-        m_hrReadback = [m_device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-        if (m_fbramHR == nil || m_hrReadback == nil) {
-            m_fbramHR = nil;
-            m_hrReadback = nil;
+        if (m_fbramHR == nil) {
             error = "Could not allocate GPU memory for the VDP1 internal resolution framebuffers";
             return false;
         }
@@ -565,6 +565,13 @@ public:
             return;
         }
         size = std::min<uint32>(size, static_cast<uint32>(m_fbramHR.length));
+        if (m_hrReadback == nil) {
+            // (only made when it's needed, which is for diagnostics)
+            m_hrReadback = [m_device newBufferWithLength:m_fbramHR.length options:MTLResourceStorageModeShared];
+            if (m_hrReadback == nil) {
+                return;
+            }
+        }
         EnsureFrame();
         EndEncoder();
         id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];

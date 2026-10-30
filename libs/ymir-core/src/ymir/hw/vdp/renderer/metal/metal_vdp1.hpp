@@ -11,9 +11,8 @@ reads it (see SyncFB).
 
 Internal resolutions above 1x: commands are drawn twice, once into the native framebuffer (which stays authoritative:
 the CPU reads it and VDP2 falls back on it) and once with coordinates scaled up into a larger framebuffer, like the
-software renderer does.
-
-Not available (yet): deinterlacing and transparent meshes.
+software renderer does. With Skip Native Drawing they are only drawn into the larger one, and the native framebuffer is
+filled from it when it's needed. The transparent mesh framebuffers are scaled up too.
 */
 
 #include "../common_hw/common_hw_defs.hpp"
@@ -195,8 +194,8 @@ public:
     }
 
     /// @brief Whether to draw mesh sprites into the transparent mesh framebuffers instead of as a checkerboard
-    /// (Transparent Meshes; taken into use when the framebuffers swap). The mesh layer is drawn at the native
-    /// resolution only.
+    /// (Transparent Meshes; taken into use when the framebuffers swap). At internal resolutions above 1x the mesh
+    /// framebuffers are scaled up like the framebuffers.
     void SetTransparentMeshes(bool enable) {
         m_transparentMeshesRequested = enable;
     }
@@ -263,26 +262,13 @@ public:
         case VDP1Command::CommandType::DrawPolylinesAlt: [[fallthrough]];
         case VDP1Command::CommandType::DrawLine: {
             const uint8 drawFB = vdpState.fbIndex.draw;
-            if (m_transparentMeshes) {
-                const VDP1Command::DrawMode mode{.u16 = vdpState.mem1.ReadVRAM<uint16>(cmdAddress + 0x04)};
-                if (mode.meshEnable) {
-                    // Transparent mesh sprites only go into the native mesh framebuffer (the mesh layer is drawn at
-                    // the native resolution), so the scaled up framebuffer stays as it is
-                    HRSyncNative(drawFB);
-                    m_hrPass = false;
-                    VDP1DrawCommand(cmdAddress, control);
-                    break;
-                }
-            }
             // (prepared first as it may need what has been drawn so far)
             const bool replay = m_hrScale > 1 && VDP1HRShouldReplay();
             if (m_hrScale > 1 && !replay) {
                 // Drawn at the native resolution only, so the scaled up framebuffer no longer follows it
                 HRInvalidate(drawFB);
             }
-            // (with transparent meshes the native framebuffer is drawn too: a sprite drawn over mesh pixels removes
-            // them from the native mesh framebuffer)
-            if (replay && m_skipNative && !m_transparentMeshes) {
+            if (replay && m_skipNative) {
                 // Only the scaled up framebuffer is drawn; the native one is filled from it when it's needed
                 m_nativeStale[drawFB] = true;
             } else {
@@ -459,6 +445,10 @@ private:
             }
         }
         if (m_transparentMeshesRequested != m_transparentMeshes) {
+            // The scaled up framebuffers are filled again from the native ones (with the mesh framebuffers, which start
+            // out empty, when they're turned on)
+            HRInvalidate(0);
+            HRInvalidate(1);
             VDP1SubmitSpans();
             m_transparentMeshes = m_transparentMeshesRequested;
             cpuCommonRenderParams.enhancements.transparentMeshes = m_transparentMeshes;
@@ -492,7 +482,6 @@ private:
         VDP1CommonRenderParams params = cpuCommonRenderParams;
         params.displayParams.drawFB = fbIndex;
         params.enhancements.vdp1Scale = m_hrScale - 1;
-        params.enhancements.transparentMeshes = 0;
         metal::Vdp1ResyncPassParams pass{};
         pass.constants = &params;
         pass.constantsSize = sizeof(params);
@@ -525,8 +514,6 @@ private:
             VDP1CommonRenderParams params = cpuCommonRenderParams;
             params.displayParams.drawFB = fbIndex;
             params.enhancements.vdp1Scale = m_hrScale - 1;
-            params.enhancements.transparentMeshes = 0;
-        params.enhancements.transparentMeshes = 0;
             metal::Vdp1ResyncPassParams pass{};
             pass.constants = &params;
             pass.constantsSize = sizeof(params);
@@ -798,7 +785,6 @@ private:
         // The scaled up framebuffer gets the pixels that were written
         if (m_hrScale > 1 && m_hrValid[drawFB]) {
             constants.common.enhancements.vdp1Scale = m_hrScale - 1;
-            constants.common.enhancements.transparentMeshes = 0;
             pass.hr = true;
             gpu.Vdp1WriteFB(pass);
             m_stats.hrWriteEntries += pass.count;
@@ -880,7 +866,6 @@ private:
                 HRClearDirty(eraseFB);
             }
             constants.common.enhancements.vdp1Scale = m_hrScale - 1;
-            constants.common.enhancements.transparentMeshes = 0;
             pass.hr = true;
             pass.width *= m_hrScale;
             pass.height *= m_hrScale;
@@ -939,10 +924,6 @@ private:
         static_assert(offsetof(Constants, polyDraw) == sizeof(VDP1CommonRenderParams));
         constants.common = cpuCommonRenderParams;
         constants.common.enhancements.vdp1Scale = hr ? m_hrScale - 1 : 0;
-        if (hr) {
-            // (the scaled up framebuffers have no transparent mesh layer)
-            constants.common.enhancements.transparentMeshes = 0;
-        }
         constants.polyDraw = cpuPolyDrawParams;
         const uint32 scale = hr ? m_hrScale : 1;
 
@@ -999,7 +980,7 @@ private:
             ++m_stats.hrBatches;
         }
         pass.hr = hr;
-        pass.transparentMesh = !hr && bit::extract<0>(currPolyDrawShaderIndex) != 0;
+        pass.transparentMesh = bit::extract<0>(currPolyDrawShaderIndex) != 0;
         gpu.Vdp1Draw(pass);
 
         fbramGpuDirty = true;

@@ -24,6 +24,7 @@ RWByteAddressBuffer g_fbramOut : register(u1);
 
 static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
 static const uint drawFB = BitExtract(g_commonParams.displayParams, 7, 1);
+static const bool transparentMeshes = BitTest(g_commonParams.enhancements, 1);
 
 [numthreads(64, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
@@ -62,6 +63,12 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             uint dummy;
             g_fbramOut.InterlockedAnd(address & ~3u, ~(0xFFFFu << shift), dummy);
             g_fbramOut.InterlockedOr(address & ~3u, raw << shift, dummy);
+            if (transparentMeshes) {
+                // The written bytes are removed from the mesh framebuffer (which follows the two framebuffers), as in
+                // the native one
+                g_fbramOut.InterlockedAnd((address + kVDP1FBRAMSize * hrScale * hrScale) & ~3u,
+                                          ~((0xFFFFu & ~mask) << shift), dummy);
+            }
         }
     }
 }
