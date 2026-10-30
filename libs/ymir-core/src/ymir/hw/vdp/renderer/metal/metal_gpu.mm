@@ -37,6 +37,10 @@ namespace {
     // (the variants are named after the mesh mode and the shading or merging mode; only the checkerboard mesh mode is
     // used, as transparent meshes aren't available with this renderer)
     // (the polygon drawing variants used find the span of a pixel through a table, see Vdp1DrawParams)
+    /// Pixels drawn by a thread group of the polygon drawing shaders: 64 threads drawing 4 pixels each
+    /// (POLYSPEC_PIXELS_PER_THREAD of the variants below)
+    constexpr uint32 kPolyDrawPixelsPerGroup = 64 * 4;
+
     constexpr const char *kPolyDrawShaderPaths[4] = {
         "src/vdp/cs_vdp1_polydraw_0_0_st.metallib",
         "src/vdp/cs_vdp1_polydraw_0_1_st.metallib",
@@ -575,7 +579,8 @@ public:
         m_bindHR = params.hr;
         Bind(draw, staged);
         m_bindHR = false;
-        [m_encoder dispatchThreadgroups:MTLSizeMake((params.numPixels + 63) / 64, 1, 1)
+        const NSUInteger groups = (params.numPixels + kPolyDrawPixelsPerGroup - 1) / kPolyDrawPixelsPerGroup;
+        [m_encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         Vdp1Barrier();
         // The drawing wrote the pixel buffers with atomic operations on the buffers, the merger reads and clears them

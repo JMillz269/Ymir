@@ -665,17 +665,10 @@ void WriteOutput(int2 coord, OutData data, uint outSlot) {
 // ---------------------------------------------------------------------------------------------------------------------
 // Entrypoint
 
-[numthreads(64, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
-    const uint spanIndex = GetSpanIndex(id.x);
-    if (spanIndex == 0xFFFFFFFF) {
-        return;
-    }
-
-    const PolySpan span = g_spanParams[spanIndex];
-    const uint spanStep = id.x - g_spanPrefixSums[spanIndex] + BitExtract(span.skip_cmdIndex, 0, 16);
+// Draws the pixel of the pixel sequence at the index, which is in the span at the index
+void DrawPixel(uint pixelIndex, uint spanIndex, PolySpan span, uint spanFirstPixel, CommandParams cmdParams) {
+    const uint spanStep = pixelIndex - spanFirstPixel + BitExtract(span.skip_cmdIndex, 0, 16);
     const uint cmdIndex = BitExtract(span.skip_cmdIndex, 16, 16);
-    const CommandParams cmdParams = g_commandParams[cmdIndex];
 
     const bool antialias = BitTest(span.attrs, 0);
     const bool textured = BitTest(span.attrs, 1);
@@ -747,7 +740,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 
     OutData data;
     data.cmdIndex = cmdIndex;
-    data.fragmentSlot = id.x * 2u;
+    data.fragmentSlot = pixelIndex * 2u;
 
 #if POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_COPY || POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_OIT
     // =========================================================================
@@ -785,5 +778,43 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     WriteOutput(lineStepper.Coord(), data, 0u);
     if (antialias && lineStepper.NeedsAA()) {
         WriteOutput(lineStepper.AACoord(), data, 1u);
+    }
+}
+
+#ifndef POLYSPEC_PIXELS_PER_THREAD
+    #define POLYSPEC_PIXELS_PER_THREAD 1
+#endif
+
+// Every thread draws POLYSPEC_PIXELS_PER_THREAD consecutive pixels of the sequence, so that finding the span and reading
+// its parameters is shared by them (the host dispatches that many times fewer threads)
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    const uint firstPixel = id.x * POLYSPEC_PIXELS_PER_THREAD;
+    uint spanIndex = GetSpanIndex(firstPixel);
+    if (spanIndex == 0xFFFFFFFF) {
+        return;
+    }
+    const uint numPixels = g_spanPrefixSums[g_polyDrawParams.numSpans];
+
+    uint spanFirstPixel = g_spanPrefixSums[spanIndex];
+    uint spanEnd = g_spanPrefixSums[spanIndex + 1u];
+    PolySpan span = g_spanParams[spanIndex];
+    CommandParams cmdParams = g_commandParams[BitExtract(span.skip_cmdIndex, 16, 16)];
+    for (uint i = 0; i < POLYSPEC_PIXELS_PER_THREAD; ++i) {
+        const uint pixelIndex = firstPixel + i;
+        if (pixelIndex >= numPixels) {
+            break;
+        }
+        if (pixelIndex >= spanEnd) {
+            // On to the span holding this pixel (spans can be empty)
+            do {
+                ++spanIndex;
+                spanFirstPixel = spanEnd;
+                spanEnd = g_spanPrefixSums[spanIndex + 1u];
+            } while (spanEnd <= pixelIndex);
+            span = g_spanParams[spanIndex];
+            cmdParams = g_commandParams[BitExtract(span.skip_cmdIndex, 16, 16)];
+        }
+        DrawPixel(pixelIndex, spanIndex, span, spanFirstPixel, cmdParams);
     }
 }

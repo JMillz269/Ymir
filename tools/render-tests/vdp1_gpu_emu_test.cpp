@@ -903,6 +903,25 @@ struct EmuGpu final : metal::Gpu {
     }
 
     void Vdp1Draw(const metal::Vdp1DrawParams &p) override {
+        if (const char *dir = std::getenv("CAPTURE")) {
+            // Writes the inputs of the polygon drawing dispatch (and the VDP1 VRAM) for running the real shaders on
+            // them elsewhere: a header of 32-bit values, then the blobs in the order of the header's sizes
+            static uint32 captures = 0;
+            const std::string path = std::string(dir) + "/draw_" + std::to_string(captures++) + ".bin";
+            if (FILE *f = std::fopen(path.c_str(), "wb")) {
+                const uint32 header[] = {0x31504456u, p.numPixels, p.shadingMode, p.hr ? 1u : 0u, p.constantsSize,
+                                         p.spansSize, p.prefixSumsSize, p.spanBlockStartsSize, p.commandsSize,
+                                         uint32(vram.size())};
+                std::fwrite(header, sizeof(header), 1, f);
+                std::fwrite(p.constants, 1, p.constantsSize, f);
+                std::fwrite(p.spans, 1, p.spansSize, f);
+                std::fwrite(p.prefixSums, 1, p.prefixSumsSize, f);
+                std::fwrite(p.spanBlockStarts, 1, p.spanBlockStartsSize, f);
+                std::fwrite(p.commands, 1, p.commandsSize, f);
+                std::fwrite(vram.data(), 1, vram.size(), f);
+                std::fclose(f);
+            }
+        }
         VDP1CommonRenderParams common;
         std::memcpy(&common, p.constants, sizeof(common));
         std::memcpy(&dpBits, &common.displayParams, 4);
