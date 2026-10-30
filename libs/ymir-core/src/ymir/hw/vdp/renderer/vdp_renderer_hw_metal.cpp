@@ -272,6 +272,8 @@ struct MetalVDPRenderer::Impl {
 
     /// @brief The internal resolution scale from the settings.
     uint32 internalResolution = 1;
+    /// @brief Skip Native Drawing from the settings (VDP1 drawn at the internal resolution only).
+    bool skipNativeVDP1 = false;
     uint32 statFrames = 0;
     uint32 statHrFrames = 0;
     uint32 statHrChunks = 0;
@@ -289,6 +291,7 @@ struct MetalVDPRenderer::Impl {
         if (vdp1) {
             // (the comparison with the software renderer is at the native resolution)
             vdp1->SetInternalResolution(compare ? 1 : internalResolution);
+            vdp1->SetSkipNative(!compare && skipNativeVDP1);
         }
     }
 
@@ -1210,6 +1213,7 @@ util::VoidResult<> MetalVDPRenderer::Initialize(void *device, bool gpuVDP1) {
             metal::LogMessage("comparing the GPU's VDP1 with the software renderer's");
         }
         m_impl->vdp1->SetInternalResolution(m_impl->compare ? 1 : m_impl->internalResolution);
+        m_impl->vdp1->SetSkipNative(!m_impl->compare && m_impl->skipNativeVDP1);
     }
     m_impl->Reset();
     return {};
@@ -1234,8 +1238,9 @@ MetalVDPRenderer::Create(VDPState &state, const config::VDP2DebugRender &vdp2Deb
 
 void MetalVDPRenderer::UpdateEnhancements() {
     // Deinterlacing and transparent meshes aren't available with the Metal renderer yet, and the software renderer's
-    // way of drawing at a higher resolution isn't used: the GPU does it
+    // way of drawing at a higher resolution isn't used: the GPU does it (with Skip Native Drawing too)
     m_impl->internalResolution = m_enhancements.internalResolution;
+    m_impl->skipNativeVDP1 = m_enhancements.skipNativeVDP1;
     m_enhancements.deinterlace = false;
     m_enhancements.transparentMeshes = false;
     m_enhancements.internalResolution = 1;

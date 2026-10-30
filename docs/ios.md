@@ -77,7 +77,10 @@ states.
 coordinates into larger framebuffers (the normal-size one stays what the emulated CPU reads), and VDP2 composes each
 screen line once per sub-pixel, drawing the sprite layer again from the large framebuffer for each of them. This costs
 GPU time that grows with the square of the scale (4x draws and composes sixteen times). Frames in modes that can't be
-enlarged are composed at the normal size. Skip Native Drawing is not supported by the Metal renderer yet.
+enlarged are composed at the normal size. With Skip Native Drawing the GPU draws VDP1 commands into the larger
+framebuffers only, and fills the normal-size framebuffer from them (the first sub-pixel of every pixel) when it's needed:
+when the framebuffers swap, before a command that can only be drawn at the normal size and when the CPU reads the
+framebuffer.
 
 Diagnostics: the Metal renderer writes `metal-vdp-log.txt` to the Documents folder (started anew at every launch).
 Creating a folder named `metal-vdp-compare` there makes the software renderer draw VDP1 as well, and the log then lists

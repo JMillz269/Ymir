@@ -433,6 +433,7 @@ set(COMPUTE_SHADER_SOURCES
     res/shaders/src/vdp/cs_vdp1_fbram_write.hlsl
     res/shaders/src/vdp/cs_vdp1_hr_fbram_write.hlsl
     res/shaders/src/vdp/cs_vdp1_hr_resync.hlsl
+    res/shaders/src/vdp/cs_vdp1_hr_downsample.hlsl
 
     res/shaders/src/vdp/cs_vdp2_compose.hlsl
     res/shaders/src/vdp/cs_vdp2_render_bgs.hlsl

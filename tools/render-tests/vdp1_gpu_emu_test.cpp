@@ -387,6 +387,30 @@ struct EmuGpu final : metal::Gpu {
         }
     }
 
+    // Port of cs_vdp1_hr_downsample
+    void Vdp1DownsampleHR(const metal::Vdp1ResyncPassParams &p) override {
+        Select(true, p.constants);
+        VDP1CommonRenderParams common;
+        std::memcpy(&common, p.constants, sizeof(common));
+        uint32 dp;
+        std::memcpy(&dp, &common.displayParams, 4);
+        const uint32 drawFB = BitExtract(dp, 7, 1);
+        auto readHRPixel = [&](uint32 address) {
+            uint32 word;
+            std::memcpy(&word, &fbramHR[address & ~3u], 4);
+            return (address & 2u) != 0 ? BitExtract(word, 16, 16) : BitExtract(word, 0, 16);
+        };
+        for (uint32 id = 0; id < 512 * 256 / 2; ++id) {
+            const uint32 nx = (id * 2) & 511, ny = (id * 2) >> 9;
+            const uint32 rowPixels = 512 * hrScale;
+            const uint32 rowAddress = drawFB * 256 * 1024 * hrScale * hrScale + ny * hrScale * rowPixels * 2;
+            const uint32 raw0 = readHRPixel(rowAddress + nx * hrScale * 2);
+            const uint32 raw1 = readHRPixel(rowAddress + (nx + 1) * hrScale * 2);
+            const uint32 word = raw0 | (raw1 << 16);
+            std::memcpy(&fbram[drawFB * 256 * 1024 + id * 4], &word, 4);
+        }
+    }
+
     uint32 ReadVRAM8(uint32 a) const {
         return vram[a & 0x7FFFF];
     }
@@ -981,8 +1005,11 @@ int main(int argc, char **argv) {
     {
         config::Enhancements enh{};
         enh.internalResolution = scale;
+        // SKIPNATIVE=1: draw VDP1 into the scaled up framebuffers only (Skip Native Drawing) in both renderers
+        enh.skipNativeVDP1 = std::getenv("SKIPNATIVE") != nullptr;
         sw.ConfigureEnhancements(enh);
         vdp1.SetInternalResolution(scale);
+        vdp1.SetSkipNative(enh.skipNativeVDP1);
     }
 
 #ifdef HAVE_SAVESTATE_REPLAY
@@ -1248,6 +1275,9 @@ int main(int argc, char **argv) {
             }
             sw.VDP1EndFrame();
             vdp1.FlushWork();
+            if (std::getenv("SKIPNATIVE")) {
+                vdp1.SyncFB();
+            }
             if (frame < 2) {
                 sw.VDP1SwapFramebuffer();
                 vdp1.SwapFramebuffer();
@@ -1535,6 +1565,11 @@ int main(int argc, char **argv) {
         }
         sw.VDP1EndFrame();
         vdp1.FlushWork();
+        if (std::getenv("SKIPNATIVE")) {
+            // (the software renderer fills the native framebuffer from the scaled up one when the frame ends, the GPU
+            // path when it's needed: the CPU reading it is one such time)
+            vdp1.SyncFB();
+        }
         const uint8 fbi = stateGPU->fbIndex.draw;
         uint32 diffs = 0, minx = ~0u, miny = ~0u, maxx = 0, maxy = 0;
         for (uint32 y = 0; y < 224; ++y) {

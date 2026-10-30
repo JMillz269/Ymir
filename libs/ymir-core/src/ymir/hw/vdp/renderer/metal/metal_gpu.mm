@@ -29,6 +29,7 @@ namespace {
     constexpr const char *kFBWriteShaderPath = "src/vdp/cs_vdp1_fbram_write.metallib";
     constexpr const char *kHRFBWriteShaderPath = "src/vdp/cs_vdp1_hr_fbram_write.metallib";
     constexpr const char *kHRResyncShaderPath = "src/vdp/cs_vdp1_hr_resync.metallib";
+    constexpr const char *kHRDownsampleShaderPath = "src/vdp/cs_vdp1_hr_downsample.metallib";
     constexpr const char *kHRSpriteShaderPath = "src/vdp/cs_vdp2_render_sprite_hr.metallib";
     constexpr const char *kHRComposeShaderPath = "src/vdp/cs_vdp2_compose_hr.metallib";
     constexpr const char *kHRReplicateShaderPath = "src/vdp/cs_vdp2_hr_replicate.metallib";
@@ -104,6 +105,7 @@ namespace {
         Vdp1Counter,
         Fbram,
         FbramNative,
+        FbramHR,
         SpriteFBNative,
         CompositeNative,
         HrStats,
@@ -147,6 +149,7 @@ namespace {
             {"g_counter", Res::Vdp1Counter},
             {"g_fbramOut", Res::Fbram},
             {"g_fbramNative", Res::FbramNative},
+            {"g_fbramHRIn", Res::FbramHR},
             {"g_spriteFBNative", Res::SpriteFBNative},
             {"g_compositeNative", Res::CompositeNative},
             {"g_hrStats", Res::HrStats},
@@ -450,8 +453,10 @@ public:
         }
         m_hrFbWrite.vdp1 = true;
         m_hrResync.vdp1 = true;
+        m_hrDownsample.vdp1 = true;
         if (!CreatePipeline(kHRFBWriteShaderPath, m_hrFbWrite, error) ||
             !CreatePipeline(kHRResyncShaderPath, m_hrResync, error) ||
+            !CreatePipeline(kHRDownsampleShaderPath, m_hrDownsample, error) ||
             !CreatePipeline(kHRSpriteShaderPath, m_hrSprite, error) ||
             !CreatePipeline(kHRComposeShaderPath, m_hrCompose, error) ||
             !CreatePipeline(kHRReplicateShaderPath, m_hrReplicate, error)) {
@@ -507,6 +512,28 @@ public:
         [m_encoder setComputePipelineState:m_hrResync.state];
         Bind(m_hrResync, staged);
         m_bindHR = false;
+        [m_encoder dispatchThreadgroups:MTLSizeMake((512 * 256 / 2 + 63) / 64, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        Vdp1Barrier();
+    }
+
+    void Vdp1DownsampleHR(const Vdp1ResyncPassParams &params) override {
+        if (m_fbramHR == nil) {
+            return;
+        }
+        EnsureFrame();
+        Staged staged{};
+        uint64 generation;
+        do {
+            generation = m_arenaGeneration;
+            staged.common = StageRaw(m_blobV1Params, params.constants, params.constantsSize);
+        } while (generation != m_arenaGeneration);
+        Profile(4);
+        EnsureCompute();
+
+        // (the output is the native framebuffer, the input the scaled up one bound by its own name)
+        [m_encoder setComputePipelineState:m_hrDownsample.state];
+        Bind(m_hrDownsample, staged);
         [m_encoder dispatchThreadgroups:MTLSizeMake((512 * 256 / 2 + 63) / 64, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         Vdp1Barrier();
@@ -1196,7 +1223,7 @@ private:
     uint32 m_logFrames = 0;
     std::array<Pipeline, 4> m_polyDraw;
     std::array<Pipeline, 3> m_merger;
-    Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrSprite, m_hrCompose, m_hrReplicate;
+    Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrDownsample, m_hrSprite, m_hrCompose, m_hrReplicate;
     id<MTLTexture> m_compositeHR = nil; ///< scaled up output image
     id<MTLTexture> m_hrSpriteLayer = nil; ///< sprite layer of the scaled up image (see the internal resolution shaders)
     id<MTLTexture> m_hrSpriteAttrs = nil;
@@ -1541,6 +1568,7 @@ private:
             case Res::SpriteFB: buffer = m_bindHR ? m_fbramHR : m_fbram; break;
             case Res::Fbram: buffer = (m_bindHR && pipeline.vdp1) ? m_fbramHR : m_fbram; break;
             case Res::FbramNative: buffer = m_fbram; break;
+            case Res::FbramHR: buffer = m_fbramHR; break;
             case Res::SpriteFBNative: buffer = m_fbram; break;
             case Res::CompositeNative: texture = m_composite; break;
             case Res::HrStats: buffer = m_hrStatsBuf; break;

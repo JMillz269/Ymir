@@ -295,7 +295,7 @@ struct DisplaySettingsView: View {
             } header: {
                 Text("Graphics Chip")
             } footer: {
-                Text("The Metal renderer draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The second switch moves the first video chip (polygons, sprites and lines) to the GPU as well; it needs the Metal renderer. The image arrives one frame later. Deinterlacing, Transparent Meshes and Internal Resolution don't work with them yet and are ignored while they are on.")
+                Text("The Metal renderer draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The second switch moves the first video chip (polygons, sprites and lines) to the GPU as well; it needs the Metal renderer. The image arrives one frame later. Internal Resolution needs both switches on. Deinterlacing and Transparent Meshes don't work with them yet and are ignored while they are on.")
             }
 
             Section {

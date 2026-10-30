@@ -70,6 +70,7 @@ public:
         m_batch.ResetBounds();
         m_hrBatch.ResetBounds();
         m_hrValid.fill(false);
+        m_nativeStale.fill(false);
         HRClearDirty(0);
         HRClearDirty(1);
         m_hrPass = false;
@@ -124,6 +125,8 @@ public:
     void SyncFB() {
         // The writes by the CPU are in the CPU copy already, but would be lost by replacing it with the GPU's copy
         VDP1FlushWork();
+        HRSyncNative(0);
+        HRSyncNative(1);
         if (fbramGpuDirty) {
             fbramGpuDirty = false;
             gpu.Vdp1DownloadFBRAM(vdpState.mem1.FBRAM.data(), static_cast<uint32>(kVDP1FBRAMSize * 2));
@@ -164,8 +167,16 @@ public:
     }
 
     void SwapFramebuffer() {
+        // The framebuffer drawn to is about to be shown, and VDP2 reads the native one
+        HRSyncNative(vdpState.fbIndex.draw);
         VDP1UpdateAction(Action::Swap);
         VDP1HRLatch();
+    }
+
+    /// @brief Whether to draw VDP1 commands into the scaled up framebuffers only, filling the native framebuffers from
+    /// them when their contents are needed (taken into use when the framebuffers swap).
+    void SetSkipNative(bool skip) {
+        m_skipNativeRequested = skip;
     }
 
     /// @brief Sets the internal resolution scale to use from the next framebuffer swap on (1 = native).
@@ -230,13 +241,20 @@ public:
         case VDP1Command::CommandType::DrawPolylinesAlt: [[fallthrough]];
         case VDP1Command::CommandType::DrawLine: {
             // (prepared first as it may need what has been drawn so far)
+            const uint8 drawFB = vdpState.fbIndex.draw;
             const bool replay = m_hrScale > 1 && VDP1HRShouldReplay();
             if (m_hrScale > 1 && !replay) {
                 // Drawn at the native resolution only, so the scaled up framebuffer no longer follows it
-                m_hrValid[vdpState.fbIndex.draw] = false;
+                HRInvalidate(drawFB);
             }
-            m_hrPass = false;
-            VDP1DrawCommand(cmdAddress, control);
+            if (replay && m_skipNative) {
+                // Only the scaled up framebuffer is drawn; the native one is filled from it when it's needed
+                m_nativeStale[drawFB] = true;
+            } else {
+                HRSyncNative(drawFB);
+                m_hrPass = false;
+                VDP1DrawCommand(cmdAddress, control);
+            }
             if (replay) {
                 // Draw the command again with scaled up coordinates into the scaled up framebuffer
                 m_hrPass = true;
@@ -305,6 +323,11 @@ private:
     bool m_hrFailed = false;
     /// @brief Whether the scaled up framebuffers are in line with the native ones.
     std::array<bool, 2> m_hrValid{};
+    /// @brief Skip Native Drawing: requested through the settings, and in use (see VDP1HRLatch).
+    bool m_skipNativeRequested = false;
+    bool m_skipNative = false;
+    /// @brief Whether the native framebuffers lack what has been drawn into the scaled up ones only.
+    std::array<bool, 2> m_nativeStale{};
     /// @brief Lines (native) of each scaled up framebuffer that drawing may have made differ from the native one
     /// scaled up (none if last < first)
     std::array<sint32, 2> m_hrDirtyFirst{INT32_MAX, INT32_MAX};
@@ -375,11 +398,48 @@ private:
             scale = 1;
         }
         if (scale != m_hrScale) {
+            HRInvalidate(0);
+            HRInvalidate(1);
             m_hrScale = scale;
-            m_hrValid.fill(false);
             HRClearDirty(0);
             HRClearDirty(1);
         }
+        if (m_skipNativeRequested != m_skipNative) {
+            HRSyncNative(0);
+            HRSyncNative(1);
+            m_skipNative = m_skipNativeRequested;
+        }
+    }
+
+    /// @brief Fills the native framebuffer of the given index from the scaled up one if only the scaled up one has been
+    /// drawn into since (Skip Native Drawing).
+    void HRSyncNative(uint8 fbIndex) {
+        if (!m_nativeStale[fbIndex]) {
+            return;
+        }
+        m_nativeStale[fbIndex] = false;
+        if (m_hrScale <= 1 || !m_hrValid[fbIndex]) {
+            return;
+        }
+        // (what is waiting to be drawn goes into the scaled up framebuffer first; writes by the CPU that haven't been
+        // sent yet go into both framebuffers afterwards)
+        VDP1SubmitSpans();
+
+        VDP1CommonRenderParams params = cpuCommonRenderParams;
+        params.displayParams.drawFB = fbIndex;
+        params.enhancements.vdp1Scale = m_hrScale - 1;
+        metal::Vdp1ResyncPassParams pass{};
+        pass.constants = &params;
+        pass.constantsSize = sizeof(params);
+        gpu.Vdp1DownsampleHR(pass);
+        fbramGpuDirty = true;
+    }
+
+    /// @brief Stops using the scaled up framebuffer of the given index (the native one gets what was drawn into it
+    /// only first).
+    void HRInvalidate(uint8 fbIndex) {
+        HRSyncNative(fbIndex);
+        m_hrValid[fbIndex] = false;
     }
 
     /// @brief Makes sure the scaled up framebuffer of the given index is in line with the native one.
@@ -389,7 +449,7 @@ private:
             return false;
         }
         if (!HRSupportsTVMR()) {
-            m_hrValid[fbIndex] = false;
+            HRInvalidate(fbIndex);
             return false;
         }
         if (!m_hrValid[fbIndex]) {
@@ -654,6 +714,12 @@ private:
         constants.common = cpuCommonRenderParams;
         constants.writeCount = static_cast<HLSLuint>(cpuFBRAMWritesList.size());
 
+        // A scaled up framebuffer that can't follow the writes is given up before they reach the native one
+        const uint8 drawFB = vdpState.fbIndex.draw;
+        if (m_hrScale > 1 && m_hrValid[drawFB] && !HRSupportsTVMR()) {
+            HRInvalidate(drawFB);
+        }
+
         metal::Vdp1FBWritePassParams pass{};
         pass.constants = &constants;
         pass.constantsSize = sizeof(constants);
@@ -663,16 +729,11 @@ private:
         gpu.Vdp1WriteFB(pass);
 
         // The scaled up framebuffer gets the pixels that were written
-        const uint8 drawFB = vdpState.fbIndex.draw;
         if (m_hrScale > 1 && m_hrValid[drawFB]) {
-            if (HRSupportsTVMR()) {
-                constants.common.enhancements.vdp1Scale = m_hrScale - 1;
-                pass.hr = true;
-                gpu.Vdp1WriteFB(pass);
-                m_stats.hrWriteEntries += pass.count;
-            } else {
-                m_hrValid[drawFB] = false;
-            }
+            constants.common.enhancements.vdp1Scale = m_hrScale - 1;
+            pass.hr = true;
+            gpu.Vdp1WriteFB(pass);
+            m_stats.hrWriteEntries += pass.count;
         }
 
         fbramGpuDirty = true;
@@ -735,7 +796,7 @@ private:
         const uint8 eraseFB = vdpState.fbIndex.display;
         const bool hrErase = m_hrScale > 1 && !doubleDensity && regs1.tvmr.eraseOffsetShift == 9 && HRPrepare(eraseFB);
         if (m_hrScale > 1 && !hrErase) {
-            m_hrValid[eraseFB] = false;
+            HRInvalidate(eraseFB);
         }
 
         metal::Vdp1ErasePassParams pass{};

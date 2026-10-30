@@ -156,6 +156,10 @@ public:
     /// @brief Fills a scaled up framebuffer from the native one.
     virtual void Vdp1ResyncHR(const Vdp1ResyncPassParams &params) = 0;
 
+    /// @brief Fills the native framebuffer of the draw framebuffer index from the scaled up one (every native pixel
+    /// takes the first scaled up pixel it covers), when only the scaled up one is drawn (Skip Native Drawing).
+    virtual void Vdp1DownsampleHR(const Vdp1ResyncPassParams &params) = 0;
+
     /// @brief Waits for everything submitted so far to finish and copies the start of the scaled up framebuffer memory
     /// (the two framebuffers one after the other, each `512 * 256 * scale * scale` 16-bit pixels).
     virtual void Vdp1DownloadHRFBRAM(void *dst, uint32 size) = 0;
