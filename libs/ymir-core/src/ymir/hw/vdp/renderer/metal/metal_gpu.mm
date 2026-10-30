@@ -2,6 +2,8 @@
 
 #include "../common_hw/common_hw_defs.hpp"
 
+#include <ymir/util/perf_counters.hpp>
+
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -1283,6 +1285,10 @@ private:
     std::chrono::steady_clock::time_point m_lastFrameTime{};
     double m_lastThreadCpuMs = 0.0;
     double m_lastProcessCpuMs = 0.0;
+    // The frontend's wait counters when the frame times were last logged (they only ever grow)
+    uint64_t m_lastEmuWaitNs = 0;
+    uint64_t m_lastGuiWaitNs = 0;
+    uint64_t m_lastSH2Ns = 0;
     std::array<std::array<Pipeline, 4>, 2> m_polyDraw;
     std::array<std::array<Pipeline, 3>, 2> m_merger;
     Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrDownsample, m_hrSprite, m_hrCompose, m_hrReplicate;
@@ -1472,6 +1478,18 @@ private:
         static const char *const kThermalNames[] = {"nominal", "fair", "serious", "critical"};
         const int thermal = std::clamp(std::max(t.worstThermal, static_cast<int>(info.thermalState)), 0, 3);
         const double n = t.frames;
+        // How long the emulator waited for the display to take the next frame, and the other way around (video sync),
+        // and the time spent in the SH-2s and the SCU
+        const uint64_t emuWait = ymir::perf::emuWaitNs.load(std::memory_order_relaxed);
+        const uint64_t guiWait = ymir::perf::guiWaitNs.load(std::memory_order_relaxed);
+        const uint64_t sh2 = ymir::perf::sh2Ns.load(std::memory_order_relaxed);
+        LogMessage("last %u frames, per frame: emulator waited for the display %.2f ms, display waited for the emulator "
+                   "%.2f ms, SH-2s and SCU %.2f ms",
+                   t.frames, (emuWait - m_lastEmuWaitNs) / n / 1.0e6, (guiWait - m_lastGuiWaitNs) / n / 1.0e6,
+                   (sh2 - m_lastSH2Ns) / n / 1.0e6);
+        m_lastEmuWaitNs = emuWait;
+        m_lastGuiWaitNs = guiWait;
+        m_lastSH2Ns = sh2;
         LogMessage("last %u frames: %.1f fps (frame interval average %.2f ms, worst %.2f ms, %u frames slower than "
                    "60 Hz); emulation thread CPU time per frame average %.2f ms, worst %.2f ms; whole app CPU time per "
                    "frame %.2f ms; thermal state %s%s",
