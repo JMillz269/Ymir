@@ -9,6 +9,7 @@
 #include <app/shared_context.hpp>
 
 #include <array>
+#include <filesystem>
 #include <mutex>
 #include <vector>
 
@@ -109,6 +110,15 @@ public:
 
     /// @brief Deletes all save states for the current game from disk and memory.
     void ClearSaveStates();
+
+    /// @brief Deletes the save state of a slot (and its backup) for the current game, from memory and from disk.
+    /// @param[in] slotIndex Slot index.
+    void DeleteSaveStateSlot(std::size_t slotIndex);
+
+    /// @brief Retrieves the file the save state of a slot of the current game is stored in.
+    /// @param[in] slotIndex Slot index.
+    /// @return the path of the file, or an empty path if there is no such file
+    [[nodiscard]] std::filesystem::path SaveStateSlotPath(std::size_t slotIndex) const;
 
     /// @brief Loads a save state from the given slot.
     /// @param[in] slotIndex Slot index.

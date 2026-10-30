@@ -170,6 +170,22 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     }
 }
 
++ (void)deleteStateInSlot:(NSInteger)slot {
+    auto &host = app::ios::GetHost();
+    if (host.deleteState) {
+        host.deleteState(static_cast<int>(slot));
+    }
+}
+
++ (NSString *)pathForSaveStateSlot:(NSInteger)slot {
+    auto &host = app::ios::GetHost();
+    if (!host.saveStatePath) {
+        return nil;
+    }
+    auto path = host.saveStatePath(static_cast<int>(slot));
+    return path.empty() ? nil : ToNSString(path);
+}
+
 + (void)quitGame {
     auto &host = app::ios::GetHost();
     if (host.quitGame) {

@@ -35,6 +35,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)ejectDisc NS_SWIFT_NAME(ejectDisc());
 + (void)saveStateToSlot:(NSInteger)slot NS_SWIFT_NAME(saveState(slot:));
 + (void)loadStateFromSlot:(NSInteger)slot NS_SWIFT_NAME(loadState(slot:));
++ (void)deleteStateInSlot:(NSInteger)slot NS_SWIFT_NAME(deleteState(slot:));
+/// The file holding the save state of a slot of the loaded game, or nil if there is none.
++ (nullable NSString *)pathForSaveStateSlot:(NSInteger)slot NS_SWIFT_NAME(saveStatePath(slot:));
 + (void)quitGame NS_SWIFT_NAME(quitGame());
 + (void)takeScreenshot NS_SWIFT_NAME(takeScreenshot());
 

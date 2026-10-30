@@ -572,15 +572,40 @@ void TouchControls::Draw(ImDrawList *drawList, std::optional<ImTextureID> atlas)
             drawList->AddCircleFilled(m_layout.dpadCenter, m_layout.dpadRadius * 1.08f, selectedFill, 48);
             drawList->AddCircle(m_layout.dpadCenter, m_layout.dpadRadius * 1.08f, selectedOutline, 48, 3.0f);
         }
-        drawSprite(touch_atlas::kDpad, m_layout.dpadCenter, m_layout.dpadRadius * 2.08f, false);
-        // Light up the arms that are held down
-        for (int c : {Up, Down, Left, Right}) {
-            if (m_state[c]) {
-                const ImVec2 ctr = m_layout.centers[c];
-                const ImVec2 hs = m_layout.halfSizes[c];
-                drawList->AddRectFilled({ctr.x - hs.x, ctr.y - hs.y}, {ctr.x + hs.x, ctr.y + hs.y},
-                                        IM_COL32(255, 255, 255, 90), hs.x * 0.3f);
+        // The D-pad rocks towards the direction held down, like a real one: the side pressed in tilts away (its
+        // corners move towards the middle), and the pad shifts a little that way
+        {
+            const float dirX = (m_state[Right] ? 1.0f : 0.0f) - (m_state[Left] ? 1.0f : 0.0f);
+            const float dirY = (m_state[Down] ? 1.0f : 0.0f) - (m_state[Up] ? 1.0f : 0.0f);
+            const float dirLen = std::sqrt(dirX * dirX + dirY * dirY);
+            const bool pressed = dirLen > 0.0f;
+            const float nx = pressed ? dirX / dirLen : 0.0f;
+            const float ny = pressed ? dirY / dirLen : 0.0f;
+
+            const touch_atlas::Rect &r = touch_atlas::kDpad;
+            const float factor = m_layout.dpadRadius * 2.08f / std::max(1.0f, (float)r.bodyW);
+            const float hw = r.w * factor * 0.5f;
+            const float hh = r.h * factor * 0.5f;
+            const float shift = m_layout.dpadRadius * 0.05f;
+            const ImVec2 center{m_layout.dpadCenter.x + nx * shift, m_layout.dpadCenter.y + ny * shift};
+            // Corners in the order top left, top right, bottom right, bottom left. Those on the side pressed in (both
+            // on that edge for a single direction, the one corner for a diagonal) are pulled towards the middle.
+            const float signs[4][2] = {{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
+            const float maxTowards = std::abs(nx) + std::abs(ny);
+            ImVec2 corners[4];
+            for (int i = 0; i < 4; ++i) {
+                const float sx = signs[i][0];
+                const float sy = signs[i][1];
+                const float towards = pressed ? std::max(0.0f, sx * nx + sy * ny) / maxTowards : 0.0f;
+                const float pull = 1.0f - 0.08f * towards;
+                corners[i] = {center.x + sx * hw * pull, center.y + sy * hh * pull};
             }
+            const float u0 = (float)r.x / touch_atlas::kWidth;
+            const float v0 = (float)r.y / touch_atlas::kHeight;
+            const float u1 = (float)(r.x + r.w) / touch_atlas::kWidth;
+            const float v1 = (float)(r.y + r.h) / touch_atlas::kHeight;
+            drawList->AddImageQuad(*atlas, corners[0], corners[1], corners[2], corners[3], {u0, v0}, {u1, v0},
+                                   {u1, v1}, {u0, v1}, pressed ? pressedTint : idleTint);
         }
 
         const touch_atlas::Rect *sprites[_Count] = {};

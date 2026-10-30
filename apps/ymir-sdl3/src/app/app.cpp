@@ -1500,6 +1500,10 @@ void App::RunEmulator() {
     iosHost.ejectDisc = [this] { m_context.EnqueueEvent(events::emu::EjectDisc()); };
     iosHost.saveState = [this](int slot) { m_saveStateService.SaveSaveStateSlot(static_cast<std::size_t>(slot)); };
     iosHost.loadState = [this](int slot) { m_saveStateService.LoadSaveStateSlot(static_cast<std::size_t>(slot)); };
+    iosHost.deleteState = [this](int slot) { m_saveStateService.DeleteSaveStateSlot(static_cast<std::size_t>(slot)); };
+    iosHost.saveStatePath = [this](int slot) {
+        return m_saveStateService.SaveStateSlotPath(static_cast<std::size_t>(slot));
+    };
     iosHost.takeScreenshot = [this] { m_context.EnqueueEvent(events::gui::TakeScreenshot()); };
     iosHost.reloadIPLROM = [this]() -> std::string {
         m_romService.ScanIPLROMs();

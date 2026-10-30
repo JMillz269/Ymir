@@ -28,6 +28,7 @@ struct HostInterface {
     std::function<bool()> hasIPLROM;      // true if an IPL ROM is loaded into the emulator
     std::function<std::string()> iplName; // human readable name of the loaded IPL ROM
     std::function<std::vector<SaveSlotInfo>()> saveSlots;
+    std::function<std::filesystem::path(int)> saveStatePath; // file of a slot's save state; empty if there's none
 
     // -- Actions --
     std::function<void(const std::filesystem::path &)> launchGame;
@@ -40,6 +41,7 @@ struct HostInterface {
     std::function<void()> quitGame; // unloads the game and leaves the emulator idle
     std::function<void(int)> saveState;
     std::function<void(int)> loadState;
+    std::function<void(int)> deleteState;
     std::function<void()> takeScreenshot;
     std::function<std::string()> reloadIPLROM; // rescans the IPL ROM folder; returns an error message or "" on success
 
