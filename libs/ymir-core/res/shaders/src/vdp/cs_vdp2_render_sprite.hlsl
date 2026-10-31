@@ -7,6 +7,10 @@
 #include "util/bit_ops.hlsli"
 #include "util/data_ops.hlsli"
 
+// With SPRITE_FUSED defined, this file only provides the functions that draw the sprite layer (for the scaled up
+// composition, which draws the sprite layer of every sub-pixel itself and declares the resources with these names).
+// With HR_SPRITE defined, the sprite data is read from the scaled up framebuffers.
+#ifndef SPRITE_FUSED
 cbuffer CommonRenderParamsBuffer : register(b0) {
     CommonRenderParams g_commonParams;
 }
@@ -16,22 +20,9 @@ ByteAddressBuffer g_vram : register(t2);
 Buffer<uint4> g_cramColor : register(t3);
 StructuredBuffer<RotParamBase> g_rotParamBases : register(t4);
 ByteAddressBuffer g_spriteFB : register(t5);
-#ifdef HR_SPRITE
-ByteAddressBuffer g_spriteFBNative : register(t6); // the native framebuffers, for telling which pixels changed
-#endif
 
 RWTexture2DArray<uint4> g_layerOut : register(u1);
 RWTexture2DArray<uint> g_spriteAttrsOut : register(u2);
-
-#ifdef HR_SPRITE
-// The sprite layer of the scaled up image (one pixel for every sub-pixel), what g_layerOut and g_spriteAttrsOut hold for
-// the native image, with the transparent mesh layer from row kHRMeshLayerRow on. Sub-pixels whose sprite data (and
-// mesh data) is the native pixel's get kHRSameAsNative as their attributes.
-RWTexture2D<uint4> g_hrSpriteLayerOut : register(u3);
-RWTexture2D<uint> g_hrSpriteAttrsOut : register(u4);
-// Counts (for the log): every 64th sub-pixel that was looked at, and how many of those differ
-RWByteAddressBuffer g_hrStats : register(u5);
-static const uint kHRSameAsNative = 0x8000;
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -602,37 +593,7 @@ bool HRPixelDiffers(uint2 pos) {
 }
 #endif
 
-#ifdef HR_SPRITE
-// Internal resolution variant: one thread for every sub-pixel of the lines starting at startY (in native lines)
-[numthreads(32, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
-    const uint2 hrPos = uint2(id.x, id.y + g_commonParams.startY * hrScale);
-    const uint2 drawCoord = hrPos / hrScale;
-    g_hrSubX = hrPos.x - drawCoord.x * hrScale;
-    g_hrSubY = hrPos.y - drawCoord.y * hrScale;
-
-    const bool differs = HRPixelDiffers(drawCoord);
-    if (((hrPos.x | hrPos.y) & 7u) == 0u) {
-        uint dummy;
-        g_hrStats.InterlockedAdd(differs ? 4 : 0, 1, dummy);
-    }
-    if (!differs) {
-        g_hrSpriteAttrsOut[hrPos] = kHRSameAsNative;
-        return;
-    }
-
-    const uint2 outCoord = uint2(drawCoord.x, GetY(drawCoord.y));
-    const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, 0);
-    g_hrSpriteLayerOut[hrPos] = output.layer;
-    g_hrSpriteAttrsOut[hrPos] = SpriteAttrs(output);
-    if (transparentMeshes) {
-        const SpriteOutput meshOutput = DrawSprite(drawCoord, outCoord.xy, 1);
-        const uint2 meshPos = uint2(hrPos.x, hrPos.y + kHRMeshLayerRow);
-        g_hrSpriteLayerOut[meshPos] = meshOutput.layer;
-        g_hrSpriteAttrsOut[meshPos] = SpriteAttrs(meshOutput);
-    }
-}
-#else
+#ifndef SPRITE_FUSED
 [numthreads(32, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);

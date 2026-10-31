@@ -34,7 +34,6 @@ namespace {
     constexpr const char *kHRFBWriteShaderPath = "src/vdp/cs_vdp1_hr_fbram_write.metallib";
     constexpr const char *kHRResyncShaderPath = "src/vdp/cs_vdp1_hr_resync.metallib";
     constexpr const char *kHRDownsampleShaderPath = "src/vdp/cs_vdp1_hr_downsample.metallib";
-    constexpr const char *kHRSpriteShaderPath = "src/vdp/cs_vdp2_render_sprite_hr.metallib";
     constexpr const char *kHRComposeShaderPath = "src/vdp/cs_vdp2_compose_hr.metallib";
     constexpr const char *kHRReplicateShaderPath = "src/vdp/cs_vdp2_hr_replicate.metallib";
     /// Largest internal resolution scale
@@ -130,8 +129,6 @@ namespace {
         SpriteFBNative,
         CompositeNative,
         HrStats,
-        HrSpriteLayer,
-        HrSpriteAttrs,
     };
 
     Res ResourceForName(NSString *name) {
@@ -174,10 +171,6 @@ namespace {
             {"g_spriteFBNative", Res::SpriteFBNative},
             {"g_compositeNative", Res::CompositeNative},
             {"g_hrStats", Res::HrStats},
-            {"g_hrSpriteLayerOut", Res::HrSpriteLayer},
-            {"g_hrSpriteLayerIn", Res::HrSpriteLayer},
-            {"g_hrSpriteAttrsOut", Res::HrSpriteAttrs},
-            {"g_hrSpriteAttrsIn", Res::HrSpriteAttrs},
         };
         for (const Entry &entry : kEntries) {
             if ([name isEqualToString:[NSString stringWithUTF8String:entry.name]]) {
@@ -496,7 +489,6 @@ public:
         if (!CreatePipeline(kHRFBWriteShaderPath, m_hrFbWrite, error) ||
             !CreatePipeline(kHRResyncShaderPath, m_hrResync, error) ||
             !CreatePipeline(kHRDownsampleShaderPath, m_hrDownsample, error) ||
-            !CreatePipeline(kHRSpriteShaderPath, m_hrSprite, error) ||
             !CreatePipeline(kHRComposeShaderPath, m_hrCompose, error) ||
             !CreatePipeline(kHRReplicateShaderPath, m_hrReplicate, error)) {
             return false;
@@ -507,12 +499,7 @@ public:
         }
         m_compositeHR = Create2DTexture(MTLPixelFormatRGBA8Unorm, kMaxNormalResH * kMaxHRScale,
                                         kMaxNormalResV * kMaxHRScale, 1);
-        // (the transparent mesh layer is in the second half of the rows, see kHRMeshLayerRow in the shaders)
-        m_hrSpriteLayer = Create2DTexture(MTLPixelFormatRGBA8Uint, kMaxNormalResH * kMaxHRScale,
-                                          kMaxNormalResV * kMaxHRScale * 2, 1);
-        m_hrSpriteAttrs = Create2DTexture(MTLPixelFormatR16Uint, kMaxNormalResH * kMaxHRScale,
-                                          kMaxNormalResV * kMaxHRScale * 2, 1);
-        if (m_compositeHR == nil || m_hrSpriteLayer == nil || m_hrSpriteAttrs == nil) {
+        if (m_compositeHR == nil) {
             error = "Could not allocate the GPU textures for the VDP2 internal resolution output";
             return false;
         }
@@ -920,12 +907,11 @@ public:
     }
 
     void RenderLayers(const LayerPassParams &params) override {
-        RenderLayersPass(params, false);
+        RenderLayersPass(params);
     }
 
-    /// Draws the sprite layer, and the background layers unless drawing for the internal resolution (where the
-    /// sprite layer is drawn again from the scaled up framebuffers)
-    void RenderLayersPass(const LayerPassParams &params, bool hr) {
+    /// Draws the sprite layer and the background layers
+    void RenderLayersPass(const LayerPassParams &params) {
         if (params.numLines == 0) {
             return;
         }
@@ -947,17 +933,10 @@ public:
         EnsureCompute();
 
         // Sprite layer (and the transparent mesh layer as the second slice)
-        const Pipeline &sprite = hr ? m_hrSprite : m_sprite;
-        [m_encoder setComputePipelineState:sprite.state];
-        m_bindHR = hr;
-        Bind(sprite, staged);
-        m_bindHR = false;
-        [m_encoder dispatchThreadgroups:MTLSizeMake((params.hres + 31) / 32, params.numLines,
-                                                    !hr && params.meshLayer ? 2 : 1)
+        [m_encoder setComputePipelineState:m_sprite.state];
+        Bind(m_sprite, staged);
+        [m_encoder dispatchThreadgroups:MTLSizeMake((params.hres + 31) / 32, params.numLines, params.meshLayer ? 2 : 1)
                   threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-        if (hr) {
-            return;
-        }
 
         // Background layers
         [m_encoder setComputePipelineState:m_bgs.state];
@@ -987,9 +966,18 @@ public:
         enhancements &= ~((7u << 2) | (15u << 5));
         enhancements |= (scale - 1) << 2;
 
-        // Fill the lines of the scaled up image with the native image
-        {
-            std::memcpy(&common[enhancementsOffset], &enhancements, sizeof(enhancements));
+        // The lines composed again (planeStartY onwards) are composed in full below; the others are filled with the
+        // native image
+        std::memcpy(&common[enhancementsOffset], &enhancements, sizeof(enhancements));
+        uint32 chunkStartY;
+        std::memcpy(&chunkStartY, &common[startYOffset], sizeof(chunkStartY));
+        const uint32 chunkEndY = chunkStartY + compose.numLines;
+        const uint32 planeEndY = planeStartY + planeNumLines;
+        auto fill = [&](uint32 startY, uint32 endY) {
+            if (endY <= startY) {
+                return;
+            }
+            std::memcpy(&common[startYOffset], &startY, sizeof(startY));
             Staged staged{};
             uint64 generation;
             do {
@@ -1004,15 +992,18 @@ public:
             Bind(m_hrReplicate, staged);
             m_bindHR = false;
             [m_encoder dispatchThreadgroups:MTLSizeMake((compose.hres * scale + 7) / 8,
-                                                        (compose.numLines * scale + 7) / 8, 1)
+                                                        ((endY - startY) * scale + 7) / 8, 1)
                       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
-        }
+        };
         if (planeNumLines == 0) {
+            fill(chunkStartY, chunkEndY);
             return;
         }
+        fill(chunkStartY, planeStartY);
+        fill(planeEndY, chunkEndY);
 
-        // Draw the sprite layer of every sub-pixel of the lines (one thread each), then compose every native pixel
-        // whose sub-pixels' sprite data changed (one thread each, going through its sub-pixels)
+        // Compose every native pixel of the lines, drawing the sprite layer of its sub-pixels from the scaled up VDP1
+        // framebuffers (one thread each, going through its sub-pixels)
         std::memcpy(&common[startYOffset], &planeStartY, sizeof(planeStartY));
         Staged staged{};
         uint64 generation;
@@ -1028,15 +1019,9 @@ public:
             staged.common = Stage(m_blobCommon, common.data(), layers.commonSize);
         } while (generation != m_arenaGeneration);
 
-        Profile(8);
-        EnsureCompute();
-        m_bindHR = true;
-        [m_encoder setComputePipelineState:m_hrSprite.state];
-        Bind(m_hrSprite, staged);
-        [m_encoder dispatchThreadgroups:MTLSizeMake((layers.hres * scale + 31) / 32, planeNumLines * scale, 1)
-                  threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         Profile(9);
         EnsureCompute();
+        m_bindHR = true;
         [m_encoder setComputePipelineState:m_hrCompose.state];
         Bind(m_hrCompose, staged);
         [m_encoder dispatchThreadgroups:MTLSizeMake((compose.hres + 31) / 32, planeNumLines, 1)
@@ -1337,10 +1322,8 @@ private:
     uint64_t m_lastSH2Ns = 0;
     std::array<std::array<Pipeline, 4>, 2> m_polyDraw;
     std::array<std::array<Pipeline, 3>, 2> m_merger;
-    Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrDownsample, m_hrSprite, m_hrCompose, m_hrReplicate;
+    Pipeline m_erase, m_fbWrite, m_hrFbWrite, m_hrResync, m_hrDownsample, m_hrCompose, m_hrReplicate;
     id<MTLTexture> m_compositeHR = nil; ///< scaled up output image
-    id<MTLTexture> m_hrSpriteLayer = nil; ///< sprite layer of the scaled up image (see the internal resolution shaders)
-    id<MTLTexture> m_hrSpriteAttrs = nil;
     id<MTLBuffer> m_fbramHR = nil; ///< scaled up VDP1 framebuffers (see Vdp1EnableHR)
     id<MTLBuffer> m_hrReadback = nil;
     id<MTLBuffer> m_hrStatsBuf = nil; ///< two counters the composition of the scaled up image adds to (see its shader)
@@ -1350,7 +1333,8 @@ private:
     static constexpr uint32 kProfileSamplesPerSlot = 256; // two for each encoder
     inline static const char *const kProfileNames[kProfileKinds] = {
         "vdp1 draw",       "vdp1 merge",     "vdp1 draw (scaled up)", "vdp1 merge (scaled up)", "vdp1 erase and writes",
-        "vdp2 layers",     "vdp2 compose",   "scaled up fill",        "scaled up sprites",    "scaled up compose",
+        "vdp2 layers",     "vdp2 compose",   "scaled up fill",        "(unused)",
+        "scaled up sprites and compose",
         "vdp1 half-transparent draw (scaled up)", "vdp1 half-transparent merge (scaled up)",
     };
     id<MTLCounterSampleBuffer> m_profileBuf = nil;
@@ -1759,8 +1743,6 @@ private:
             case Res::SpriteFBNative: buffer = m_fbram; break;
             case Res::CompositeNative: texture = m_composite; break;
             case Res::HrStats: buffer = m_hrStatsBuf; break;
-            case Res::HrSpriteLayer: texture = m_hrSpriteLayer; break;
-            case Res::HrSpriteAttrs: texture = m_hrSpriteAttrs; break;
             case Res::Vdp1Spans: blob = staged.v1Spans; break;
             case Res::Vdp1PrefixSums: blob = staged.v1PrefixSums; break;
             case Res::Vdp1SpanBlockStarts: blob = staged.v1SpanBlockStarts; break;

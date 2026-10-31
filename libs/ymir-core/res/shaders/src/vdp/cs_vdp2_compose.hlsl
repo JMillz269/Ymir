@@ -1,5 +1,9 @@
 #include "vdp2_common_params.hlsli"
 #include "vdp2_compose_params.hlsli"
+#ifdef HR_COMPOSE
+    #include "vdp2_render_params_layer.hlsli"
+    #include "vdp2_render_params_rotation.hlsli"
+#endif
 
 #include "vdp2_defs.hlsli"
 
@@ -20,19 +24,33 @@ Texture2D<uint> g_colorCalcWindowIn : register(t6);
 RWTexture2D<float4> g_compositeOut : register(u1);
 
 #ifdef HR_COMPOSE
-// Internal resolution variant: the sprite layer of every sub-pixel, as the internal resolution variant of the sprite
-// layer pass leaves it (sub-pixels with the native sprite data are marked; the output has the native image there
-// already), with the transparent mesh layer from row kHRMeshLayerRow on. The other layers are the native ones.
-Texture2D<uint4> g_hrSpriteLayerIn : register(t7);
-Texture2D<uint> g_hrSpriteAttrsIn : register(t8);
-static const uint kHRSameAsNative = 0x8000;
+// Internal resolution variant: composes the scaled up image of the lines whose sprite data may have changed. It draws
+// the sprite layer (and the transparent mesh layer) of every sub-pixel itself from the scaled up VDP1 framebuffers with
+// the sprite layer pass's code, and gives the sub-pixels whose sprite data is the native pixel's the native image's
+// pixel. The other layers are the native ones.
+StructuredBuffer<LayerRenderParams> g_layerRenderParams : register(t7);
+ByteAddressBuffer g_vram : register(t8);
+Buffer<uint4> g_cramColor : register(t9);
+StructuredBuffer<RotParamBase> g_rotParamBases : register(t10);
+ByteAddressBuffer g_spriteFB : register(t11);       // the scaled up framebuffers
+ByteAddressBuffer g_spriteFBNative : register(t12); // the native framebuffers, for telling which pixels changed
+Texture2D<float4> g_compositeNative : register(t13); // the native image
+// Counts (for the log): every 64th sub-pixel that was looked at, and how many of those differ
+RWByteAddressBuffer g_hrStats : register(u2);
+
+#define SPRITE_FUSED 1
+#define HR_SPRITE 1
+namespace sprite {
+#include "cs_vdp2_render_sprite.hlsl"
+}
+
 // The sprite layer pixel of the sub-pixel being composed
 static uint4 g_hrSpriteLayer;
 static uint g_hrSpriteAttrs;
 // Everything else is the same for all sub-pixels of a native pixel, so it's read once per native pixel (see
 // HRComposeSetup) and kept here: the BG layer pixels (packed RGBA), the mesh layer pixel and attributes (replaced by
-// the sub-pixel's with transparent meshes), the color
-// calculation window, the back and line screen colors and the layer stack without the sprite layer.
+// the sub-pixel's with transparent meshes), the color calculation window, the back and line screen colors and the
+// layer stack without the sprite layer.
 static uint g_hrRBG0, g_hrNBG0RBG1, g_hrNBG1, g_hrNBG2, g_hrNBG3, g_hrMesh;
 static uint g_hrMeshSpriteAttrs;
 static uint g_hrColorCalcWindow;
@@ -628,9 +646,13 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 outCoord = uint2(drawCoord.x, GetOutputY(drawCoord.y));
 #ifdef HR_COMPOSE
     // Internal resolution variant: composes the sub-pixels of the native pixel whose sprite data isn't the native
-    // pixel's (the others have the native image already). Sub-pixels with the same sprite layer pixel come out the
-    // same, so the last few results are kept and reused.
+    // pixel's, drawing their sprite layer first, and gives the others the native image's pixel. Sub-pixels with the
+    // same sprite layer pixel come out the same, so the last few results are kept and reused.
     const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
+    // (the sprite layer is drawn for the native pixel being drawn, at the position it's shown at)
+    const uint2 spriteOutCoord = uint2(drawCoord.x, sprite::GetY(drawCoord.y));
+    float4 nativeColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    bool nativeRead = false;
     uint cacheLayer0 = 0, cacheMesh0 = 0, cacheAttrs0 = 0xFFFFFFFF, cacheColor0 = 0;
     uint cacheLayer1 = 0, cacheMesh1 = 0, cacheAttrs1 = 0xFFFFFFFF, cacheColor1 = 0;
     uint cacheLayer2 = 0, cacheMesh2 = 0, cacheAttrs2 = 0xFFFFFFFF, cacheColor2 = 0;
@@ -638,20 +660,36 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     uint cacheNext = 0;
     bool setUp = false;
     for (uint sub = 0; sub < hrScale * hrScale; ++sub) {
-        const uint2 hrPos = outCoord * hrScale + uint2(sub % hrScale, sub / hrScale);
-        const uint spriteAttrs = g_hrSpriteAttrsIn[hrPos];
-        if (spriteAttrs == kHRSameAsNative) {
+        const uint2 subPos = uint2(sub % hrScale, sub / hrScale);
+        const uint2 hrPos = outCoord * hrScale + subPos;
+        sprite::g_hrSubX = subPos.x;
+        sprite::g_hrSubY = subPos.y;
+        const bool differs = sprite::HRPixelDiffers(drawCoord);
+        const uint2 hrDrawPos = drawCoord * hrScale + subPos;
+        if (((hrDrawPos.x | hrDrawPos.y) & 7u) == 0u) {
+            uint dummy;
+            g_hrStats.InterlockedAdd(differs ? 4 : 0, 1, dummy);
+        }
+        if (!differs) {
+            if (!nativeRead) {
+                nativeColor = g_compositeNative[outCoord];
+                nativeRead = true;
+            }
+            g_compositeOut[hrPos] = nativeColor;
             continue;
         }
-        const uint4 layer = g_hrSpriteLayerIn[hrPos];
+
+        const sprite::SpriteOutput spriteOutput = sprite::DrawSprite(drawCoord, spriteOutCoord, 0);
+        const uint4 layer = spriteOutput.layer;
+        const uint spriteAttrs = sprite::SpriteAttrs(spriteOutput);
         const uint key = PackPixel(layer);
-        // The transparent mesh layer of the sub-pixel (in the rows after the sprite layer's)
+        // The transparent mesh layer of the sub-pixel
         uint meshKey = 0;
         uint meshAttrs = 0;
         if (transparentMeshes) {
-            const uint2 meshPos = uint2(hrPos.x, hrPos.y + kHRMeshLayerRow);
-            meshKey = PackPixel(g_hrSpriteLayerIn[meshPos]);
-            meshAttrs = g_hrSpriteAttrsIn[meshPos];
+            const sprite::SpriteOutput meshOutput = sprite::DrawSprite(drawCoord, spriteOutCoord, 1);
+            meshKey = PackPixel(meshOutput.layer);
+            meshAttrs = sprite::SpriteAttrs(meshOutput);
         }
         const uint attrs = spriteAttrs | (meshAttrs << 16u);
         uint color;
