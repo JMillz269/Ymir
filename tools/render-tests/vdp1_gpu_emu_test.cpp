@@ -332,6 +332,7 @@ struct EmuGpu final : metal::Gpu {
         std::memset(&(hr ? fbramHR : fbram)[o], 0, s);
     }
     uint32 clears = 0;
+    bool noop = false; // the passes do nothing (BENCH: only the CPU side of MetalVDP1 is timed)
     void UploadVRAM(uint32, const void *, uint32) override {}
     void UploadSpriteFB(uint32, const void *, uint32) override {}
     void RenderLayers(const metal::LayerPassParams &) override {}
@@ -374,6 +375,9 @@ struct EmuGpu final : metal::Gpu {
         std::memcpy(dst, fbramHR.data(), size);
     }
     void Vdp1ResyncHR(const metal::Vdp1ResyncPassParams &p) override {
+        if (noop) {
+            return;
+        }
         Select(true, p.constants);
         VDP1CommonRenderParams common;
         std::memcpy(&common, p.constants, sizeof(common));
@@ -410,6 +414,9 @@ struct EmuGpu final : metal::Gpu {
 
     // Port of cs_vdp1_hr_downsample
     void Vdp1DownsampleHR(const metal::Vdp1ResyncPassParams &p) override {
+        if (noop) {
+            return;
+        }
         Select(true, p.constants);
         VDP1CommonRenderParams common;
         std::memcpy(&common, p.constants, sizeof(common));
@@ -451,6 +458,9 @@ struct EmuGpu final : metal::Gpu {
 
     // ---- Erase ----
     void Vdp1Erase(const metal::Vdp1ErasePassParams &p) override {
+        if (noop) {
+            return;
+        }
         VDP1CommonRenderParams common;
         VDP1EraseParams erase;
         std::memcpy(&common, p.constants, sizeof(common));
@@ -538,6 +548,9 @@ struct EmuGpu final : metal::Gpu {
     }
 
     void Vdp1WriteFB(const metal::Vdp1FBWritePassParams &p) override {
+        if (noop) {
+            return;
+        }
         VDP1CommonRenderParams common;
         std::memcpy(&common, p.constants, sizeof(common));
         uint32 dp;
@@ -1153,6 +1166,9 @@ struct EmuGpu final : metal::Gpu {
     }
 
     void Vdp1Draw(const metal::Vdp1DrawParams &p) override {
+        if (noop) {
+            return;
+        }
         if (const char *dir = std::getenv("CAPTURE")) {
             // Writes the inputs of the polygon drawing dispatch (and the VDP1 VRAM) for running the real shaders on
             // them elsewhere: a header of 32-bit values, then the blobs in the order of the header's sizes
@@ -1468,6 +1484,65 @@ int main(int argc, char **argv) {
             return 0;
         }
         vdp1.ResyncFromCPU();
+        if (const char *bench = std::getenv("BENCH")) {
+            // Times the CPU side of MetalVDP1 (preparing the spans) for the command list, drawn BENCH times with
+            // passes that do nothing
+            gpu.noop = true;
+            const int frames = std::max(1, std::atoi(bench));
+            uint64 cmdsPerFrame = 0;
+            (void)vdp1.TakeStats();
+            const auto start = std::chrono::steady_clock::now();
+            for (int frame = 0; frame < frames; ++frame) {
+                vdp1.EraseFramebuffer(0);
+                vdp1.BeginFrame();
+                uint32 addr = 0, retAddr = 0;
+                bool called = false;
+                uint32 cmds = 0;
+                for (; cmds < 20000; ++cmds) {
+                    const VDP1Command::Control ctrl{.u16 = util::ReadBE<uint16>(&stateGPU->mem1.VRAM[addr])};
+                    if (ctrl.end) {
+                        break;
+                    }
+                    if (!ctrl.skip) {
+                        vdp1.ExecuteCommand(addr, ctrl);
+                    }
+                    const uint32 link = uint32(util::ReadBE<uint16>(&stateGPU->mem1.VRAM[addr + 2])) << 3u;
+                    switch (ctrl.jumpMode) {
+                    case VDP1Command::JumpType::Next: addr += 0x20; break;
+                    case VDP1Command::JumpType::Assign: addr = link; break;
+                    case VDP1Command::JumpType::Call:
+                        if (!called) {
+                            retAddr = addr + 0x20;
+                            called = true;
+                        }
+                        addr = link;
+                        break;
+                    case VDP1Command::JumpType::Return:
+                        if (called) {
+                            addr = retAddr;
+                            called = false;
+                        } else {
+                            addr += 0x20;
+                        }
+                        break;
+                    }
+                    addr &= 0x7FFFF;
+                }
+                cmdsPerFrame = cmds;
+                vdp1.FlushWork();
+                vdp1.SwapFramebuffer();
+                stateGPU->fbIndex.Flip();
+            }
+            const double us =
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / frames;
+            const MetalVDP1::Stats st = vdp1.TakeStats();
+            std::printf("bench: scale %u%s: %.1f us per frame for %llu commands; per frame %.0f native spans (%.0f "
+                        "pixels), %.0f scaled up spans (%.0f pixels)\n",
+                        scale, std::getenv("SKIPNATIVE") ? " skip native" : "", us,
+                        (unsigned long long)cmdsPerFrame, st.nativeSpans / double(frames),
+                        st.nativePixels / double(frames), st.hrSpans / double(frames), st.hrPixels / double(frames));
+            return 0;
+        }
         // Two erase + swap cycles so that the scaled up framebuffers are in line, then the frame
         for (int frame = 0; frame < 3; frame++) {
             sw.VDP1EraseFramebuffer(0);
@@ -1780,6 +1855,23 @@ int main(int argc, char **argv) {
     }
     int badFrames = 0;
     for (int frame = 0; frame < 4; frame++) {
+        if (frame == 2) {
+            // The CPU puts end codes into some rows of the textures drawn before (the GPU path keeps where the rows
+            // end across frames, which has to follow such writes)
+            auto texWrite16 = [&](uint32 addr, uint16 v) {
+                util::WriteBE<uint16>(&stateSW->mem1.VRAM[addr], v);
+                util::WriteBE<uint16>(&stateGPU->mem1.VRAM[addr], v);
+                sw.VDP1WriteVRAM(addr, v);
+                vdp1.WriteVRAM(addr, v, 2);
+            };
+            for (uint32 y : {3u, 9u}) {
+                texWrite16(0x20000 + (y * 16 + 5) * 2, 0x7FFF);
+                texWrite16(0x20000 + (y * 16 + 11) * 2, 0x7FFF);
+            }
+            for (uint32 y : {2u, 7u}) {
+                texWrite16(0x21000 + y * 8 + 2, 0xFFF0);
+            }
+        }
         // (the erase of the third frame runs out of time)
         const uint64 eraseCycles = frame == 2 ? 20000 : 0;
         sw.VDP1EraseFramebuffer(eraseCycles);

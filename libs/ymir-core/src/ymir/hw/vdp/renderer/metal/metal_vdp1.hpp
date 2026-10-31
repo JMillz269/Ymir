@@ -27,6 +27,7 @@ filled from it when it's needed. The transparent mesh framebuffers are scaled up
 #include <ymir/util/dirty_bitmap.hpp>
 
 #include <algorithm>
+#include <tuple>
 #include <array>
 #include <bit>
 #include <cassert>
@@ -54,6 +55,8 @@ public:
     /// @brief Brings the GPU side in line with the CPU side: VRAM, framebuffer memory and registers. Drops everything
     /// that was waiting to be drawn.
     void ResyncFromCPU() {
+        // (all of VRAM may have changed)
+        std::fill(m_endCodeCache.begin(), m_endCodeCache.end(), EndCodeEntry{});
         m_batch.cpuSpanCount = 0;
         m_batch.cpuCmdCount = 0;
         m_batch.cpuSpanPrefixSums[0] = 0;
@@ -117,6 +120,7 @@ public:
             util::WriteBE<uint16>(&vramShadow[address & ~1u], value);
         }
         vramDirty.Set(address >> kVRAMDirtyBitmapChunkSizeShift);
+        ++m_vramChunkGen[address >> kEndCodeChunkShift];
     }
 
     void WriteFB(uint32 address, uint32 size) {
@@ -367,6 +371,24 @@ private:
     std::array<bool, 2> m_nativeStale{};
     /// @brief Whether each framebuffer index has mesh sprites in its transparent mesh framebuffers (see MeshInUse).
     std::array<bool, 2> m_meshInUse{};
+
+    /// @brief Where drawing stops on rows of textures (the end codes), kept across commands and frames: an entry is
+    /// valid while the VRAM chunks its row lies in haven't been written since (each has a write counter).
+    struct EndCodeEntry {
+        uint64 key = ~0ull; ///< row address, texture width, color mode and horizontal flip
+        uint32 gen0 = 0;
+        uint32 gen1 = 0;
+        uint32 index = 0;
+    };
+    /// @brief The system clipping area the spans being added are clipped to (that of the last command added, in its
+    /// pass's coordinates).
+    sint32 m_spanSysClipH = 0;
+    sint32 m_spanSysClipV = 0;
+
+    static constexpr uint32 kEndCodeChunkShift = 10; // 1 KiB chunks
+    static constexpr uint32 kEndCodeCacheBits = 13;  // 8192 entries
+    std::array<uint32, (kVDP1VRAMSize >> kEndCodeChunkShift)> m_vramChunkGen{};
+    std::vector<EndCodeEntry> m_endCodeCache = std::vector<EndCodeEntry>(size_t(1) << kEndCodeCacheBits);
     /// @brief Lines (native) of each scaled up framebuffer that drawing may have made differ from the native one
     /// scaled up (none if last < first)
     std::array<sint32, 2> m_hrDirtyFirst{INT32_MAX, INT32_MAX};
@@ -1157,6 +1179,10 @@ private:
             cmdParams.sysClip.v = (state.sysClipV << doubleV) | doubleV;
         }
 
+        // (the spans of the command are clipped to the same area)
+        m_spanSysClipH = static_cast<sint32>(cmdParams.sysClip.h);
+        m_spanSysClipV = static_cast<sint32>(cmdParams.sysClip.v);
+
         cmdParams.cmdcolr = data.color;
         cmdParams.cmdpmod = data.mode.u16;
         if (textured) {
@@ -1175,26 +1201,32 @@ private:
         if (coord0.y() < 0 && coord1.y() < 0) {
             return false;
         }
-        const sint32 doubleV = m_doubleV ? 1 : 0;
-        const sint32 sysClipH =
-            m_hrPass ? (static_cast<sint32>(vdpState.state1.sysClipH) + 1) * static_cast<sint32>(m_hrScale) - 1
-                     : vdpState.state1.sysClipH;
+        // (the system clipping area of the command's pass, see VDP1AddCommand)
+        const sint32 sysClipH = m_spanSysClipH;
         if (coord0.x() > sysClipH && coord1.x() > sysClipH) {
             return false;
         }
-        const sint32 sysClipV =
-            m_hrPass ? (static_cast<sint32>(vdpState.state1.sysClipV) + 1) * static_cast<sint32>(m_hrScale) - 1
-                     : (vdpState.state1.sysClipV << doubleV) | doubleV;
+        const sint32 sysClipV = m_spanSysClipV;
         if (coord0.y() > sysClipV && coord1.y() > sysClipV) {
             return false;
         }
 
-        // Determine span length
-        const auto [skip, length] = WithStepperBits([&]<sint32 bits>() {
-            LineStepper<bits> line{coord0, coord1};
-            const uint32 lineSkip = line.SystemClip(sysClipH, sysClipV);
-            return std::pair<uint32, uint32>{lineSkip, line.Length()};
-        });
+        // Determine span length. A span with both ends inside the system clipping area is never clipped (see
+        // LineStepper::SystemClip): it's as long as its major axis, which saves setting up a stepper for most spans.
+        uint32 skip = 0;
+        uint32 length;
+        if (coord0.x() >= 0 && coord1.x() >= 0 && coord0.y() >= 0 && coord1.y() >= 0 && coord0.x() <= sysClipH &&
+            coord1.x() <= sysClipH && coord0.y() <= sysClipV && coord1.y() <= sysClipV) {
+            length = static_cast<uint32>(
+                         std::max(std::abs(coord1.x() - coord0.x()), std::abs(coord1.y() - coord0.y()))) +
+                     1u;
+        } else {
+            std::tie(skip, length) = WithStepperBits([&]<sint32 bits>() {
+                LineStepper<bits> line{coord0, coord1};
+                const uint32 lineSkip = line.SystemClip(sysClipH, sysClipV);
+                return std::pair<uint32, uint32>{lineSkip, line.Length()};
+            });
+        }
 
         if (length == 0) {
             // Entire line was clipped
@@ -1346,70 +1378,65 @@ private:
             vramTexUsageTracker.MarkRange(static_cast<uint32>(ActiveBatch().cpuCmdParams[data.cmdIndex].cmdcolr) * 8u, 32);
         }
 
-        // TODO: cache this
-        auto findEndCodeIndex = [&](uint32 v) -> uint32 {
-            if (data.mode.endCodeDisable) {
-                return charSizeH;
-            }
-
+        // The texel of the row where drawing stops: the second end code (the row is drawn whole if it has fewer). One
+        // loop per color mode, reading VRAM like ReadVRAM does (wrapping around at 512 KiB, 16-bit reads aligned).
+        auto scanEndCodes = [&](uint32 v) -> uint32 {
+            const uint8 *vram = vdpState.mem1.VRAM.data();
+            const uint32 base = data.charAddr;
+            const uint32 rowStart = v * charSizeH;
+            const bool flipH = control.flipH;
             int endCodeCount = 0;
-
             for (uint32 i = 0; i < charSizeH; ++i) {
-                const uint32 u = control.flipH ? charSizeH - 1 - i : i;
-
-                const uint32 charIndex = u + v * charSizeH;
-
-                auto processEndCode = [&](bool endCode) -> bool {
-                    if (endCode && !data.mode.endCodeDisable) {
-                        ++endCodeCount;
-                    }
-                    return endCodeCount >= 2;
-                };
-
-                // Read next texel
-                uint32 color;
+                const uint32 u = flipH ? charSizeH - 1 - i : i;
+                const uint32 charIndex = u + rowStart;
+                bool endCode;
                 switch (data.mode.colorMode) {
-                case 0: // 4 bpp, 16 colors, bank mode
-                    color = vdpState.mem1.ReadVRAM<uint8>(data.charAddr + (charIndex >> 1));
-                    color = (color >> ((~u & 1) * 4)) & 0xF;
-                    if (processEndCode(color == 0xF)) {
-                        return u;
-                    }
+                case 0: [[fallthrough]]; // 4 bpp, 16 colors, bank mode
+                case 1:                  // 4 bpp, 16 colors, lookup table mode
+                    endCode = ((vram[(base + (charIndex >> 1)) & 0x7FFFF] >> ((~u & 1) * 4)) & 0xF) == 0xF;
                     break;
-                case 1: // 4 bpp, 16 colors, lookup table mode
-                    color = vdpState.mem1.ReadVRAM<uint8>(data.charAddr + (charIndex >> 1));
-                    color = (color >> ((~u & 1) * 4)) & 0xF;
-                    if (processEndCode(color == 0xF)) {
-                        return u;
-                    }
-                    break;
-                case 2: // 8 bpp, 64 colors, bank mode
-                    color = vdpState.mem1.ReadVRAM<uint8>(data.charAddr + charIndex);
-                    if (processEndCode(color == 0xFF)) {
-                        return u;
-                    }
-                    break;
-                case 3: // 8 bpp, 128 colors, bank mode
-                    color = vdpState.mem1.ReadVRAM<uint8>(data.charAddr + charIndex);
-                    if (processEndCode(color == 0xFF)) {
-                        return u;
-                    }
-                    break;
-                case 4: // 8 bpp, 256 colors, bank mode
-                    color = vdpState.mem1.ReadVRAM<uint8>(data.charAddr + charIndex);
-                    if (processEndCode(color == 0xFF)) {
-                        return u;
-                    }
+                case 2: [[fallthrough]]; // 8 bpp, 64 colors, bank mode
+                case 3: [[fallthrough]]; // 8 bpp, 128 colors, bank mode
+                case 4:                  // 8 bpp, 256 colors, bank mode
+                    endCode = vram[(base + charIndex) & 0x7FFFF] == 0xFF;
                     break;
                 case 5: // 16 bpp, 32768 colors, RGB mode
-                    color = vdpState.mem1.ReadVRAM<uint16>(data.charAddr + charIndex * sizeof(uint16));
-                    if (processEndCode(color == 0x7FFF)) {
-                        return u;
-                    }
+                {
+                    const uint32 address = (base + charIndex * 2u) & 0x7FFFE;
+                    endCode = ((vram[address] << 8u) | vram[address + 1]) == 0x7FFF;
                     break;
                 }
-            };
+                default: return charSizeH;
+                }
+                if (endCode && ++endCodeCount >= 2) {
+                    return u;
+                }
+            }
             return charSizeH;
+        };
+        // The same rows of the same textures are drawn frame after frame, so the results are kept, along with the
+        // write counters of the VRAM chunks the row lies in; a row is scanned again once either chunk has been written
+        auto findEndCodeIndex = [&](uint32 v) -> uint32 {
+            if (data.mode.endCodeDisable || data.mode.colorMode > 5) {
+                return charSizeH;
+            }
+            const uint32 colorMode = data.mode.colorMode;
+            const uint32 halfBytesPerTexel = colorMode <= 1 ? 1u : colorMode <= 4 ? 2u : 4u;
+            const uint32 rowAddress = (data.charAddr + v * charSizeH * halfBytesPerTexel / 2u) & 0x7FFFF;
+            const uint32 rowBytes = charSizeH * halfBytesPerTexel / 2u;
+            const uint32 chunk0 = rowAddress >> kEndCodeChunkShift;
+            const uint32 chunk1 = ((rowAddress + std::max(rowBytes, 1u) - 1u) & 0x7FFFF) >> kEndCodeChunkShift;
+            const uint64 key = static_cast<uint64>(rowAddress) | (static_cast<uint64>(charSizeH) << 19u) |
+                               (static_cast<uint64>(colorMode) << 32u) |
+                               (static_cast<uint64>(control.flipH ? 1u : 0u) << 35u);
+            EndCodeEntry &entry =
+                m_endCodeCache[(key * 0x9E3779B97F4A7C15ull) >> (64u - kEndCodeCacheBits)];
+            if (entry.key == key && entry.gen0 == m_vramChunkGen[chunk0] && entry.gen1 == m_vramChunkGen[chunk1]) {
+                return entry.index;
+            }
+            const uint32 index = scanEndCodes(v);
+            entry = {key, m_vramChunkGen[chunk0], m_vramChunkGen[chunk1], index};
+            return index;
         };
 
         // Interpolate linearly over edges A-D and B-C
