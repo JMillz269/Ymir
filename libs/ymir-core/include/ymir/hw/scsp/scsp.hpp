@@ -27,6 +27,19 @@
 #include <ymir/hw/m68k/m68k_defs.hpp>
 
 #include <ymir/util/data_ops.hpp>
+
+#if defined(__APPLE__)
+    #include <TargetConditionals.h>
+#endif
+
+// Batch the threaded SCSP's wake-ups and let it sleep between batches instead of spinning (see kWakeBatchSteps)
+#ifndef YMIR_SCSP_BATCHED_WAKES
+    #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+        #define YMIR_SCSP_BATCHED_WAKES 1
+    #else
+        #define YMIR_SCSP_BATCHED_WAKES 0
+    #endif
+#endif
 #include <ymir/util/dev_log.hpp>
 #include <ymir/util/event.hpp>
 #include <ymir/util/inline.hpp>
@@ -1365,6 +1378,16 @@ private:
     alignas(64) std::atomic<uint32> m_wakeSeq = 0; // sequence
     std::atomic<uint64> m_targetSlotStep = 0;
     uint64 m_eventsEnqueued = 0;
+    uint64 m_lastWakeTargetStep = 0; // m_targetSlotStep at the last wake for slot steps
+
+    // How many slot steps (32 per sample) the emulator thread queues before waking the SCSP thread.
+    // On phones one wake per sample (735 per frame) kept the SCSP thread spinning a whole core; batching 16 samples
+    // (about 0.36 ms of audio) lets it sleep between batches. Reads from the SCSP still wait for it to catch up fully.
+#if YMIR_SCSP_BATCHED_WAKES
+    static constexpr uint64 kWakeBatchSteps = 32u * 16u;
+#else
+    static constexpr uint64 kWakeBatchSteps = 1u;
+#endif
 
     // Written by the SCSP thread and read by the emulator thread
     alignas(64) std::atomic<uint64> m_eventsProcessed = 0;
@@ -1390,6 +1413,9 @@ private:
     // Signals the SCSP thread that there is new work (events or slot steps).
     // Must be called after the work has been published.
     void WakeSCSPThread();
+
+    // Wakes the SCSP thread for new slot steps once enough of them are queued (see kWakeBatchSteps).
+    void WakeSCSPThreadForSteps(uint64 targetStep);
 
     // Suspends the thread until new work arrives.
     // seq is the work sequence number snapshotted at the start of a loop iteration.

@@ -143,6 +143,7 @@ void SCSP::Reset(bool hard) {
     }
     m_eventsEnqueued = 0;
     m_targetSlotStep.store(0, std::memory_order_release);
+    m_lastWakeTargetStep = 0;
     EnqueueEvent(ThreadEvent::Reset());
 
     m_scspInterruptLevel = false;
@@ -619,6 +620,7 @@ void SCSP::LoadState(const savestate::SCSPSaveState &state) {
     }
     m_eventsEnqueued = 0;
     m_targetSlotStep.store(0, std::memory_order_release);
+    m_lastWakeTargetStep = 0;
     EnqueueEvent(ThreadEvent::Reset());
 
     m_scspInterruptLevel = (m_scuPendingInterrupts & m_scuEnabledInterrupts) != 0;
@@ -1490,6 +1492,11 @@ void SCSP::WakeSCSPThread() {
 }
 
 void SCSP::WaitForSCSPWork(uint32 seq) {
+#if YMIR_SCSP_BATCHED_WAKES
+    // Work arrives in batches (see kWakeBatchSteps), far apart compared to the cost of sleeping, so sleep right away.
+    // Spinning with yield() here kept a whole core busy on phones.
+    m_wakeSeq.wait(seq, std::memory_order_acquire);
+#else
     // Spin-wait to avoid the expensive wait if possible
     static constexpr int kSpinCount = 1200;
     for (int i = 0; i < kSpinCount; ++i) {
@@ -1499,6 +1506,14 @@ void SCSP::WaitForSCSPWork(uint32 seq) {
         std::this_thread::yield();
     }
     m_wakeSeq.wait(seq, std::memory_order_acquire);
+#endif
+}
+
+void SCSP::WakeSCSPThreadForSteps(uint64 targetStep) {
+    if (targetStep - m_lastWakeTargetStep >= kWakeBatchSteps) {
+        m_lastWakeTargetStep = targetStep;
+        WakeSCSPThread();
+    }
 }
 
 void SCSP::SyncSCSPThread() {
@@ -1513,6 +1528,14 @@ void SCSP::SyncSCSPThread() {
     }
 
     target = m_currSlotStep.load(std::memory_order_acquire);
+    if constexpr (kWakeBatchSteps > 1) {
+        // Slot steps may not have been signalled yet when wakes are batched
+        const uint64 tgtStep = m_targetSlotStep.load(std::memory_order_acquire);
+        if (target != tgtStep && m_lastWakeTargetStep != tgtStep) {
+            m_lastWakeTargetStep = tgtStep;
+            WakeSCSPThread();
+        }
+    }
     while (target != m_targetSlotStep.load(std::memory_order_acquire)) {
         m_currSlotStep.wait(target, std::memory_order_acquire);
         target = m_currSlotStep.load(std::memory_order_acquire);
@@ -1595,15 +1618,14 @@ template void SCSP::WriteRegBus<uint8>(uint32 address, uint8 value);
 template void SCSP::WriteRegBus<uint16>(uint32 address, uint16 value);
 
 void SCSP::TickSampleThreaded() {
-    m_targetSlotStep.fetch_add(32u, std::memory_order_acq_rel);
-    WakeSCSPThread();
+    WakeSCSPThreadForSteps(m_targetSlotStep.fetch_add(32u, std::memory_order_acq_rel) + 32u);
     PollSCSPInterrupts();
 }
 
 template <uint32 stepShift>
 void SCSP::TickSlotsThreaded() {
-    m_targetSlotStep.fetch_add(1u << stepShift, std::memory_order_acq_rel);
-    WakeSCSPThread();
+    WakeSCSPThreadForSteps(m_targetSlotStep.fetch_add(1u << stepShift, std::memory_order_acq_rel) +
+                           (1u << stepShift));
     PollSCSPInterrupts();
 }
 
