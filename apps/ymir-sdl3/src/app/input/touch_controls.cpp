@@ -1,11 +1,17 @@
 #include "touch_controls.hpp"
 #include "touch_controls_atlas.hpp"
 
+#include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_touch.h>
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <ctime>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 
 namespace app::input {
 
@@ -340,7 +346,60 @@ void TouchControls::MarkDirty() {
 
 void TouchControls::SetStoragePath(std::filesystem::path path) {
     m_storagePath = std::move(path);
+    m_logPath = m_storagePath.parent_path() / "touch_log.txt";
     Load();
+}
+
+void TouchControls::CancelTouches() {
+    if (m_fingers.empty()) {
+        return;
+    }
+    m_fingers.clear();
+    ReleaseAll();
+}
+
+void TouchControls::DropEndedFingers() {
+    if (m_fingers.empty()) {
+        return;
+    }
+    // The fingers SDL still has on the screen, over all touch devices
+    int numDevices = 0;
+    SDL_TouchID *devices = SDL_GetTouchDevices(&numDevices);
+    if (devices == nullptr) {
+        return;
+    }
+    std::unordered_set<SDL_FingerID> active;
+    for (int d = 0; d < numDevices; ++d) {
+        int numFingers = 0;
+        SDL_Finger **fingers = SDL_GetTouchFingers(devices[d], &numFingers);
+        if (fingers != nullptr) {
+            for (int i = 0; i < numFingers; ++i) {
+                active.insert(fingers[i]->id);
+            }
+            SDL_free(fingers);
+        }
+    }
+    SDL_free(devices);
+
+    // A finger whose release never arrived would keep its control pressed: drop it, and note it (to tell how often
+    // that happens)
+    for (auto it = m_fingers.begin(); it != m_fingers.end();) {
+        if (active.contains(it->first)) {
+            ++it;
+            continue;
+        }
+        if (!m_logPath.empty()) {
+            std::ofstream log{m_logPath, std::ios::app};
+            if (log) {
+                const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                char stamp[32]{};
+                std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+                log << stamp << ": a finger at (" << static_cast<int>(it->second.x) << ", "
+                    << static_cast<int>(it->second.y) << ") was still held although the touch had ended; released it\n";
+            }
+        }
+        it = m_fingers.erase(it);
+    }
 }
 
 void TouchControls::Load() {
@@ -438,6 +497,7 @@ void TouchControls::Update(SDL_Window *window, ImVec2 displaySize) {
     }
 
     ComputeLayout(window, displaySize);
+    DropEndedFingers();
 
     std::array<bool, _Count> state{};
     for (const auto &[id, pos] : m_fingers) {

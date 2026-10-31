@@ -18,7 +18,10 @@
 #include <ctime>
 #include <pthread.h>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+#include <mach/mach.h>
 
 namespace ymir::vdp::metal {
 
@@ -1318,6 +1321,8 @@ private:
     double m_lastProcessCpuMs = 0.0;
     // The frontend's wait counters when the frame times were last logged (they only ever grow)
     uint64_t m_lastEmuWaitNs = 0;
+    // The CPU time of each thread of the app when the frame times were last logged (by thread ID)
+    std::unordered_map<uint64_t, double> m_threadTotalsMs;
     uint64_t m_lastGuiWaitNs = 0;
     uint64_t m_lastSH2Ns = 0;
     std::array<std::array<Pipeline, 4>, 2> m_polyDraw;
@@ -1499,11 +1504,62 @@ private:
     }
 
     /// Logs the frame times since the last report and starts over
+    /// Logs the threads of the app that used the most CPU time since the last call, per frame
+    void LogThreadTimes(uint32 frames) {
+        thread_act_array_t threads = nullptr;
+        mach_msg_type_number_t numThreads = 0;
+        if (task_threads(mach_task_self(), &threads, &numThreads) != KERN_SUCCESS) {
+            return;
+        }
+        struct Usage {
+            double ms;
+            std::string name;
+        };
+        std::vector<Usage> usage;
+        std::unordered_map<uint64_t, double> totals;
+        for (mach_msg_type_number_t i = 0; i < numThreads; ++i) {
+            thread_identifier_info_data_t ident{};
+            mach_msg_type_number_t identCount = THREAD_IDENTIFIER_INFO_COUNT;
+            thread_basic_info_data_t basic{};
+            mach_msg_type_number_t basicCount = THREAD_BASIC_INFO_COUNT;
+            if (thread_info(threads[i], THREAD_IDENTIFIER_INFO, reinterpret_cast<thread_info_t>(&ident),
+                            &identCount) == KERN_SUCCESS &&
+                thread_info(threads[i], THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&basic), &basicCount) ==
+                    KERN_SUCCESS) {
+                const double totalMs = (basic.user_time.seconds + basic.system_time.seconds) * 1000.0 +
+                                       (basic.user_time.microseconds + basic.system_time.microseconds) / 1000.0;
+                totals[ident.thread_id] = totalMs;
+                const auto prev = m_threadTotalsMs.find(ident.thread_id);
+                const double ms = totalMs - (prev != m_threadTotalsMs.end() ? prev->second : 0.0);
+                char name[64] = "";
+                if (pthread_t pt = pthread_from_mach_thread_np(threads[i]); pt != nullptr) {
+                    pthread_getname_np(pt, name, sizeof(name));
+                }
+                usage.push_back({ms, name[0] != '\0' ? name : "thread " + std::to_string(ident.thread_id)});
+            }
+            mach_port_deallocate(mach_task_self(), threads[i]);
+        }
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), numThreads * sizeof(thread_act_t));
+        const bool first = m_threadTotalsMs.empty();
+        m_threadTotalsMs = std::move(totals);
+        if (first || frames == 0) {
+            return;
+        }
+        std::sort(usage.begin(), usage.end(), [](const Usage &a, const Usage &b) { return a.ms > b.ms; });
+        char text[512];
+        int n = std::snprintf(text, sizeof(text), "last %u frames, CPU time per frame by thread:", frames);
+        for (size_t i = 0; i < usage.size() && i < 6 && n > 0 && n < static_cast<int>(sizeof(text)); ++i) {
+            n += std::snprintf(text + n, sizeof(text) - n, " %s %.2f;", usage[i].name.c_str(), usage[i].ms / frames);
+        }
+        LogMessage("%s", text);
+    }
+
     void LogFrameTimes() {
         FrameTimes &t = m_frameTimes;
         if (t.frames == 0) {
             return;
         }
+        LogThreadTimes(t.frames);
         NSProcessInfo *info = [NSProcessInfo processInfo];
         static const char *const kThermalNames[] = {"nominal", "fair", "serious", "critical"};
         const int thermal = std::clamp(std::max(t.worstThermal, static_cast<int>(info.thermalState)), 0, 3);

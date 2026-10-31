@@ -1944,6 +1944,9 @@ void App::RunEmulator() {
                     }
                 }
                 m_mouseCaptureService.ReleaseAllMice();
+#if YMIR_PLATFORM_IOS
+                touchControls.CancelTouches();
+#endif
                 break;
 
             case SDL_EVENT_DROP_FILE: //
@@ -1980,6 +1983,8 @@ void App::RunEmulator() {
         // A native screen covers the emulator (which is paused): skip rendering and let UIKit have the main thread so
         // that scrolling and animations stay smooth
         if (util::ios::IsNativeUIVisible()) {
+            // The native screen gets the touches now, so the fingers on the controls are as good as lifted
+            touchControls.CancelTouches();
             // The emulator thread may be waiting for the GUI thread to hand it the next frame. Release it, otherwise it
             // never gets to process the pause event and the audio keeps repeating the last buffer.
             screen.frameRequestEvent.Set();

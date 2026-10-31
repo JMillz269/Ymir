@@ -103,6 +103,10 @@ public:
     /// @brief Recomputes the pressed controls from active fingers and emits input primitives.
     void Update(SDL_Window *window, ImVec2 displaySize);
 
+    /// @brief Forgets the fingers on the screen and releases every control, for when something else takes the touches
+    /// (a native screen over the emulator, the app going to the background).
+    void CancelTouches();
+
     /// @brief Draws the overlay on the foreground draw list.
     /// @param[in] atlas texture with the controller artwork; if not provided, plain shapes are drawn instead
     void Draw(ImDrawList *drawList, std::optional<ImTextureID> atlas = std::nullopt) const;
@@ -177,6 +181,7 @@ private:
     ImVec2 ElementCenter(int element) const;
     void ApplyState(const std::array<bool, _Count> &state);
     void ReleaseAll();
+    void DropEndedFingers();
 
     InputContext &m_inputContext;
     bool m_enabled = true;
@@ -188,6 +193,7 @@ private:
 
     // Customization
     std::filesystem::path m_storagePath;
+    std::filesystem::path m_logPath; ///< where fingers SDL no longer reports are noted (next to the layout)
     bool m_editing = false;
     bool m_snapToGrid = false;
     float m_globalScale = 1.0f;
